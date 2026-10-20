@@ -1,9 +1,8 @@
-Python
-import streamlit as st
-import anthropic
-import pandas as pd
 import io
 import re
+import anthropic
+import pandas as pd
+import streamlit as st
 
 st.set_page_config(page_title="TOC Finanšu Diagnostika", layout="wide", page_icon="📊")
 
@@ -51,7 +50,7 @@ file_text = df_raw.to_csv(index=False)
 else:
 df_raw = pd.read_excel(uploaded_file)
 file_text = df_raw.to_csv(index=False)
-            clean_key = ANTHROPIC_API_KEY.strip().strip('"').strip("'")
+            clean_key = str(ANTHROPIC_API_KEY).strip().strip('"').strip("'")
             client = anthropic.Anthropic(api_key=clean_key)
             
             response = client.messages.create(
