@@ -1,3 +1,4 @@
+Python
 import streamlit as st
 import anthropic
 import pandas as pd
@@ -6,7 +7,7 @@ import re
 
 st.set_page_config(page_title="TOC Finanšu Diagnostika", layout="wide", page_icon="📊")
 
-# Konfigurē API atslēgu (to ievieto Streamlit Secrets vai vides mainīgajā)
+# Konfigurē API atslēgu no Streamlit Secrets
 ANTHROPIC_API_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
 
 st.title("📊 Finanšu diagnostika pēc TOC principiem")
@@ -32,27 +33,65 @@ Tavs uzdevums ir nolasīt pievienoto PZA datu saturu un veikt precīzu aprēķin
 ATBILDES FORMĀTS:
 1. Vispirms ievieto pilnu aprēķinu TSV tabulā iekš koda bloka:
 ```tsv
-[Rādītājs / Kontu grupa]	01.XXXX	%	02.XXXX	%	...	YTD	%	AVG YTD	%
+[Rādītājs / Kontu grupa]\t01.XXXX\t%\t02.XXXX\t%\t...\tYTD\t%\tAVG YTD\t%
 ...
-```
-2. Tūlīt zem tabulas sniedz profesionālu, ļoti konkrētu vadības analīzi (3 daļās):
-   - KAS IR LABS UN STABILS (T%, stabilākie periodi)
-   - BĪSTAMIE SIGNĀLI (mēneši ar PR < 1.0, OE lēcieni, algu atdeves kritums)
-   - VADĪBAS FOKUSS UN IETEIKUMI (kam nekavējoties pievērst uzmanību)
+Tūlīt zem tabulas sniedz profesionālu, ļoti konkrētu vadības analīzi (3 daļās):
+KAS IR LABS UN STABILS (T%, stabilākie periodi)
+BĪSTAMIE SIGNĀLI (mēneši ar PR < 1.0, OE lēcieni, algu atdeves kritums)
+VADĪBAS FOKUSS UN IETEIKUMI (kam nekavējoties pievērst uzmanību)
 """
-
 if uploaded_file is not None:
-    if st.button("Veikt diagnostiku", type="primary"):
-        with st.spinner("Pārbauda modeļus un atslēgu..."):
-            try:
-                clean_key = ANTHROPIC_API_KEY.strip().strip('"').strip("'")
-                st.write(f"Atslēgas sākums: `{clean_key[:14]}...` (Garums: {len(clean_key)})")
+if st.button("Veikt diagnostiku", type="primary"):
+with st.spinner("Apstrādā datus un ģenerē TOC analīzi..."):
+try:
+# Nolasām augšupielādētā faila teksta saturu
+if uploaded_file.name.endswith(".csv"):
+df_raw = pd.read_csv(uploaded_file)
+file_text = df_raw.to_csv(index=False)
+else:
+df_raw = pd.read_excel(uploaded_file)
+file_text = df_raw.to_csv(index=False)
+            clean_key = ANTHROPIC_API_KEY.strip().strip('"').strip("'")
+            client = anthropic.Anthropic(api_key=clean_key)
+            
+            response = client.messages.create(
+                model="claude-sonnet-5-5",
+                max_tokens=4000,
+                system=TOC_SYSTEM_PROMPT,
+                messages=[
+                    {"role": "user", "content": f"Lūk, PZA dati analīzei:\n\n{file_text}"}
+                ]
+            )
+            
+            output_text = response.content[0].text
+            
+            # Izgūstam TSV tabulu un analīzes tekstu
+            tsv_match = re.search(r"```tsv\n(.*?)```", output_text, re.DOTALL)
+            
+            st.success("Diagnostika veiksmīgi pabeigta!")
+            
+            if tsv_match:
+                tsv_data = tsv_match.group(1).strip()
+                df_res = pd.read_csv(io.StringIO(tsv_data), sep="\t")
                 
-                client = anthropic.Anthropic(api_key=clean_key)
-                models_resp = client.models.list()
+                # Sagatavojam Excel failu lejupielādei
+                excel_buffer = io.BytesIO()
+                with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+                    df_res.to_excel(writer, index=False, sheet_name="TOC Diagnostika")
                 
-                available = [m.id for m in models_resp.data]
-                st.success("Savienojums veiksmīgs! Kontam pieejamie modeļi:")
-                st.json(available)
-            except Exception as e:
-                st.error(f"Detalizēta kļūda: {e}")
+                st.download_button(
+                    label="📥 Lejupielādēt noformēto Excel failu (.xlsx)",
+                    data=excel_buffer.getvalue(),
+                    file_name="TOC_Finansu_Diagnostika.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+                
+                st.subheader("Finanšu pārskata tabula")
+                st.dataframe(df_res, use_container_width=True)
+            
+            st.subheader("Vadības analīze un TOC secinājumi")
+            clean_text = re.sub(r"```tsv.*?```", "", output_text, flags=re.DOTALL).strip()
+            st.markdown(clean_text)
+
+        except Exception as e:
+            st.error(f"Kļūda apstrādē: {str(e)}")
