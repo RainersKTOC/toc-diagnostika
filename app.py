@@ -99,156 +99,159 @@ Vadības fokuss un uzlabojumi
 (3 konkrēti soļi vadībai)
 """
 if uploaded_file is not None:
-if st.button("Veikt diagnostiku", type="primary"):
-with st.spinner("Apstrādā datus un veic TOC analīzi..."):
-try:
-if uploaded_file.name.endswith(".csv"):
-df_raw = pd.read_csv(uploaded_file)
-st.session_state.file_text = df_raw.to_csv(index=False)
-else:
-df_raw = pd.read_excel(uploaded_file)
-st.session_state.file_text = df_raw.to_csv(index=False)
-            clean_key = str(ANTHROPIC_API_KEY).strip().strip('"').strip("'")
-            client = anthropic.Anthropic(api_key=clean_key)
+    if st.button("Veikt diagnostiku", type="primary"):
+        with st.spinner("Apstrādā datus un veic TOC analīzi..."):
+            try:
+                if uploaded_file.name.endswith(".csv"):
+                    df_raw = pd.read_csv(uploaded_file)
+                    st.session_state.file_text = df_raw.to_csv(index=False)
+                else:
+                    df_raw = pd.read_excel(uploaded_file)
+                    st.session_state.file_text = df_raw.to_csv(index=False)
 
-            response = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=8000,
-                system=TOC_SYSTEM_PROMPT,
-                messages=[
-                    {"role": "user", "content": f"Lūk, PZA dati analīzei:\n\n{st.session_state.file_text}"}
-                ]
-            )
+                clean_key = str(ANTHROPIC_API_KEY).strip().strip('"').strip("'")
+                client = anthropic.Anthropic(api_key=clean_key)
 
-            output_text = ""
-            for block in response.content:
-                if getattr(block, "type", "") == "text":
-                    output_text += block.text
-                elif hasattr(block, "text"):
-                    output_text += block.text
+                response = client.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=8000,
+                    system=TOC_SYSTEM_PROMPT,
+                    messages=[
+                        {"role": "user", "content": f"Lūk, PZA dati analīzei:\n\n{st.session_state.file_text}"}
+                    ]
+                )
 
-            st.session_state.output_text = output_text
-            tsv_match = re.search(r"```tsv\n(.*?)```", output_text, re.DOTALL)
+                output_text = ""
+                for block in response.content:
+                    if getattr(block, "type", "") == "text":
+                        output_text += block.text
+                    elif hasattr(block, "text"):
+                        output_text += block.text
 
-            if tsv_match:
-                tsv_data = tsv_match.group(1).strip()
-                st.session_state.df_res = pd.read_csv(io.StringIO(tsv_data), sep="\t")
-                st.session_state.chat_history = []
+                st.session_state.output_text = output_text
+                tsv_match = re.search(r"```tsv\n(.*?)```", output_text, re.DOTALL)
 
-        except Exception as e:
-            st.error(f"Kļūda apstrādē: {str(e)}")
-Ja rezultāti jau ir sesijā, parādām tabulu, pogu un jautājumu sadaļu
+                if tsv_match:
+                    tsv_data = tsv_match.group(1).strip()
+                    st.session_state.df_res = pd.read_csv(io.StringIO(tsv_data), sep="\t")
+                    st.session_state.chat_history = []
+
+            except Exception as e:
+                st.error(f"Kļūda apstrādē: {str(e)}")
+
+# Ja rezultāti jau ir sesijā, parādām tabulu, pogu un jautājumu sadaļu
 if st.session_state.df_res is not None:
-st.success("Diagnostika ir aktīva!")
-excel_buffer = io.BytesIO()
-with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-    st.session_state.df_res.to_excel(writer, index=False, sheet_name="TOC Diagnostika")
-    ws = writer.sheets["TOC Diagnostika"]
+    st.success("Diagnostika ir aktīva!")
 
-    fill_yellow = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-    fill_orange = PatternFill(start_color="F4B084", end_color="F4B084", fill_type="solid")
-    fill_cyan = PatternFill(start_color="00B0F0", end_color="00B0F0", fill_type="solid")
-    fill_peach = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
-    fill_green = PatternFill(start_color="92D050", end_color="92D050", fill_type="solid")
+    excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+        st.session_state.df_res.to_excel(writer, index=False, sheet_name="TOC Diagnostika")
+        ws = writer.sheets["TOC Diagnostika"]
 
-    thin_border = Border(
-        left=Side(style='thin', color='BFBFBF'),
-        right=Side(style='thin', color='BFBFBF'),
-        top=Side(style='thin', color='BFBFBF'),
-        bottom=Side(style='thin', color='BFBFBF')
+        fill_yellow = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+        fill_orange = PatternFill(start_color="F4B084", end_color="F4B084", fill_type="solid")
+        fill_cyan = PatternFill(start_color="00B0F0", end_color="00B0F0", fill_type="solid")
+        fill_peach = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+        fill_green = PatternFill(start_color="92D050", end_color="92D050", fill_type="solid")
+
+        thin_border = Border(
+            left=Side(style='thin', color='BFBFBF'),
+            right=Side(style='thin', color='BFBFBF'),
+            top=Side(style='thin', color='BFBFBF'),
+            bottom=Side(style='thin', color='BFBFBF')
+        )
+
+        for col_num in range(1, len(st.session_state.df_res.columns) + 1):
+            cell = ws.cell(row=1, column=col_num)
+            cell.font = Font(name="Calibri", size=10, bold=True)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        for r_idx, row in enumerate(st.session_state.df_res.itertuples(index=False), start=2):
+            label = str(row[0]).strip().upper()
+            row_fill = fill_peach
+            row_font = Font(name="Calibri", size=10)
+
+            if "S (SALES)" in label or label.startswith("S "):
+                row_fill = fill_yellow
+                row_font = Font(name="Calibri", size=10, bold=True)
+            elif "TVC" in label:
+                row_fill = fill_orange
+                row_font = Font(name="Calibri", size=10, bold=True)
+            elif "T (THROUGHPUT)" in label or label == "T":
+                row_fill = fill_cyan
+                row_font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+            elif "NP (" in label or "NET PROFIT" in label:
+                row_fill = fill_green
+                row_font = Font(name="Calibri", size=10, bold=True)
+            elif "OE (" in label:
+                row_font = Font(name="Calibri", size=10, bold=True)
+
+            for c_idx in range(1, len(st.session_state.df_res.columns) + 1):
+                c = ws.cell(row=r_idx, column=c_idx)
+                c.fill = row_fill
+                c.font = row_font
+                c.border = thin_border
+
+        for col in ws.columns:
+            max_len = max(len(str(cell.value or '')) for cell in col)
+            col_letter = get_column_letter(col[0].column)
+            ws.column_dimensions[col_letter].width = max(max_len + 3, 10)
+
+    st.download_button(
+        label="📥 Lejupielādēt noformēto Excel failu (.xlsx)",
+        data=excel_buffer.getvalue(),
+        file_name="TOC_Finansu_Diagnostika.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-    for col_num in range(1, len(st.session_state.df_res.columns) + 1):
-        cell = ws.cell(row=1, column=col_num)
-        cell.font = Font(name="Calibri", size=10, bold=True)
-        cell.alignment = Alignment(horizontal="center", vertical="center")
+    st.subheader("Finanšu pārskata tabula")
+    styled_df = st.session_state.df_res.style.apply(highlight_toc_rows, axis=1)
+    st.dataframe(styled_df, use_container_width=True)
 
-    for r_idx, row in enumerate(st.session_state.df_res.itertuples(index=False), start=2):
-        label = str(row[0]).strip().upper()
-        row_fill = fill_peach
-        row_font = Font(name="Calibri", size=10)
+    st.subheader("Vadības analīze un secinājumi")
+    clean_text = re.sub(r"```tsv.*?```", "", st.session_state.output_text, flags=re.DOTALL).strip()
+    st.markdown(clean_text)
 
-        if "S (SALES)" in label or label.startswith("S "):
-            row_fill = fill_yellow
-            row_font = Font(name="Calibri", size=10, bold=True)
-        elif "TVC" in label:
-            row_fill = fill_orange
-            row_font = Font(name="Calibri", size=10, bold=True)
-        elif "T (THROUGHPUT)" in label or label == "T":
-            row_fill = fill_cyan
-            row_font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
-        elif "NP (" in label or "NET PROFIT" in label:
-            row_fill = fill_green
-            row_font = Font(name="Calibri", size=10, bold=True)
-        elif "OE (" in label:
-            row_font = Font(name="Calibri", size=10, bold=True)
+    st.markdown("---")
+    st.subheader("💬 Uzdod jautājumu par šo TOC analīzi")
 
-        for c_idx in range(1, len(st.session_state.df_res.columns) + 1):
-            c = ws.cell(row=r_idx, column=c_idx)
-            c.fill = row_fill
-            c.font = row_font
-            c.border = thin_border
+    for msg in st.session_state.chat_history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-    for col in ws.columns:
-        max_len = max(len(str(cell.value or '')) for cell in col)
-        col_letter = get_column_letter(col[0].column)
-        ws.column_dimensions[col_letter].width = max(max_len + 3, 10)
+    user_query = st.chat_input("Ieraksti jautājumu par pārskata datiem...")
+    if user_query:
+        st.session_state.chat_history.append({"role": "user", "content": user_query})
+        with st.chat_message("user"):
+            st.markdown(user_query)
 
-st.download_button(
-    label="📥 Lejupielādēt noformēto Excel failu (.xlsx)",
-    data=excel_buffer.getvalue(),
-    file_name="TOC_Finansu_Diagnostika.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
-
-st.subheader("Finanšu pārskata tabula")
-styled_df = st.session_state.df_res.style.apply(highlight_toc_rows, axis=1)
-st.dataframe(styled_df, use_container_width=True)
-
-st.subheader("Vadības analīze un secinājumi")
-clean_text = re.sub(r"```tsv.*?```", "", st.session_state.output_text, flags=re.DOTALL).strip()
-st.markdown(clean_text)
-
-st.markdown("---")
-st.subheader("💬 Uzdod jautājumu par šo TOC analīzi")
-
-for msg in st.session_state.chat_history:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-
-user_query = st.chat_input("Ieraksti jautājumu par pārskata datiem...")
-if user_query:
-    st.session_state.chat_history.append({"role": "user", "content": user_query})
-    with st.chat_message("user"):
-        st.markdown(user_query)
-
-    with st.chat_message("assistant"):
-        with st.spinner("Domā..."):
-            clean_key = str(ANTHROPIC_API_KEY).strip().strip('"').strip("'")
-            client = anthropic.Anthropic(api_key=clean_key)
-            
-            chat_context = f"""
-            Konteksts ar TOC analīzi un datiem:
-            {st.session_state.output_text}
-            
-            Lietotāja jautājums:
-            {user_query}
-            
-            Atbildi profesionāli, kodolīgi un balstoties uz šiem datiem un TOC principiem.
-            """
-            
-            chat_resp = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=1500,
-                messages=[{"role": "user", "content": chat_context}]
-            )
-            
-            reply = ""
-            for block in chat_resp.content:
-                if getattr(block, "type", "") == "text":
-                    reply += block.text
-                elif hasattr(block, "text"):
-                    reply += block.text
-                    
-            st.markdown(reply)
-            st.session_state.chat_history.append({"role": "assistant", "content": reply})
+        with st.chat_message("assistant"):
+            with st.spinner("Domā..."):
+                clean_key = str(ANTHROPIC_API_KEY).strip().strip('"').strip("'")
+                client = anthropic.Anthropic(api_key=clean_key)
+                
+                chat_context = f"""
+                Konteksts ar TOC analīzi un datiem:
+                {st.session_state.output_text}
+                
+                Lietotāja jautājums:
+                {user_query}
+                
+                Atbildi profesionāli, kodolīgi un balstoties uz šiem datiem un TOC principiem.
+                """
+                
+                chat_resp = client.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=1500,
+                    messages=[{"role": "user", "content": chat_context}]
+                )
+                
+                reply = ""
+                for block in chat_resp.content:
+                    if getattr(block, "type", "") == "text":
+                        reply += block.text
+                    elif hasattr(block, "text"):
+                        reply += block.text
+                        
+                st.markdown(reply)
+                st.session_state.chat_history.append({"role": "assistant", "content": reply})
