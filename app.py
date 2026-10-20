@@ -63,8 +63,20 @@ if uploaded_file is not None:
                     ]
                 )
                 
-                # Nolasām reālo teksta bloku, izlaižot ThinkingBlock
-                output_text = next(block.text for block in response.content if hasattr(block, "text"))
+                # Droša teksta iegūšana no visiem blokiem
+                text_parts = []
+                for block in response.content:
+                    if getattr(block, "type", "") == "text":
+                        text_parts.append(block.text)
+                    elif hasattr(block, "text"):
+                        text_parts.append(block.text)
+                
+                output_text = "\n".join(text_parts)
+                
+                if not output_text:
+                    st.warning("Modelis neatgrieza teksta saturu. Pilna atbilde:")
+                    st.write(response.content)
+                    st.stop()
                 
                 # Izgūstam TSV tabulu un analīzes tekstu
                 tsv_match = re.search(r"```tsv\n(.*?)```", output_text, re.DOTALL)
@@ -95,4 +107,6 @@ if uploaded_file is not None:
                 st.markdown(clean_text)
 
             except Exception as e:
-                st.error(f"Kļūda apstrādē: {str(e)}")
+                import traceback
+                st.error(f"Kļūda apstrādē: {type(e).__name__} - {str(e)}")
+                st.code(traceback.format_exc())
