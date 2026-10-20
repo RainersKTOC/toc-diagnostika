@@ -63,7 +63,8 @@ if uploaded_file is not None:
                     ]
                 )
                 
-                output_text = response.content[0].text
+                # Nolasām reālo teksta bloku, izlaižot ThinkingBlock
+                output_text = next(block.text for block in response.content if hasattr(block, "text"))
                 
                 # Izgūstam TSV tabulu un analīzes tekstu
                 tsv_match = re.search(r"```tsv\n(.*?)```", output_text, re.DOTALL)
