@@ -10,7 +10,7 @@ st.set_page_config(page_title="TOC Finanšu Diagnostika", layout="wide", page_ic
 
 ANTHROPIC_API_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
 
-# Datu saglabāšana sesijā, lai tie nepazustu pēc Excel lejupielādes
+# Datu saglabāšana sesijā
 if "df_res" not in st.session_state:
     st.session_state.df_res = None
 if "output_text" not in st.session_state:
@@ -41,63 +41,47 @@ def highlight_toc_rows(row):
         return ['background-color: #FCE4D6; font-weight: bold; color: black;'] * len(row)
     elif "NP (" in label or "NET PROFIT" in label:
         return ['background-color: #92D050; font-weight: bold; color: black;'] * len(row)
-    elif any(k in label for k in ["ALGAS", "PR =", "T% =", "EURO SALES"]):
-        return ['background-color: #FCE4D6; color: black;'] * len(row)
     return ['background-color: #FCE4D6; color: black;'] * len(row)
 
 TOC_SYSTEM_PROMPT = """
 Tu esi TOC (Throughput Accounting) finanšu diagnostikas dzinējs.
-Veic precīzu aprēķinu atbilstoši šiem striktajiem noteikumiem:
+PZA dati satur gan kopējās kopsavilkuma rindas (piem., 'Pārdotās produkcijas ražošanas pašizmaksa', 'Pārdošanas izmaksas', 'Administrācijas izmaksas', 'Kopā:'), gan arī to detalizētos 'PZA posteņu atšifrējumi'.
+UZMANĪBU: NESKAITI DUBULTĀ! Ņem datus TIKAI no atšifrējumu posteņiem!
 
-1. S (Sales): Neto apgrozījums / pamatdarbības ieņēmumi (100%).
-2. TVC (Truly Variable Costs): IEKĻAUT TIKAI UN VIENĪGI:
-   - Izejvielas un materiāli
+TOC APRĒĶINU NOTEIKUMI:
+1. S (Sales): Neto apgrozījums (100%).
+2. TVC (Truly Variable Costs) - TIKAI šie 2 posteņi:
+   - Izejvielu un materiālu iepirkšanas un piegādes izd.
    - Preču piegādes izdevumi
-   (Visi pārējie ražošanas vai platformu izdevumi ir OE!).
 3. T (Throughput) = S - TVC.
-4. OE (Operating Expenses): Apvieno mazos radniecīgos posteņus, veidojot 6-9 jēgpilnas dinamiskās grupas:
-   - Algas kopā
-   - Administrācijas alga (+ sociālās iemaksas)
-   - Strādnieku alga (+ sociālās iemaksas)
-   - Reklāma un mārketings
-   - Pārdošanas platformas un piegādes komisijas
-   - Ražošanas telpas un uzturēšana
-   - IT, sakari un birojs
-   - Citi saimnieciskie izdevumi
+4. OE (Operating Expenses): Ņem TIKAI atšifrētās darbības izmaksas bez dubultās skaitīšanas:
+   - Algas: Strādnieki (Personāla izmaksas-atlīdzība par darbu ražošanā + Sociālās apdrošināšanas obligātās iemaksas ražošanā)
+   - Algas: Administrācija (Personāla izmaksas admin + VSAOI admin)
+   - Reklāma un mārketings (Reklāmas izmaksas + Mārketinga aktivitātes)
+   - Pārdošanas platformas un pārējās pārdošanas izmaksas (Platformu izdevumi + Mājas lapas uzturēšana + Pārējās pārdošanas izmaksas + US TAX)
+   - Ražošanas telpas un uzturēšana (Ražošanas telpu noma un uzturēšanas izmaksas + Pārējās ražošanas izmaksas)
+   - IT, sakari un birojs (Biroja izmaksas + Telpu noma admin + IT, sakari, bankas)
+   - Citi saimnieciskie izdevumi (Apdrošināšana, Ilgspēja, Pārējās saimn. darbības izmaksas mīnus citi saimn. ieņēmumi)
+   * PĀRBAUDE: Janvārī OE KOPĀ ir jābūt aptuveni 301 342 EUR, un NP (T - OE) ir jābūt aptuveni +190 110 EUR (kā sākotnējā PZA pirms UIN)!
 5. NP (Net Profit) = T - OE.
-6. Izslēgt amortizāciju, krājumu izmaiņas, UIN un finanšu procentus.
-7. Rādītāji zem NP:
+6. Rādītāji zem NP:
    - PR = T/OE
    - T% = T/S
-   - Euro Sales/Euro algas kopā
-   - Euro Sales/Euro administrācija
-   - Euro Sales/Euro strādnieki
+   - € Sales / € Algas kopā (admin+strādnieki)
+   - € Sales / € Administrācijas algas
+   - € Sales / € Strādnieku algas
 
-NOSAUKUMU FORMĀTS:
-- Neraksti priekšā prefiksus 'OE - ' vai 'TVC - '.
-- Galvenajām rindām lieto precīzus nosaukumus:
-  'S (Sales)'
-  'TVC (Truly variable costs)'
-  'T (Throughput)'
-  'OE (Operating expenses)'
-  'NP (Net Profit)'
-
-STINGRI AIZLIEGTS:
-- Nedrukā nekādus ievadtekstus vai starprezultātus. Sāc tieši ar ```tsv bloku.
+KOLONNU VIRSRAKSTU FORMĀTS:
+Augšējā tabulas rindā mēnešus un to procentus norādi tieši šādi (ar gadu un unikāliem nosaukumiem):
+Rādītājs / Kontu grupa\t01.2026.\t01.2026. %\t02.2026.\t02.2026. %\t03.2026.\t03.2026. %\t04.2026.\t04.2026. %\t05.2026.\t05.2026. %\t06.2026.\t06.2026. %\t07.2026.\t07.2026. %\t08.2026.\t08.2026. %\t2026 YTD\t2026 YTD %\t2026 AVG YTD\t2026 AVG YTD %
 
 ATBILDES STRUKTŪRA:
-1. TSV tabula:
-```tsv
-Rādītājs / Kontu grupa\t01.XXXX\t%\t02.XXXX\t%\t...\tYTD\t%\tAVG YTD\t%
-...
-Vadības kopsavilkums (3 īsas, pabeigtas sadaļas):
-Kas ir labs un stabils
-(2-3 teikumi par T% un stabilākajiem mēnešiem)
-Bīstamie signāli
-(2-3 teikumi par riskiem: PR < 1.0, fiksēto izmaksu lēcieniem, algu atdevi)
-Vadības fokuss un uzlabojumi
-(3 konkrēti soļi vadībai)
+Sāc TIEŠI ar ```tsv koda bloku bez ievadvārdiem. Pēc tabulas pievieno 3 īsas sadaļas:
+### Kas ir labs un stabils
+### Bīstamie signāli
+### Vadības fokuss un uzlabojumi
 """
+
 if uploaded_file is not None:
     if st.button("Veikt diagnostiku", type="primary"):
         with st.spinner("Apstrādā datus un veic TOC analīzi..."):
@@ -139,7 +123,6 @@ if uploaded_file is not None:
             except Exception as e:
                 st.error(f"Kļūda apstrādē: {str(e)}")
 
-# Ja rezultāti jau ir sesijā, parādām tabulu, pogu un jautājumu sadaļu
 if st.session_state.df_res is not None:
     st.success("Diagnostika ir aktīva!")
 
@@ -195,7 +178,7 @@ if st.session_state.df_res is not None:
         for col in ws.columns:
             max_len = max(len(str(cell.value or '')) for cell in col)
             col_letter = get_column_letter(col[0].column)
-            ws.column_dimensions[col_letter].width = max(max_len + 3, 10)
+            ws.column_dimensions[col_letter].width = max(max_len + 3, 11)
 
     st.download_button(
         label="📥 Lejupielādēt noformēto Excel failu (.xlsx)",
