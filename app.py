@@ -55,8 +55,8 @@ if uploaded_file is not None:
                 client = anthropic.Anthropic(api_key=clean_key)
                 
                 response = client.messages.create(
-                    model="claude-sonnet-5-5",
-                    max_tokens=4000,
+                    model="claude-haiku-5-5",
+                    max_tokens=8192,
                     system=TOC_SYSTEM_PROMPT,
                     messages=[
                         {"role": "user", "content": f"Lūk, PZA dati analīzei:\n\n{file_text}"}
