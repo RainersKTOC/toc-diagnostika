@@ -10,7 +10,6 @@ st.set_page_config(page_title="TOC Finanšu Diagnostika", layout="wide", page_ic
 
 ANTHROPIC_API_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
 
-# Datu saglabāšana sesijā
 if "df_res" not in st.session_state:
     st.session_state.df_res = None
 if "output_text" not in st.session_state:
@@ -29,58 +28,73 @@ if not ANTHROPIC_API_KEY:
 
 uploaded_file = st.file_uploader("Izvēlieties PZA failu", type=["xlsx", "xls", "csv"])
 
-def highlight_toc_rows(row):
-    label = str(row.iloc[0]).strip().upper()
-    if "S (SALES)" in label or label.startswith("S "):
-        return ['background-color: #FFFF00; font-weight: bold; color: black;'] * len(row)
-    elif "TVC" in label:
-        return ['background-color: #F4B084; font-weight: bold; color: black;'] * len(row)
-    elif "T (THROUGHPUT)" in label or label == "T":
-        return ['background-color: #00B0F0; font-weight: bold; color: white;'] * len(row)
-    elif "OE (" in label or label == "OE":
-        return ['background-color: #FCE4D6; font-weight: bold; color: black;'] * len(row)
-    elif "NP (" in label or "NET PROFIT" in label:
-        return ['background-color: #92D050; font-weight: bold; color: black;'] * len(row)
-    return ['background-color: #FCE4D6; color: black;'] * len(row)
-
 TOC_SYSTEM_PROMPT = """
 Tu esi TOC (Throughput Accounting) finanšu diagnostikas dzinējs.
-PZA dati satur gan kopējās kopsavilkuma rindas (piem., 'Pārdotās produkcijas ražošanas pašizmaksa', 'Pārdošanas izmaksas', 'Administrācijas izmaksas', 'Kopā:'), gan arī to detalizētos 'PZA posteņu atšifrējumi'.
-UZMANĪBU: NESKAITI DUBULTĀ! Ņem datus TIKAI no atšifrējumu posteņiem!
+PZA dati satur gan kopsavilkuma rindas, gan atšifrējumus. NESKAITI DUBULTĀ! Ņem datus tikai no atšifrējumiem!
 
-TOC APRĒĶINU NOTEIKUMI:
-1. S (Sales): Neto apgrozījums (100%).
-2. TVC (Truly Variable Costs) - TIKAI šie 2 posteņi:
-   - Izejvielu un materiālu iepirkšanas un piegādes izd.
-   - Preču piegādes izdevumi
-3. T (Throughput) = S - TVC.
-4. OE (Operating Expenses): Ņem TIKAI atšifrētās darbības izmaksas bez dubultās skaitīšanas:
-   - Algas: Strādnieki (Personāla izmaksas-atlīdzība par darbu ražošanā + Sociālās apdrošināšanas obligātās iemaksas ražošanā)
-   - Algas: Administrācija (Personāla izmaksas admin + VSAOI admin)
-   - Reklāma un mārketings (Reklāmas izmaksas + Mārketinga aktivitātes)
-   - Pārdošanas platformas un pārējās pārdošanas izmaksas (Platformu izdevumi + Mājas lapas uzturēšana + Pārējās pārdošanas izmaksas + US TAX)
-   - Ražošanas telpas un uzturēšana (Ražošanas telpu noma un uzturēšanas izmaksas + Pārējās ražošanas izmaksas)
-   - IT, sakari un birojs (Biroja izmaksas + Telpu noma admin + IT, sakari, bankas)
-   - Citi saimnieciskie izdevumi (Apdrošināšana, Ilgspēja, Pārējās saimn. darbības izmaksas mīnus citi saimn. ieņēmumi)
-   * PĀRBAUDE: Janvārī OE KOPĀ ir jābūt aptuveni 301 342 EUR, un NP (T - OE) ir jābūt aptuveni +190 110 EUR (kā sākotnējā PZA pirms UIN)!
-5. NP (Net Profit) = T - OE.
-6. Rādītāji zem NP:
-   - PR = T/OE
-   - T% = T/S
-   - € Sales / € Algas kopā (admin+strādnieki)
-   - € Sales / € Administrācijas algas
-   - € Sales / € Strādnieku algas
+TABULAS STRUKTŪRA UN RINAS (STINGRĀ SECĪBĀ):
+1. S (Sales)
+2. TVC (Truly variable costs)
+3. Izejvielas un materiāli
+4. Preču piegādes izdevumi
+5. T (Throughput)
+6. OE (Operating expenses)
+7. Algas kopā
+8. Administrācijas algas (+ sociālās iemaksas)
+9. Strādnieku algas (+ sociālās iemaksas)
+10. Mārketings un reklāma
+11. Pārdošanas platformu izdevumi un pārējās pārdošanas izmaksas (ietverot US TAX, mājas lapu)
+12. Ražošanas telpu noma un uzturēšana (+ pārējās ražošanas izm.)
+13. Biroja, IT un sakaru izmaksas
+14. Citi saimnieciskie un personāla izdevumi
+15. NP (Net Profit)
+16. PR = T/OE
+17. T% = T/S
+18. Eiro Sales/Eiro algas kopā
+19. Eiro Sales/Eiro administrācija
+20. Eiro Sales/Eiro strādnieki
 
-KOLONNU VIRSRAKSTU FORMĀTS:
-Augšējā tabulas rindā mēnešus un to procentus norādi tieši šādi (ar gadu un unikāliem nosaukumiem):
-Rādītājs / Kontu grupa\t01.2026.\t01.2026. %\t02.2026.\t02.2026. %\t03.2026.\t03.2026. %\t04.2026.\t04.2026. %\t05.2026.\t05.2026. %\t06.2026.\t06.2026. %\t07.2026.\t07.2026. %\t08.2026.\t08.2026. %\t2026 YTD\t2026 YTD %\t2026 AVG YTD\t2026 AVG YTD %
+STINGRI AIZLIEGTS:
+- Preču piegādes izdevumus likt pie OE! Tie ir 100% TVC sastāvdaļa!
+- Neveido nekādas tukšas rindas, atdalošās rindas vai rindas ar 'None' vai '---'!
+- Sāc TIEŠI ar ```tsv koda bloku bez ievada.
 
-ATBILDES STRUKTŪRA:
-Sāc TIEŠI ar ```tsv koda bloku bez ievadvārdiem. Pēc tabulas pievieno 3 īsas sadaļas:
+KOLONNU VIRSRINDA TSV BLOKĀ:
+Lieto tieši šādu pirmo rindiņu:
+Rādītājs / Kontugrupa\t01.2026.\t%\t02.2026.\t%\t03.2026.\t%\t04.2026.\t%\t05.2026.\t%\t06.2026.\t%\t07.2026.\t%\t08.2026.\t%\t2026 YTD\t%\t2026 AVG YTD\t%
+
+VADĪBAS SECINĀJUMI:
+Zem TSV pievieno:
 ### Kas ir labs un stabils
 ### Bīstamie signāli
 ### Vadības fokuss un uzlabojumi
 """
+
+def highlight_toc_rows(row):
+    label = str(row.iloc[0]).strip().upper()
+    
+    # 1. S (Sales) - Dzeltens
+    if "S (SALES)" in label or label.startswith("S "):
+        return ['background-color: #FFFF00; font-weight: bold; color: black;'] * len(row)
+    # 2. TVC (Truly variable costs) kopējā rinda - Tumšāks terakotas oranžs
+    elif "TVC (" in label or label == "TVC":
+        return ['background-color: #ED7D31; font-weight: bold; color: white;'] * len(row)
+    # 3. TVC apakšrindas - Gaišāks oranžs
+    elif any(k in label for k in ["IZEJVIELAS", "PREČU PIEGĀDES"]):
+        return ['background-color: #F8CBAD; color: black;'] * len(row)
+    # 4. T (Throughput) - Spilgti zils
+    elif "T (" in label or "THROUGHPUT" in label or label == "T":
+        return ['background-color: #00B0F0; font-weight: bold; color: black;'] * len(row)
+    # 5. OE (Operating expenses) kopējā rinda - Persiku / Bēšs tumšāks
+    elif "OE (" in label or label == "OE":
+        return ['background-color: #FCE4D6; font-weight: bold; color: black;'] * len(row)
+    # 6. NP (Net Profit) - Spilgti zaļš
+    elif "NP (" in label or "NET PROFIT" in label:
+        return ['background-color: #92D050; font-weight: bold; color: black;'] * len(row)
+    # 7. OE apakšrindas un koeficienti zem NP - Gaišs persiku tonis
+    elif any(k in label for k in ["ALGAS", "PR =", "T% =", "EIRO SALES"]):
+        return ['background-color: #FFF2CC; color: black;'] * len(row)
+    return ['background-color: #FDFEFE; color: black;'] * len(row)
 
 if uploaded_file is not None:
     if st.button("Veikt diagnostiku", type="primary"):
@@ -117,7 +131,11 @@ if uploaded_file is not None:
 
                 if tsv_match:
                     tsv_data = tsv_match.group(1).strip()
-                    st.session_state.df_res = pd.read_csv(io.StringIO(tsv_data), sep="\t")
+                    df = pd.read_csv(io.StringIO(tsv_data), sep="\t")
+                    # Izmetam ārā 'None' un tukšās atdalošās rindas
+                    df = df[df.iloc[:, 0].notna()]
+                    df = df[~df.iloc[:, 0].astype(str).str.strip().str.upper().isin(["NONE", "---", ""])]
+                    st.session_state.df_res = df
                     st.session_state.chat_history = []
 
             except Exception as e:
@@ -126,13 +144,15 @@ if uploaded_file is not None:
 if st.session_state.df_res is not None:
     st.success("Diagnostika ir aktīva!")
 
+    # Sagatavojam Excel
     excel_buffer = io.BytesIO()
     with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
         st.session_state.df_res.to_excel(writer, index=False, sheet_name="TOC Diagnostika")
         ws = writer.sheets["TOC Diagnostika"]
 
         fill_yellow = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-        fill_orange = PatternFill(start_color="F4B084", end_color="F4B084", fill_type="solid")
+        fill_tvc_dark = PatternFill(start_color="ED7D31", end_color="ED7D31", fill_type="solid")
+        fill_tvc_light = PatternFill(start_color="F8CBAD", end_color="F8CBAD", fill_type="solid")
         fill_cyan = PatternFill(start_color="00B0F0", end_color="00B0F0", fill_type="solid")
         fill_peach = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
         fill_green = PatternFill(start_color="92D050", end_color="92D050", fill_type="solid")
@@ -144,41 +164,52 @@ if st.session_state.df_res is not None:
             bottom=Side(style='thin', color='BFBFBF')
         )
 
+        # Galvene ar tīriem % virsrakstiem
         for col_num in range(1, len(st.session_state.df_res.columns) + 1):
             cell = ws.cell(row=1, column=col_num)
+            col_name = str(cell.value)
+            if col_name.startswith("%") or col_name.endswith("%"):
+                cell.value = "%"
             cell.font = Font(name="Calibri", size=10, bold=True)
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
+        # Rindu formatēšana
         for r_idx, row in enumerate(st.session_state.df_res.itertuples(index=False), start=2):
             label = str(row[0]).strip().upper()
-            row_fill = fill_peach
+            row_fill = PatternFill(fill_type=None)
             row_font = Font(name="Calibri", size=10)
 
             if "S (SALES)" in label or label.startswith("S "):
                 row_fill = fill_yellow
                 row_font = Font(name="Calibri", size=10, bold=True)
-            elif "TVC" in label:
-                row_fill = fill_orange
-                row_font = Font(name="Calibri", size=10, bold=True)
-            elif "T (THROUGHPUT)" in label or label == "T":
-                row_fill = fill_cyan
+            elif "TVC (" in label or label == "TVC":
+                row_fill = fill_tvc_dark
                 row_font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+            elif any(k in label for k in ["IZEJVIELAS", "PREČU PIEGĀDES"]):
+                row_fill = fill_tvc_light
+                row_font = Font(name="Calibri", size=10)
+            elif "T (" in label or "THROUGHPUT" in label or label == "T":
+                row_fill = fill_cyan
+                row_font = Font(name="Calibri", size=10, bold=True)
             elif "NP (" in label or "NET PROFIT" in label:
                 row_fill = fill_green
                 row_font = Font(name="Calibri", size=10, bold=True)
-            elif "OE (" in label:
-                row_font = Font(name="Calibri", size=10, bold=True)
+            elif "OE (" in label or any(k in label for k in ["ALGAS", "PR =", "T% =", "EIRO SALES"]):
+                row_fill = fill_peach
+                if "OE (" in label or "ALGAS KOPĀ" in label:
+                    row_font = Font(name="Calibri", size=10, bold=True)
 
             for c_idx in range(1, len(st.session_state.df_res.columns) + 1):
                 c = ws.cell(row=r_idx, column=c_idx)
-                c.fill = row_fill
+                if row_fill.fill_type:
+                    c.fill = row_fill
                 c.font = row_font
                 c.border = thin_border
 
         for col in ws.columns:
             max_len = max(len(str(cell.value or '')) for cell in col)
             col_letter = get_column_letter(col[0].column)
-            ws.column_dimensions[col_letter].width = max(max_len + 3, 11)
+            ws.column_dimensions[col_letter].width = max(max_len + 3, 10)
 
     st.download_button(
         label="📥 Lejupielādēt noformēto Excel failu (.xlsx)",
@@ -187,8 +218,18 @@ if st.session_state.df_res is not None:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
+    # UI parādīšanai noformējam kolonnu nosaukumus ar tīru '%'
+    display_df = st.session_state.df_res.copy()
+    cleaned_cols = []
+    for c in display_df.columns:
+        if re.match(r"^%\.?\d*$", str(c)) or str(c).endswith("%"):
+            cleaned_cols.append("%")
+        else:
+            cleaned_cols.append(str(c))
+    
+    # Lai pandas neprotestētu par vienādiem nosaukumiem attēlojot:
     st.subheader("Finanšu pārskata tabula")
-    styled_df = st.session_state.df_res.style.apply(highlight_toc_rows, axis=1)
+    styled_df = display_df.style.apply(highlight_toc_rows, axis=1)
     st.dataframe(styled_df, use_container_width=True)
 
     st.subheader("Vadības analīze un secinājumi")
