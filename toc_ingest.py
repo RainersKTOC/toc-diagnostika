@@ -1,14 +1,5 @@
 """
 toc_ingest.py  —  PZA failu ielasīšana (1.–3. solis)
-
-1. load_grids        : jebkurš CSV/XLSX -> neapstrādāti režģi (bez pieņēmumiem par formātu)
-2. Structure         : ko atrod Claude (kolonnas, rindu diapazons, zīmju konvencija) — tikai INDEKSI
-3. analyze           : Python deterministiski atrod kopsummu hierarhiju, lapas (kontus),
-                       dublikātus (kopsavilkuma rindas) un atvasinātās rindas (peļņas rindas)
-4. reconcile         : saskaita visas lapas un salīdzina ar faila gala rezultāta rindu
-
-Struktūras posmā Claude redz faila priekšskatījumu (ar skaitļiem), bet atgriež tikai INDEKSUS — skaitļus
-viņš nekopē un nerēķina. Klasifikācijas posmā skaitļi netiek sūtīti vispār.
 """
 from __future__ import annotations
 
@@ -26,7 +17,6 @@ ACCOUNT_CODE = re.compile(r"^\s*(\d{4,6})\s+")
 HAS_LETTER = re.compile(r"[A-Za-zĀ-žА-я]")
 
 
-# ============================================================ 1. IELASĪŠANA
 def decode_bytes(data: bytes) -> str:
     for enc in ("utf-8-sig", "cp1257", "cp1252", "latin-1"):
         try:
@@ -37,7 +27,6 @@ def decode_bytes(data: bytes) -> str:
 
 
 def load_grids(name: str, data: bytes) -> dict[str, pd.DataFrame]:
-    """Atgriež {lapas_nosaukums: DataFrame(header=None)}. CSV -> viena 'CSV' lapa."""
     low = name.lower()
     if low.endswith((".xlsx", ".xlsm", ".xls")):
         xl = pd.ExcelFile(io.BytesIO(data))
@@ -64,7 +53,6 @@ def load_grids(name: str, data: bytes) -> dict[str, pd.DataFrame]:
 
 
 def detect_decimal_comma(grid: pd.DataFrame) -> bool:
-    """True, ja skaitļos komats ir decimālatdalītājs (1.234,56 / 12,5), False, ja tūkstošu (1,234)."""
     for v in grid.to_numpy().ravel():
         if isinstance(v, str):
             s = v.strip().replace(" ", "")
@@ -97,20 +85,19 @@ def parse_number(x, decimal_comma: bool = False) -> float | None:
     return -v if neg else v
 
 
-# ============================================================ 2. STRUKTŪRA
 PERIOD_KINDS = ("month", "ytd", "year", "other")
 
 
 @dataclass
 class Structure:
     sheet: str
-    period_cols: list[dict]            # [{"col": 3, "label": "05.2024.", "kind": "month"}]
+    period_cols: list[dict]
     first_row: int
     last_row: int
-    result_row: int | None = None      # gala peļņas rinda (visaptveroša)
-    sign_convention: str = "mixed"     # costs_negative | costs_positive | mixed
-    totals_position: str = "auto"      # after | before | auto
-    pl_layout: str = "unclear"         # by_nature | by_function | unclear
+    result_row: int | None = None
+    sign_convention: str = "mixed"
+    totals_position: str = "auto"
+    pl_layout: str = "unclear"
     unit: str = ""
     company: str = ""
     notes: str = ""
@@ -226,22 +213,21 @@ def validate_structure(grid: pd.DataFrame, st: Structure) -> list[str]:
     return errs
 
 
-# ============================================================ 3. RINDAS
 @dataclass
 class Line:
-    pos: int                 # kārtas numurs sarakstā
-    row: int                 # rinda režģī (0-bāze)
+    pos: int
+    row: int
     label: str
     code: str
-    vals: np.ndarray         # (P,) ar nan -> 0
-    has_values: bool         # vismaz viena skaitliska šūna
+    vals: np.ndarray
+    has_values: bool
     is_ratio: bool = False
 
 
 @dataclass
 class Extracted:
     lines: list[Line]
-    period_cols: list[dict]   # tikai kolonnas ar datiem
+    period_cols: list[dict]
     dropped_cols: list[dict]
     decimal_comma: bool
     tol: float
@@ -261,7 +247,7 @@ def extract_lines(grid: pd.DataFrame, st: Structure) -> Extracted:
                 label = v.strip()
                 break
         if not label:
-            for c in label_cols:   # rindas kods (piem. '0010'), ja nav teksta
+            for c in label_cols:
                 v = grid.iat[r, c]
                 if isinstance(v, str) and v.strip():
                     code = v.strip()
@@ -271,7 +257,6 @@ def extract_lines(grid: pd.DataFrame, st: Structure) -> Extracted:
         nums = [parse_number(grid.iat[r, p["col"]], dec) for p in st.period_cols]
         raw.append((r, label, code, nums))
 
-    # atmet kolonnas, kurās nav neviena nenulles skaitļa
     keep = []
     for j, p in enumerate(st.period_cols):
         if any((x[3][j] or 0) != 0 for x in raw):
@@ -295,9 +280,7 @@ def extract_lines(grid: pd.DataFrame, st: Structure) -> Extracted:
     return Extracted(lines, kept_cols, dropped, dec, tol)
 
 
-# ============================================================ 4. HIERARHIJA
 def _stack_totals(order: list[int], V: np.ndarray, tol: float) -> dict[int, list[int]]:
-    """Atrod aditīvās kopsummas: rinda = tieši pirms tās esošo vēl 'neapēsto' rindu pēdējo k summa."""
     stack: list[int] = []
     totals: dict[int, list[int]] = {}
     for i in order:
@@ -324,7 +307,7 @@ class Leaf:
     path: str
     code: str
     vals: np.ndarray
-    mult: int | None          # +1 / -1 (no spoguļa) vai None = jānosaka pēc dabas (izdevumi/ieņēmumi)
+    mult: int | None
 
 
 @dataclass
@@ -333,7 +316,7 @@ class Analysis:
     direction: str
     totals: dict[int, list[int]]
     leaves: list[Leaf]
-    mirrors: dict[int, tuple[int, int]]     # lapa -> (kopsumma, faktors)
+    mirrors: dict[int, tuple[int, int]]
     derived: set[int]
     zero_rows: list[int]
     notes: list[str] = field(default_factory=list)
@@ -368,7 +351,6 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
     V = np.array([ln.vals for ln in lines]) if lines else np.zeros((0, 1))
     active = [ln.pos for ln in lines if ln.has_values and not ln.is_ratio]
 
-    # --- 1) kopsummu virziens
     after = _stack_totals(active, V, tol)
     before = _stack_totals(active[::-1], V, tol)
     pos_hint = st.totals_position
@@ -402,7 +384,6 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
                 out.append(x)
         return out
 
-    # --- 2) spoguļi: kopsavilkuma rinda bez bērniem = cita kopsumma (ar ± zīmi)
     mirrors: dict[int, tuple[int, int]] = {}
     leaf_cand = [i for i in active if i not in totals]
     for L in leaf_cand:
@@ -421,7 +402,6 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
         if best and best[2] >= 2:
             mirrors[L] = (best[0], best[1])
 
-    # --- 3) atvasinātās rindas (peļņas rindas = ± citu sakņu summa)
     roots = [i for i in active if i not in parent and i not in mirrors]
     derived: set[int] = set()
     nonzero_roots: list[int] = []
@@ -437,7 +417,7 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
             if res.any():
                 derived.add(R)
         nonzero_roots.append(R)
-    # atvasinātas rindas apakšējie mezgli (piem. 'pēc UIN' ķēde) arī nav lapas
+
     for d in list(derived):
         stack_ = [d]
         while stack_:
@@ -447,8 +427,6 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
                 stack_.append(c)
 
     zero_rows = [i for i in leaf_cand if not np.any(np.abs(V[i]) > tol) and i not in mirrors]
-
-    # --- 4) lapas + ceļi + zīmju reizinātāji
     header_pos = {ln.pos for ln in lines if not ln.has_values and ln.label and not ln.label.startswith("(rinda")}
 
     def section_name(t: int) -> str:
@@ -457,7 +435,6 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
             return lab
         kids = sorted(totals[t])
         first = kids[0]
-        # meklē blakus esošo galvenes rindu virkni tieši pirms pirmā bērna
         p = first - 1
         run = []
         while p >= 0 and (p in header_pos):
@@ -468,7 +445,6 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
     chain_cache: dict[int, bool] = {}
 
     def is_chain(t: int) -> bool:
-        """Peļņas ķēdes rinda (satur kopsavilkuma spoguļus) — nav jēgpilns sadaļas nosaukums."""
         if t not in chain_cache:
             chain_cache[t] = any((c in mirrors) or (c in totals and is_chain(c)) for c in totals[t])
         return chain_cache[t]
@@ -510,9 +486,7 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
     return Analysis(ex, direction, totals, leaves, mirrors, derived, zero_rows, notes)
 
 
-# ============================================================ 5. VERIFIKĀCIJA
 def leaf_amounts(leaves: list[Leaf], income_ids: set[str] | None) -> tuple[np.ndarray, bool]:
-    """Parakstītās summas (ieņēmumi +, izdevumi −). Atgriež (matrica, pilna)."""
     if not leaves:
         return np.zeros((0, 1)), True
     rows, complete = [], True
@@ -528,7 +502,6 @@ def leaf_amounts(leaves: list[Leaf], income_ids: set[str] | None) -> tuple[np.nd
 
 
 def reconcile(an: Analysis, st: Structure, income_ids: set[str] | None = None) -> dict:
-    """Σ(visas lapas) pret faila gala rezultāta rindu katram periodam."""
     out = {"status": "skip", "table": None, "message": ""}
     if st.result_row is None:
         out["message"] = "Gala rezultāta rinda nav norādīta — salīdzināšana nav iespējama."
@@ -580,7 +553,6 @@ def verification_report(grid: pd.DataFrame, st: Structure, an: Analysis,
     status = {"ok": "OK", "fail": "KĻŪDA", "deferred": "ATLIKTS", "skip": "BRĪDINĀJUMS"}[rec["status"]]
     rep.append({"Pārbaude": "Σ(lapas) = faila gala rezultāts", "Statuss": status, "Detaļas": rec["message"]})
 
-    # YTD kolonna pret mēnešu summu
     cols = an.ex.period_cols
     months = [j for j, p in enumerate(cols) if p["kind"] == "month"]
     ytd = [j for j, p in enumerate(cols) if p["kind"] == "ytd"]
@@ -594,19 +566,17 @@ def verification_report(grid: pd.DataFrame, st: Structure, an: Analysis,
     return rep
 
 
-# ============================================================ 6. CLAUDE STRUKTŪRAS PIEPRASĪJUMS
 def _tool_input(resp, name: str):
     tu = next((b for b in resp.content if getattr(b, "type", "") == "tool_use" and b.name == name), None)
     return tu
 
 
 def pick_sheet(client, model: str, grids: dict[str, pd.DataFrame]) -> str:
-    """Ja failā ir vairākas lapas, ļauj Claude izvēlēties PZA lapu (redz tikai īsu priekšskatījumu)."""
     if len(grids) == 1:
         return next(iter(grids))
     parts = [f"=== SHEET '{n}' ===\n{grid_preview(g, max_rows=30, max_cols=12)}" for n, g in list(grids.items())[:8]]
     resp = client.messages.create(
-        model=model, max_tokens=300, temperature=0,
+        model=model, max_tokens=300,
         system="Choose the sheet containing the profit and loss statement (income statement).",
         tools=[CHOOSE_SHEET_TOOL], tool_choice={"type": "tool", "name": "choose_sheet"},
         messages=[{"role": "user", "content": "\n\n".join(parts)}],
@@ -616,12 +586,11 @@ def pick_sheet(client, model: str, grids: dict[str, pd.DataFrame]) -> str:
 
 
 def request_structure(client, model: str, sheet: str, grid: pd.DataFrame, max_tries: int = 3) -> Structure:
-    """Claude norāda struktūru; Python to validē; kļūdu gadījumā Claude saņem kļūdu un labo."""
     msgs = [{"role": "user", "content": f"Sheet '{sheet}':\n{grid_preview(grid)}"}]
     last_errs: list[str] = []
     for _ in range(max_tries):
         resp = client.messages.create(
-            model=model, max_tokens=2000, temperature=0, system=STRUCTURE_SYSTEM,
+            model=model, max_tokens=2000, system=STRUCTURE_SYSTEM,
             tools=[STRUCTURE_TOOL], tool_choice={"type": "tool", "name": STRUCTURE_TOOL["name"]},
             messages=msgs,
         )
@@ -636,3 +605,4 @@ def request_structure(client, model: str, sheet: str, grid: pd.DataFrame, max_tr
                  {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tu.id, "is_error": True,
                                                "content": "Validation failed: " + " ".join(last_errs) + " Fix and resend."}]}]
     raise ValueError("Struktūru neizdevās noteikt automātiski: " + " ".join(last_errs))
+
