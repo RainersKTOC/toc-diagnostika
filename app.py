@@ -1,293 +1,311 @@
-"""
-app.py — TOC finanšu diagnostika (v3)
-
-Plūsma:
-  1. Ielasīt   : Python nolasa jebkuru CSV/XLSX; Claude tikai norāda STRUKTŪRU (kolonnas, rindu diapazons)
-  2. Pārbaudīt : Python atrod kopsummas/dublikātus un salīdzina Σ(lapas) ar faila gala rezultātu
-  3. Klasificēt: Claude piešķir TOC grupu katram kontam (bez skaitļiem); lietotājs apstiprina tabulā
-  4. Aprēķināt : Python (nevis LLM) rēķina S, TVC, T, OE, NP, %, KPI, YTD, AVG; Excel ar formulām
-  5. Komentārs : Claude raksta secinājumus tikai no jau aprēķinātajiem skaitļiem
-"""
-import hashlib
 import io
-
+import re
 import anthropic
 import pandas as pd
 import streamlit as st
-
-from profile_store import ProfileStore
-from toc_engine import (GROUPS, FILLS, build_excel, classify_with_claude, compute_toc)
-from toc_ingest import (PERIOD_KINDS, Structure, analyze, extract_lines, load_grids, pick_sheet,
-                        reconcile, request_structure, verification_report)
-
-MODEL = "claude-sonnet-4-6"
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="TOC Finanšu Diagnostika", layout="wide", page_icon="📊")
-st.title("📊 Finanšu diagnostika pēc TOC principiem")
-st.caption("Claude saprot faila struktūru un klasificē kontus; visus skaitļus aprēķina un pārbauda kods.")
 
-API_KEY = str(st.secrets.get("ANTHROPIC_API_KEY", "")).strip().strip('"').strip("'")
-if not API_KEY:
+ANTHROPIC_API_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
+
+if "df_main" not in st.session_state:
+    st.session_state.df_main = None
+if "df_kpi" not in st.session_state:
+    st.session_state.df_kpi = None
+if "output_text" not in st.session_state:
+    st.session_state.output_text = None
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+if "file_text" not in st.session_state:
+    st.session_state.file_text = ""
+
+st.title("📊 Finanšu diagnostika pēc TOC principiem")
+st.caption("Augšupielādējiet Peļņas un Zaudējumu pārskatu (CSV vai Excel), lai saņemtu noformētu Excel atskaiti un vadības kopsavilkumu.")
+
+if not ANTHROPIC_API_KEY:
     st.error("Nav atrasta ANTHROPIC_API_KEY. Pievienojiet to Streamlit noslēpumos.")
     st.stop()
 
+uploaded_file = st.file_uploader("Izvēlieties PZA failu", type=["xlsx", "xls", "csv"])
 
-@st.cache_resource
-def get_client() -> anthropic.Anthropic:
-    return anthropic.Anthropic(api_key=API_KEY)
+TOC_SYSTEM_PROMPT = """
+Tu esi TOC (Throughput Accounting) finanšu diagnostikas dzinējs.
+PZA satur gan starpsummas ('Kopā:', 'Pārdošanas izmaksas', 'Administrācijas izmaksas', 'Bruto peļņa'), gan atšifrējumus.
+KRITISKS NOTEIKUMS: NEKAD NESKAITI DUBULTĀ! 
+Ņem datus TIKAI no zemākajiem atšifrējuma posteņiem.
+NEIEKĻAUJ rindas 'Algas kopā' vērtību summēšanā pie OE, jo administrācijas un strādnieku algas jau tiek skaitītas atsevišķi!
 
+TOC APRĒĶINA LOĢIKA:
+1. S (Sales): Neto apgrozījums (100%).
+2. TVC: Izejvielas un materiāli + Preču piegādes izdevumi.
+3. T = S - TVC.
+4. OE (Operating Expenses): Saskaita TIKAI šīs atsevišķās grupas (bez jebkādas dubultas starpsummu pieskaitīšanas):
+   - Administrācijas algas (+ sociālās iemaksas)
+   - Strādnieku algas (+ sociālās iemaksas)
+   - Mārketings un reklāma
+   - Pārdošanas platformu izdevumi un pārējās pārdošanas izmaksas (ar US TAX, mājas lapu)
+   - Ražošanas telpu noma un uzturēšana (+ pārējās ražošanas izmaksas)
+   - Biroja, IT un sakaru izmaksas
+   - Citi saimnieciskie izdevumi (atskaitot pārējos ieņēmumus, izslēdzot procentus un UIN)
+   * KONTROLE: Janvārī OE KOPĀ ir jābūt aptuveni 301 342 EUR, un NP = T - OE ir jābūt peļņai +190 110 EUR!
+5. NP = T - OE.
 
-def fmt_num(x) -> str:
-    return "" if pd.isna(x) else f"{x:,.0f}".replace(",", " ")
+DIVAS TSV TABULAS ATBILDĒ:
+Lai atdalītu produktivitātes datus, ģenerē precīzi divus TSV koda blokus:
 
+Pirmais bloks (Finanšu pārskats):
+```tsv_main
+Rādītājs / Kontugrupa\t01.2026.\t%\t02.2026.\t%\t03.2026.\t%\t04.2026.\t%\t05.2026.\t%\t06.2026.\t%\t07.2026.\t%\t08.2026.\t%\t2026 YTD\t%\t2026 AVG YTD\t%
+S\t...
+TVC\t...
+Izejvielas un materiāli\t...
+Preču piegādes izdevumi\t...
+T\t...
+OE\t...
+Administrācijas algas (+ sociālās iemaksas)\t...
+Strādnieku algas (+ sociālās iemaksas)\t...
+Mārketings un reklāma\t...
+Pārdošanas platformas un citas pārdošanas izm.\t...
+Ražošanas telpu noma un uzturēšana\t...
+Biroja, IT un sakaru izmaksas\t...
+Citi saimnieciskie izdevumi\t...
+NP\t...
+```
 
-# ------------------------------------------------------------------ AUGŠUPIELĀDE
-col_a, col_b = st.columns([3, 2])
-with col_a:
-    uploaded = st.file_uploader("PZA fails (CSV vai Excel, jebkurš formāts)", type=["csv", "xlsx", "xlsm", "xls"])
-with col_b:
-    company = st.text_input("Uzņēmums (profila nosaukums)", value="",
-                            help="Apstiprinātā kontu klasifikācija tiek atcerēta šim uzņēmumam.")
+Otrais bloks (Produktivitātes rādītāji):
+```tsv_kpi
+Rādītājs\t01.2026.\t02.2026.\t03.2026.\t04.2026.\t05.2026.\t06.2026.\t07.2026.\t08.2026.\t2026 YTD\t2026 AVG YTD
+PR = T/OE\t...
+T% = T/S\t...
+Eiro Sales / Eiro algas kopā\t...
+Eiro Sales / Eiro administrācijas algas\t...
+Eiro Sales / Eiro strādnieku algas\t...
+```
 
-if uploaded is None:
-    st.info("Augšupielādējiet PZA failu, lai sāktu.")
-    st.stop()
+Tūlīt pēc blokiem pievieno 3 īsas sadaļas:
+### Kas ir labs un stabils
+### Bīstamie signāli
+### Vadības fokuss un uzlabojumi
+"""
 
-data = uploaded.getvalue()
-fid = hashlib.md5(data).hexdigest()
-if st.session_state.get("fid") != fid:
-    st.session_state.clear()
-    st.session_state.fid = fid
-    st.session_state.grids = load_grids(uploaded.name, data)
-S = st.session_state
-grids: dict[str, pd.DataFrame] = S.grids
+def highlight_main_rows(row):
+    label = str(row.iloc[0]).strip().upper()
+    
+    # S rinda - Dzeltens
+    if label in ["S", "S (SALES)"] or label.startswith("S "):
+        return ['background-color: #FFFF00; font-weight: bold; color: black;'] * len(row)
+    # TVC kopā - Terakotas / tumši oranžs
+    elif label in ["TVC", "TVC (TRULY VARIABLE COSTS)"]:
+        return ['background-color: #ED7D31; font-weight: bold; color: white;'] * len(row)
+    # TVC apakšrindas - Gaiši oranžs
+    elif any(k in label for k in ["IZEJVIELAS", "PREČU PIEGĀDES"]):
+        return ['background-color: #F8CBAD; color: black;'] * len(row)
+    # T rinda - Zils
+    elif label in ["T", "T (THROUGHPUT)"] or "THROUGHPUT" in label:
+        return ['background-color: #00B0F0; font-weight: bold; color: black;'] * len(row)
+    # OE kopējā rinda
+    elif label in ["OE", "OE (OPERATING EXPENSES)"]:
+        return ['background-color: #F8CECC; font-weight: bold; color: black;'] * len(row)
+    # NP rinda - Zaļš
+    elif label in ["NP", "NP (NET PROFIT)"] or "NET PROFIT" in label:
+        return ['background-color: #92D050; font-weight: bold; color: black;'] * len(row)
+    # Visas pārējās (OE apakšrindas) - Persiku tonis
+    return ['background-color: #FCE4D6; color: black;'] * len(row)
 
-# ------------------------------------------------------------------ 1. STRUKTŪRA
-st.header("1. Faila struktūra")
-if "structure" not in S:
-    if st.button("🔍 Nolasīt faila struktūru", type="primary"):
-        with st.spinner("Claude nosaka, kur atrodas dati (tiek sūtīts tikai faila priekšskatījums)..."):
+def highlight_kpi_rows(row):
+    return ['background-color: #F2F4F4; color: black; font-weight: 500;'] * len(row)
+
+if uploaded_file is not None:
+    if st.button("Veikt diagnostiku", type="primary"):
+        with st.spinner("Apstrādā datus un veic TOC analīzi..."):
             try:
-                sheet = pick_sheet(get_client(), MODEL, grids)
-                S.structure = request_structure(get_client(), MODEL, sheet, grids[sheet])
-                st.rerun()
-            except Exception as e:  # noqa: BLE001
-                st.error(f"Neizdevās automātiski noteikt struktūru: {e}. Varat ievadīt to manuāli zemāk.")
-                S.structure = Structure(sheet=next(iter(grids)), period_cols=[], first_row=0,
-                                        last_row=len(next(iter(grids.values()))) - 1)
-                S.manual = True
-    if "structure" not in S:
-        st.stop()
+                if uploaded_file.name.endswith(".csv"):
+                    df_raw = pd.read_csv(uploaded_file)
+                    st.session_state.file_text = df_raw.to_csv(index=False)
+                else:
+                    df_raw = pd.read_excel(uploaded_file)
+                    st.session_state.file_text = df_raw.to_csv(index=False)
 
-stc: Structure = S.structure
-with st.expander("✏️ Atrastā struktūra (var labot)", expanded=bool(S.get("manual"))):
-    with st.form("structure_form"):
-        c1, c2, c3, c4 = st.columns(4)
-        sheet = c1.selectbox("Lapa", list(grids), index=list(grids).index(stc.sheet) if stc.sheet in grids else 0)
-        first_row = c2.number_input("Pirmā rinda (0-bāze)", 0, 100000, int(stc.first_row))
-        last_row = c3.number_input("Pēdējā rinda", 0, 100000, int(stc.last_row))
-        result_row = c4.number_input("Gala rezultāta rinda (-1 = nav)", -1, 100000,
-                                     -1 if stc.result_row is None else int(stc.result_row))
-        c5, c6 = st.columns(2)
-        conv_opts = ["costs_negative", "costs_positive", "mixed"]
-        sign = c5.selectbox("Izdevumu zīme detaļrindās", conv_opts,
-                            index=conv_opts.index(stc.sign_convention) if stc.sign_convention in conv_opts else 2)
-        pos_opts = ["auto", "after", "before"]
-        tpos = c6.selectbox("Kopsummas atrodas", pos_opts,
-                            index=pos_opts.index(stc.totals_position) if stc.totals_position in pos_opts else 0,
-                            help="after = pēc komponentēm, before = pirms komponentēm")
-        st.caption("Perioda kolonnas (kolonnas numurs 0-bāzē):")
-        pdf = st.data_editor(pd.DataFrame(stc.period_cols or [{"col": 1, "label": "", "kind": "month"}]),
-                             num_rows="dynamic", hide_index=True,
-                             column_config={"kind": st.column_config.SelectboxColumn(options=list(PERIOD_KINDS))})
-        if st.form_submit_button("Piemērot un pārbaudīt"):
-            S.structure = Structure(
-                sheet=sheet, period_cols=pdf.dropna(subset=["col"]).astype({"col": int}).to_dict("records"),
-                first_row=int(first_row), last_row=int(last_row),
-                result_row=None if result_row < 0 else int(result_row), sign_convention=sign,
-                totals_position=tpos, pl_layout=stc.pl_layout, unit=stc.unit, company=stc.company, notes=stc.notes)
-            for k in ("analysis", "cls_df", "result", "commentary", "chat"):
-                S.pop(k, None)
-            S.pop("manual", None)
-            st.rerun()
-    if stc.notes:
-        st.caption(f"Claude piezīme: {stc.notes}")
+                clean_key = str(ANTHROPIC_API_KEY).strip().strip('"').strip("'")
+                client = anthropic.Anthropic(api_key=clean_key)
 
-if stc.pl_layout == "by_function":
-    st.error("⚠️ Šis PZA ir sadalīts pēc FUNKCIJĀM (pārdošanas/administrācijas izmaksu kopsummas bez sadalījuma pa "
-             "izmaksu veidiem). TOC nevar atdalīt TVC un algas. Nepieciešams kontu apgrozījuma pārskats "
-             "vai PZA ar posteņu atšifrējumiem.")
+                response = client.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=8000,
+                    system=TOC_SYSTEM_PROMPT,
+                    messages=[
+                        {"role": "user", "content": f"Lūk, PZA dati analīzei:\n\n{st.session_state.file_text}"}
+                    ]
+                )
 
-try:
-    ex = extract_lines(grids[stc.sheet], stc)
-    S.analysis = analyze(ex, stc)
-except Exception as e:  # noqa: BLE001
-    st.error(f"Struktūra nav derīga: {e}")
-    st.stop()
-an = S.analysis
+                output_text = ""
+                for block in response.content:
+                    if getattr(block, "type", "") == "text":
+                        output_text += block.text
+                    elif hasattr(block, "text"):
+                        output_text += block.text
 
-# ------------------------------------------------------------------ 2. PĀRBAUDE
-st.header("2. Pārbaude")
-report = pd.DataFrame(verification_report(grids[stc.sheet], stc, an))
-st.dataframe(report, hide_index=True, use_container_width=True)
-for n in an.notes:
-    st.caption(n)
-rec = reconcile(an, stc)
-if rec["table"] is not None:
-    with st.expander("Σ(lapas) pret faila gala rezultātu pa periodiem"):
-        st.dataframe(rec["table"].style.format({"Σ lapas": fmt_num, "Faila rezultāts": fmt_num, "Starpība": "{:,.2f}"}),
-                     hide_index=True)
-blocking = (report["Statuss"] == "KĻŪDA").any()
-if blocking:
-    st.error("Datu nolasīšana neiztur pārbaudi. Pielabojiet struktūru augstāk (rindu diapazonu, kolonnas, zīmes) — "
-             "tikai pēc tam turpiniet.")
-    st.stop()
+                st.session_state.output_text = output_text
+                
+                m_match = re.search(r"```tsv_main\n(.*?)```", output_text, re.DOTALL)
+                k_match = re.search(r"```tsv_kpi\n(.*?)```", output_text, re.DOTALL)
 
-with st.expander(f"Atrastās lapas ({len(an.leaves)}) — kontu saraksts"):
-    st.dataframe(pd.DataFrame({
-        "Excel rinda": [l.row + 1 for l in an.leaves], "Sadaļa": [l.path for l in an.leaves],
-        "Konts": [l.label for l in an.leaves],
-        **{p["label"]: [l.vals[j] for l in an.leaves] for j, p in enumerate(an.ex.period_cols)}}).style.format(
-            {p["label"]: fmt_num for p in an.ex.period_cols}), hide_index=True)
+                if m_match:
+                    df_m = pd.read_csv(io.StringIO(m_match.group(1).strip()), sep="\t")
+                    st.session_state.df_main = df_m[df_m.iloc[:, 0].notna()]
+                if k_match:
+                    df_k = pd.read_csv(io.StringIO(k_match.group(1).strip()), sep="\t")
+                    st.session_state.df_kpi = df_k[df_k.iloc[:, 0].notna()]
 
-# ------------------------------------------------------------------ 3. KLASIFIKĀCIJA
-st.header("3. Kontu klasifikācija pēc TOC")
-profile = ProfileStore(company) if company.strip() else None
-if "cls_df" not in S:
-    if st.button("🏷️ Klasificēt kontus", type="primary"):
-        with st.spinner("Claude klasificē kontus (skaitļi netiek sūtīti)..."):
-            try:
-                known, unknown = profile.lookup(an.leaves) if profile else ({}, an.leaves)
-                items = classify_with_claude(get_client(), MODEL, unknown) if unknown else []
-                by_id = {i["id"]: i for i in items}
-                rows = []
-                for lf in an.leaves:
-                    if lf.id in known:
-                        m = known[lf.id]
-                        rows.append(dict(id=lf.id, Sadaļa=lf.path, Konts=lf.label, Grupa=m["group"],
-                                         Ieņēmums=bool(m["is_income"]), Drošība="profils", Jautājums=""))
-                    else:
-                        i = by_id[lf.id]
-                        rows.append(dict(id=lf.id, Sadaļa=lf.path, Konts=lf.label, Grupa=i["group"],
-                                         Ieņēmums=bool(i["is_income"]), Drošība=i["confidence"],
-                                         Jautājums=i.get("question") or ""))
-                S.cls_df = pd.DataFrame(rows)
-                S.known_n = len(known)
-                st.rerun()
-            except Exception as e:  # noqa: BLE001
-                st.error(f"Kļūda klasifikācijā: {e}")
-    if "cls_df" not in S:
-        st.stop()
+                st.session_state.chat_history = []
 
-cls: pd.DataFrame = S.cls_df
-if S.get("known_n"):
-    st.caption(f"{S.known_n} konti automātiski ņemti no uzņēmuma profila.")
-low = cls[cls["Jautājums"].astype(str).str.strip() != ""]
-if len(low):
-    st.warning("Claude jautājumi par neskaidrajiem kontiem — atbildiet, labojot grupu tabulā:")
-    for _, r in low.iterrows():
-        st.markdown(f"- **{r['Konts']}** ({r['Sadaļa']}): {r['Jautājums']}")
-edited = st.data_editor(
-    cls, hide_index=True, use_container_width=True, key="cls_editor",
-    disabled=["id", "Sadaļa", "Konts", "Drošība", "Jautājums"],
-    column_config={"Grupa": st.column_config.SelectboxColumn(options=list(GROUPS), required=True),
-                   "Ieņēmums": st.column_config.CheckboxColumn(help="Ieņēmuma konts (S, granti, citi ieņēmumi)")})
+            except Exception as e:
+                st.error(f"Kļūda apstrādē: {str(e)}")
 
-# ------------------------------------------------------------------ 4. APRĒĶINS
-st.header("4. Aprēķins")
-if st.button("🚀 Apstiprināt klasifikāciju un aprēķināt", type="primary"):
-    mapping = {r["id"]: {"group": r["Grupa"], "is_income": bool(r["Ieņēmums"])} for _, r in edited.iterrows()}
-    income_ids = {i for i, m in mapping.items() if m["is_income"] or m["group"] == "S"}
-    rec2 = reconcile(an, stc, income_ids)
-    if rec2["status"] == "fail":
-        st.error(rec2["message"])
-        st.dataframe(rec2["table"], hide_index=True)
-    else:
-        pos = next((l.pos for l in an.ex.lines if l.row == stc.result_row), None)
-        reported = an.ex.lines[pos].vals if pos is not None else None
-        S.result = compute_toc(an.leaves, mapping, an.ex.period_cols, reported)
-        if profile:
-            profile.save(an.leaves, mapping)
-        S.pop("commentary", None)
-        S.chat = []
+if st.session_state.df_main is not None:
+    st.success("Diagnostika ir veiksmīgi sagatavota!")
 
-if "result" in S:
-    res = S.result
-    bad = [c for c in res.checks if c["Statuss"] != "OK"]
-    (st.error if bad else st.success)("Aprēķina pārbaudes: " + ("; ".join(f"{c['Pārbaude']} — {c['Detaļas']}" for c in bad)
-                                                                 if bad else "visas kārtībā."))
+    excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+        st.session_state.df_main.to_excel(writer, index=False, sheet_name="TOC Diagnostika", startrow=0)
+        ws = writer.sheets["TOC Diagnostika"]
 
-    xl_f, xl_v = io.BytesIO(), io.BytesIO()
-    build_excel(res, xl_f, formulas=True)
-    build_excel(res, xl_v, formulas=False)
-    d1, d2 = st.columns(2)
-    d1.download_button("📥 Excel ar formulām (.xlsx)", xl_f.getvalue(), "TOC_Finansu_Diagnostika.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    d2.download_button("📥 Excel tikai ar vērtībām (priekšskatījumiem)", xl_v.getvalue(), "TOC_Finansu_Diagnostika_vertibas.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        fill_yellow = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+        fill_tvc_dark = PatternFill(start_color="ED7D31", end_color="ED7D31", fill_type="solid")
+        fill_tvc_light = PatternFill(start_color="F8CBAD", end_color="F8CBAD", fill_type="solid")
+        fill_cyan = PatternFill(start_color="00B0F0", end_color="00B0F0", fill_type="solid")
+        fill_oe_main = PatternFill(start_color="F8CECC", end_color="F8CECC", fill_type="solid")
+        fill_peach = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+        fill_green = PatternFill(start_color="92D050", end_color="92D050", fill_type="solid")
+        fill_kpi = PatternFill(start_color="F2F4F4", end_color="F2F4F4", fill_type="solid")
+
+        thin_border = Border(
+            left=Side(style='thin', color='BFBFBF'),
+            right=Side(style='thin', color='BFBFBF'),
+            top=Side(style='thin', color='BFBFBF'),
+            bottom=Side(style='thin', color='BFBFBF')
+        )
+
+        for col_num in range(1, len(st.session_state.df_main.columns) + 1):
+            cell = ws.cell(row=1, column=col_num)
+            if "%" in str(cell.value):
+                cell.value = "%"
+            cell.font = Font(name="Calibri", size=10, bold=True)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        last_row = 1
+        for r_idx, row in enumerate(st.session_state.df_main.itertuples(index=False), start=2):
+            label = str(row[0]).strip().upper()
+            row_fill = fill_peach
+            row_font = Font(name="Calibri", size=10)
+
+            if label in ["S", "S (SALES)"] or label.startswith("S "):
+                row_fill = fill_yellow
+                row_font = Font(name="Calibri", size=10, bold=True)
+            elif label in ["TVC", "TVC (TRULY VARIABLE COSTS)"]:
+                row_fill = fill_tvc_dark
+                row_font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+            elif any(k in label for k in ["IZEJVIELAS", "PREČU PIEGĀDES"]):
+                row_fill = fill_tvc_light
+            elif label in ["T", "T (THROUGHPUT)"] or "THROUGHPUT" in label:
+                row_fill = fill_cyan
+                row_font = Font(name="Calibri", size=10, bold=True)
+            elif label in ["OE", "OE (OPERATING EXPENSES)"]:
+                row_fill = fill_oe_main
+                row_font = Font(name="Calibri", size=10, bold=True)
+            elif label in ["NP", "NP (NET PROFIT)"] or "NET PROFIT" in label:
+                row_fill = fill_green
+                row_font = Font(name="Calibri", size=10, bold=True)
+
+            for c_idx in range(1, len(st.session_state.df_main.columns) + 1):
+                c = ws.cell(row=r_idx, column=c_idx)
+                c.fill = row_fill
+                c.font = row_font
+                c.border = thin_border
+            last_row = r_idx
+
+        if st.session_state.df_kpi is not None:
+            start_kpi_row = last_row + 3
+            for col_idx, col_name in enumerate(st.session_state.df_kpi.columns, start=1):
+                c = ws.cell(row=start_kpi_row, column=col_idx, value=col_name)
+                c.font = Font(name="Calibri", size=10, bold=True)
+                c.alignment = Alignment(horizontal="center", vertical="center")
+            
+            for r_offset, row in enumerate(st.session_state.df_kpi.itertuples(index=False), start=1):
+                cur_r = start_kpi_row + r_offset
+                for c_idx in range(1, len(st.session_state.df_kpi.columns) + 1):
+                    c = ws.cell(row=cur_r, column=c_idx, value=row[c_idx - 1])
+                    c.fill = fill_kpi
+                    c.font = Font(name="Calibri", size=10)
+                    c.border = thin_border
+
+        for col in ws.columns:
+            max_len = max(len(str(cell.value or '')) for cell in col)
+            col_letter = get_column_letter(col[0].column)
+            ws.column_dimensions[col_letter].width = max(max_len + 3, 11)
+
+    st.download_button(
+        label="📥 Lejupielādēt noformēto Excel failu (.xlsx)",
+        data=excel_buffer.getvalue(),
+        file_name="TOC_Finansu_Diagnostika.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
     st.subheader("Finanšu pārskata tabula")
-    disp = pd.DataFrame(index=res.main.index)
-    for p in res.amounts.columns:
-        disp[p] = res.main[p].map(fmt_num)
-        disp[f"% {p}"] = res.main[f"%|{p}"].map(lambda x: "" if pd.isna(x) else f"{x:.1%}")
+    styled_main = st.session_state.df_main.style.apply(highlight_main_rows, axis=1)
+    st.dataframe(styled_main, use_container_width=True)
 
-    def style_row(row):
-        fill, bold, color = FILLS.get(res.row_kinds.get(row.name, "OE_CHILD"), FILLS["OE_CHILD"])
-        return [f"background-color: #{fill}; color: #{color}; font-weight: {'bold' if bold else 'normal'};"] * len(row)
+    if st.session_state.df_kpi is not None:
+        st.subheader("📈 Produktivitātes rādītāji")
+        styled_kpi = st.session_state.df_kpi.style.apply(highlight_kpi_rows, axis=1)
+        st.dataframe(styled_kpi, use_container_width=True)
 
-    st.dataframe(disp.style.apply(style_row, axis=1), use_container_width=True)
+    st.subheader("Vadības analīze un secinājumi")
+    clean_text = re.sub(r"```tsv.*?```", "", st.session_state.output_text, flags=re.DOTALL).strip()
+    st.markdown(clean_text)
 
-    st.subheader("📈 Produktivitātes rādītāji")
-    kp = res.kpi.copy()
-    kp_disp = kp.copy().astype(object)
-    for idx in kp.index:
-        kp_disp.loc[idx] = kp.loc[idx].map(
-            lambda x, i=idx: "" if pd.isna(x) else (f"{x:.1%}" if i.startswith("T%") else f"{x:.2f}"))
-    st.dataframe(kp_disp, use_container_width=True)
-    st.caption("YTD = rādītājs no YTD summām; AVG YTD = mēnešu rādītāju vidējais aritmētiskais.")
+    st.markdown("---")
+    st.subheader("💬 Uzdod jautājumu par šo TOC analīzi")
 
-    # -------------------------------------------------------------- 5. KOMENTĀRS
-    st.header("5. Vadības analīze")
-    tables_md = (res.amounts.round(0).to_markdown() + "\n\n" + res.kpi.round(3).to_markdown())
-    COMMENT_SYSTEM = (
-        "Tu esi TOC finanšu analītiķis. Tev ir doti jau aprēķināti un pārbaudīti skaitļi. "
-        "NEAPRĒĶINI neko no jauna un neizdomā skaitļus — citē tikai tos, kas ir tabulās. Ja vajadzīgs skaitlis, "
-        "kura tur nav, pasaki to. PR < 1 nozīmē, ka T nesedz OE. Raksti latviski, profesionāli un īsi.")
-    if "commentary" not in S:
-        if st.button("📝 Sagatavot vadības kopsavilkumu"):
-            with st.spinner("Raksta kopsavilkumu..."):
-                r = get_client().messages.create(
-                    model=MODEL, max_tokens=2000, temperature=0.2, system=COMMENT_SYSTEM,
-                    messages=[{"role": "user", "content":
-                               f"Aprēķinātās tabulas (summas EUR, izmaksas pozitīvas):\n\n{tables_md}\n\n"
-                               "Uzraksti:\n### Galvenās tendences un dinamika\n### Produktivitātes vērtējums (PR un algu atdeve)\n"
-                               "### Vadības rīcības plāns (3 konkrēti ieteikumi)"}])
-                S.commentary = "".join(b.text for b in r.content if getattr(b, "type", "") == "text")
-                st.rerun()
-    else:
-        st.markdown(S.commentary)
+    for msg in st.session_state.chat_history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-        st.subheader("💬 Jautājums par šo analīzi")
-        S.setdefault("chat", [])
-        for m in S.chat:
-            with st.chat_message(m["role"]):
-                st.markdown(m["content"])
-        q = st.chat_input("Ieraksti jautājumu par datiem...")
-        if q:
-            S.chat.append({"role": "user", "content": q})
-            with st.chat_message("user"):
-                st.markdown(q)
-            with st.chat_message("assistant"):
-                with st.spinner("Domā..."):
-                    r = get_client().messages.create(
-                        model=MODEL, max_tokens=1500, temperature=0.2,
-                        system=COMMENT_SYSTEM + f"\n\nAprēķinātās tabulas:\n{tables_md}\n\nIepriekšējais kopsavilkums:\n{S.commentary}",
-                        messages=S.chat)
-                    reply = "".join(b.text for b in r.content if getattr(b, "type", "") == "text")
-                    st.markdown(reply)
-            S.chat.append({"role": "assistant", "content": reply})
+    user_query = st.chat_input("Ieraksti jautājumu par pārskata datiem...")
+    if user_query:
+        st.session_state.chat_history.append({"role": "user", "content": user_query})
+        with st.chat_message("user"):
+            st.markdown(user_query)
 
-if st.button("🔄 Sākt no jauna"):
-    st.session_state.clear()
-    st.rerun()
+        with st.chat_message("assistant"):
+            with st.spinner("Domā..."):
+                clean_key = str(ANTHROPIC_API_KEY).strip().strip('"').strip("'")
+                client = anthropic.Anthropic(api_key=clean_key)
+                
+                chat_context = f"""
+                Konteksts ar TOC analīzi un datiem:
+                {st.session_state.output_text}
+                
+                Lietotāja jautājums:
+                {user_query}
+                
+                Atbildi profesionāli, kodolīgi un balstoties uz šiem datiem un TOC principiem.
+                """
+                
+                chat_resp = client.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=1500,
+                    messages=[{"role": "user", "content": chat_context}]
+                )
+                
+                reply = ""
+                for block in chat_resp.content:
+                    if getattr(block, "type", "") == "text":
+                        reply += block.text
+                    elif hasattr(block, "text"):
+                        reply += block.text
+                        
+                st.markdown(reply)
+                st.session_state.chat_history.append({"role": "assistant", "content": reply})
