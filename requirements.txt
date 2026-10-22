@@ -1,4 +1,6 @@
-streamlit
-anthropic
-pandas
-openpyxl
+streamlit>=1.40
+anthropic>=0.40
+pandas>=2.2
+numpy>=1.26
+openpyxl>=3.1
+tabulate>=0.9
