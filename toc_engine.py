@@ -1,371 +1,311 @@
-"""
-toc_engine.py  —  4.–5. solis
-
-4. Klasifikācija : Claude piešķir katrai lapai TOC grupu (tikai konta nosaukums + ceļš, BEZ skaitļiem)
-5. Aprēķins      : Python (nevis LLM) rēķina S, TVC, T, OE, NP, %, KPI, YTD, AVG
-                   + Excel ar formulām atvasinātajām rindām
-"""
-from __future__ import annotations
-
-import json
+import io
 import re
-from dataclasses import dataclass
-
-import numpy as np
+import anthropic
 import pandas as pd
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+import streamlit as st
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-from toc_ingest import Leaf, leaf_amounts
+st.set_page_config(page_title="TOC Finanšu Diagnostika", layout="wide", page_icon="📊")
 
-# ------------------------------------------------------------------ KONFIGURĀCIJA
-FONT_NAME = "Calibri"          # viens fonts visam Excel failam
-FONT_SIZE = 10
-KPI_AVG_MODE = "mean_of_months"   # "mean_of_months" (mēnešu KPI vidējais) | "ratio_of_averages" (= YTD)
+ANTHROPIC_API_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
 
-# grupa -> (nosaukums tabulā, sadaļa)
-GROUPS: dict[str, tuple[str, str]] = {
-    "S": ("S", "S"),
-    "TVC_MATERIALS": ("Izejvielas un materiāli", "TVC"),
-    "TVC_DELIVERY": ("Preču piegādes izdevumi", "TVC"),
-    "OE_ADMIN_WAGES": ("Administrācijas algas (+ sociālās iemaksas)", "OE"),
-    "OE_WORKER_WAGES": ("Strādnieku algas (+ sociālās iemaksas)", "OE"),
-    "OE_MARKETING": ("Mārketings un reklāma", "OE"),
-    "OE_PLATFORMS": ("Pārdošanas platformas un citas pārdošanas izm.", "OE"),
-    "OE_PREMISES": ("Ražošanas telpu noma un uzturēšana", "OE"),
-    "OE_OFFICE_IT": ("Biroja, IT un sakaru izmaksas", "OE"),
-    "OE_OTHER": ("Citi saimnieciskie izdevumi", "OE"),
-    "EXCLUDED": ("Izslēgtie (memo)", "EXCL"),
-}
-TVC_KEYS = [k for k, v in GROUPS.items() if v[1] == "TVC"]
-OE_KEYS = [k for k, v in GROUPS.items() if v[1] == "OE"]
+if "df_main" not in st.session_state:
+    st.session_state.df_main = None
+if "df_kpi" not in st.session_state:
+    st.session_state.df_kpi = None
+if "output_text" not in st.session_state:
+    st.session_state.output_text = None
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+if "file_text" not in st.session_state:
+    st.session_state.file_text = ""
 
-CLASSIFY_SYSTEM = """Tu esi TOC (Throughput Accounting) finanšu eksperts. Tev jāpiešķir katrai PZA lapai (kontam) TOC grupa.
-Skaitļus tu neredzi un nerēķini — tikai klasificē pēc nosaukuma un ceļa.
+st.title("📊 Finanšu diagnostika pēc TOC principiem")
+st.caption("Augšupielādējiet Peļņas un Zaudējumu pārskatu (CSV vai Excel), lai saņemtu noformētu Excel atskaiti un vadības kopsavilkumu.")
 
-TOC noteikumi:
-- S: neto apgrozījums (pārdošana; atlaides klientiem pret apgrozījumu arī S).
-- TVC (Truly Variable Costs): TIKAI izmaksas, kas mainās 1:1 ar katru pārdoto vienību: izejvielas/materiāli/pirktās preces (TVC_MATERIALS), tiešā preču piegāde/transports uz klientu, komisijas par pārdoto (TVC_DELIVERY).
-- OE: visas pārējās perioda izmaksas. Algas OBLIGĀTI sadali: ražošanas/strādnieku (OE_WORKER_WAGES) un administrācijas (OE_ADMIN_WAGES), ieskaitot sociālās iemaksas un uzkrājumus. Pārējais: OE_MARKETING, OE_PLATFORMS (pārdošanas platformu komisijas u.c.), OE_PREMISES, OE_OFFICE_IT, OE_OTHER.
-- Pārējie saimnieciskās darbības IEŅĒMUMI (granti, citi ieņēmumi, valūtas peļņa) -> OE_OTHER ar is_income=true (tie samazina OE).
-- EXCLUDED: amortizācija/nolietojums, procentu maksājumi, uzņēmumu ienākuma nodoklis (arī 'nodoklis no peļņas'), krājumu vērtības izmaiņas/norakstīšana, ārkārtas posteņi.
-- is_income=true visiem ieņēmumu postenim (S, granti, citi ieņēmumi), false izdevumiem.
-- Ja posteņa daba ir patiesi neskaidra (piem. apakšuzņēmēji, muita, iepakojums, platformu maksas): izvēlies visticamāko grupu, confidence='low' un uzdod vienu konkrētu, vienkāršu jautājumu lietotājam latviski.
-- Vienādi nosaukumi (piem. 'Personāla izmaksas') dažādās sadaļās jāklasificē pēc ceļa (sadaļas)."""
+if not ANTHROPIC_API_KEY:
+    st.error("Nav atrasta ANTHROPIC_API_KEY. Pievienojiet to Streamlit noslēpumos.")
+    st.stop()
 
-CLASSIFY_TOOL = {
-    "name": "classify_accounts",
-    "description": "Assign a TOC group to every account. Every id must appear exactly once.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "items": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string"},
-                        "group": {"enum": list(GROUPS)},
-                        "is_income": {"type": "boolean"},
-                        "confidence": {"enum": ["high", "medium", "low"]},
-                        "question": {"type": ["string", "null"],
-                                     "description": "Short question in Latvian if confidence is low, else null."},
-                    },
-                    "required": ["id", "group", "is_income", "confidence"],
-                },
-            }
-        },
-        "required": ["items"],
-    },
-}
+uploaded_file = st.file_uploader("Izvēlieties PZA failu", type=["xlsx", "xls", "csv"])
 
+TOC_SYSTEM_PROMPT = """
+Tu esi TOC (Throughput Accounting) finanšu diagnostikas dzinējs.
+PZA satur gan starpsummas ('Kopā:', 'Pārdošanas izmaksas', 'Administrācijas izmaksas', 'Bruto peļņa'), gan atšifrējumus.
+KRITISKS NOTEIKUMS: NEKAD NESKAITI DUBULTĀ! 
+Ņem datus TIKAI no zemākajiem atšifrējuma posteņiem.
+NEIEKĻAUJ rindas 'Algas kopā' vērtību summēšanā pie OE, jo administrācijas un strādnieku algas jau tiek skaitītas atsevišķi!
 
-def leaves_for_llm(leaves: list[Leaf], unit_hint: str = "") -> str:
-    """Kompakts saraksts klasifikācijai. Summas nav iekļautas (tikai zīme/lielums netiek sūtīts)."""
-    rows = [{"id": l.id, "path": l.path, "label": l.label} for l in leaves]
-    return json.dumps(rows, ensure_ascii=False)
+TOC APRĒĶINA LOĢIKA:
+1. S (Sales): Neto apgrozījums (100%).
+2. TVC: Izejvielas un materiāli + Preču piegādes izdevumi.
+3. T = S - TVC.
+4. OE (Operating Expenses): Saskaita TIKAI šīs atsevišķās grupas (bez jebkādas dubultas starpsummu pieskaitīšanas):
+   - Administrācijas algas (+ sociālās iemaksas)
+   - Strādnieku algas (+ sociālās iemaksas)
+   - Mārketings un reklāma
+   - Pārdošanas platformu izdevumi un pārējās pārdošanas izmaksas (ar US TAX, mājas lapu)
+   - Ražošanas telpu noma un uzturēšana (+ pārējās ražošanas izmaksas)
+   - Biroja, IT un sakaru izmaksas
+   - Citi saimnieciskie izdevumi (atskaitot pārējos ieņēmumus, izslēdzot procentus un UIN)
+   * KONTROLE: Janvārī OE KOPĀ ir jābūt aptuveni 301 342 EUR, un NP = T - OE ir jābūt peļņai +190 110 EUR!
+5. NP = T - OE.
 
+DIVAS TSV TABULAS ATBILDĒ:
+Lai atdalītu produktivitātes datus, ģenerē precīzi divus TSV koda blokus:
 
-def validate_classification(items: list[dict], leaves: list[Leaf]) -> list[str]:
-    errs = []
-    ids = [i["id"] for i in items]
-    want = {l.id for l in leaves}
-    missing = sorted(want - set(ids))
-    extra = sorted(set(ids) - want)
-    dup = sorted({i for i in ids if ids.count(i) > 1})
-    if missing:
-        errs.append(f"Missing ids: {missing}")
-    if extra:
-        errs.append(f"Unknown ids: {extra}")
-    if dup:
-        errs.append(f"Duplicate ids: {dup}")
-    bad = [i["id"] for i in items if i.get("group") not in GROUPS]
-    if bad:
-        errs.append(f"Invalid group for: {bad}")
-    return errs
+Pirmais bloks (Finanšu pārskats):
+```tsv_main
+Rādītājs / Kontugrupa\t01.2026.\t%\t02.2026.\t%\t03.2026.\t%\t04.2026.\t%\t05.2026.\t%\t06.2026.\t%\t07.2026.\t%\t08.2026.\t%\t2026 YTD\t%\t2026 AVG YTD\t%
+S\t...
+TVC\t...
+Izejvielas un materiāli\t...
+Preču piegādes izdevumi\t...
+T\t...
+OE\t...
+Administrācijas algas (+ sociālās iemaksas)\t...
+Strādnieku algas (+ sociālās iemaksas)\t...
+Mārketings un reklāma\t...
+Pārdošanas platformas un citas pārdošanas izm.\t...
+Ražošanas telpu noma un uzturēšana\t...
+Biroja, IT un sakaru izmaksas\t...
+Citi saimnieciskie izdevumi\t...
+NP\t...
+```
 
+Otrais bloks (Produktivitātes rādītāji):
+```tsv_kpi
+Rādītājs\t01.2026.\t02.2026.\t03.2026.\t04.2026.\t05.2026.\t06.2026.\t07.2026.\t08.2026.\t2026 YTD\t2026 AVG YTD
+PR = T/OE\t...
+T% = T/S\t...
+Eiro Sales / Eiro algas kopā\t...
+Eiro Sales / Eiro administrācijas algas\t...
+Eiro Sales / Eiro strādnieku algas\t...
+```
 
-def classify_with_claude(client, model: str, leaves: list[Leaf], max_tries: int = 3) -> list[dict]:
-    """Klasificē lapas ar tool use; ja nepilns — atkārto ar kļūdu aprakstu."""
-    msgs = [{"role": "user", "content": "Klasificē šīs PZA lapas:\n" + leaves_for_llm(leaves)}]
-    items: list[dict] = []
-    for _ in range(max_tries):
-        resp = client.messages.create(
-            model=model, max_tokens=8000, temperature=0, system=CLASSIFY_SYSTEM,
-            tools=[CLASSIFY_TOOL], tool_choice={"type": "tool", "name": CLASSIFY_TOOL["name"]},
-            messages=msgs,
+Tūlīt pēc blokiem pievieno 3 īsas sadaļas:
+### Kas ir labs un stabils
+### Bīstamie signāli
+### Vadības fokuss un uzlabojumi
+"""
+
+def highlight_main_rows(row):
+    label = str(row.iloc[0]).strip().upper()
+    
+    # S rinda - Dzeltens
+    if label in ["S", "S (SALES)"] or label.startswith("S "):
+        return ['background-color: #FFFF00; font-weight: bold; color: black;'] * len(row)
+    # TVC kopā - Terakotas / tumši oranžs
+    elif label in ["TVC", "TVC (TRULY VARIABLE COSTS)"]:
+        return ['background-color: #ED7D31; font-weight: bold; color: white;'] * len(row)
+    # TVC apakšrindas - Gaiši oranžs
+    elif any(k in label for k in ["IZEJVIELAS", "PREČU PIEGĀDES"]):
+        return ['background-color: #F8CBAD; color: black;'] * len(row)
+    # T rinda - Zils
+    elif label in ["T", "T (THROUGHPUT)"] or "THROUGHPUT" in label:
+        return ['background-color: #00B0F0; font-weight: bold; color: black;'] * len(row)
+    # OE kopējā rinda
+    elif label in ["OE", "OE (OPERATING EXPENSES)"]:
+        return ['background-color: #F8CECC; font-weight: bold; color: black;'] * len(row)
+    # NP rinda - Zaļš
+    elif label in ["NP", "NP (NET PROFIT)"] or "NET PROFIT" in label:
+        return ['background-color: #92D050; font-weight: bold; color: black;'] * len(row)
+    # Visas pārējās (OE apakšrindas) - Persiku tonis
+    return ['background-color: #FCE4D6; color: black;'] * len(row)
+
+def highlight_kpi_rows(row):
+    return ['background-color: #F2F4F4; color: black; font-weight: 500;'] * len(row)
+
+if uploaded_file is not None:
+    if st.button("Veikt diagnostiku", type="primary"):
+        with st.spinner("Apstrādā datus un veic TOC analīzi..."):
+            try:
+                if uploaded_file.name.endswith(".csv"):
+                    df_raw = pd.read_csv(uploaded_file)
+                    st.session_state.file_text = df_raw.to_csv(index=False)
+                else:
+                    df_raw = pd.read_excel(uploaded_file)
+                    st.session_state.file_text = df_raw.to_csv(index=False)
+
+                clean_key = str(ANTHROPIC_API_KEY).strip().strip('"').strip("'")
+                client = anthropic.Anthropic(api_key=clean_key)
+
+                response = client.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=8000,
+                    system=TOC_SYSTEM_PROMPT,
+                    messages=[
+                        {"role": "user", "content": f"Lūk, PZA dati analīzei:\n\n{st.session_state.file_text}"}
+                    ]
+                )
+
+                output_text = ""
+                for block in response.content:
+                    if getattr(block, "type", "") == "text":
+                        output_text += block.text
+                    elif hasattr(block, "text"):
+                        output_text += block.text
+
+                st.session_state.output_text = output_text
+                
+                m_match = re.search(r"```tsv_main\n(.*?)```", output_text, re.DOTALL)
+                k_match = re.search(r"```tsv_kpi\n(.*?)```", output_text, re.DOTALL)
+
+                if m_match:
+                    df_m = pd.read_csv(io.StringIO(m_match.group(1).strip()), sep="\t")
+                    st.session_state.df_main = df_m[df_m.iloc[:, 0].notna()]
+                if k_match:
+                    df_k = pd.read_csv(io.StringIO(k_match.group(1).strip()), sep="\t")
+                    st.session_state.df_kpi = df_k[df_k.iloc[:, 0].notna()]
+
+                st.session_state.chat_history = []
+
+            except Exception as e:
+                st.error(f"Kļūda apstrādē: {str(e)}")
+
+if st.session_state.df_main is not None:
+    st.success("Diagnostika ir veiksmīgi sagatavota!")
+
+    excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+        st.session_state.df_main.to_excel(writer, index=False, sheet_name="TOC Diagnostika", startrow=0)
+        ws = writer.sheets["TOC Diagnostika"]
+
+        fill_yellow = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+        fill_tvc_dark = PatternFill(start_color="ED7D31", end_color="ED7D31", fill_type="solid")
+        fill_tvc_light = PatternFill(start_color="F8CBAD", end_color="F8CBAD", fill_type="solid")
+        fill_cyan = PatternFill(start_color="00B0F0", end_color="00B0F0", fill_type="solid")
+        fill_oe_main = PatternFill(start_color="F8CECC", end_color="F8CECC", fill_type="solid")
+        fill_peach = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+        fill_green = PatternFill(start_color="92D050", end_color="92D050", fill_type="solid")
+        fill_kpi = PatternFill(start_color="F2F4F4", end_color="F2F4F4", fill_type="solid")
+
+        thin_border = Border(
+            left=Side(style='thin', color='BFBFBF'),
+            right=Side(style='thin', color='BFBFBF'),
+            top=Side(style='thin', color='BFBFBF'),
+            bottom=Side(style='thin', color='BFBFBF')
         )
-        tu = next(b for b in resp.content if b.type == "tool_use")
-        items = tu.input.get("items", [])
-        errs = validate_classification(items, leaves)
-        if not errs:
-            return items
-        msgs += [{"role": "assistant", "content": resp.content},
-                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tu.id, "is_error": True,
-                                               "content": "Fix and resend ALL items. " + " ".join(errs)}]}]
-    raise ValueError("Klasifikācija nav pilnīga pēc vairākiem mēģinājumiem: " + " ".join(errs))
 
+        for col_num in range(1, len(st.session_state.df_main.columns) + 1):
+            cell = ws.cell(row=1, column=col_num)
+            if "%" in str(cell.value):
+                cell.value = "%"
+            cell.font = Font(name="Calibri", size=10, bold=True)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
 
-# ------------------------------------------------------------------ APRĒĶINS
-@dataclass
-class TocResult:
-    main: pd.DataFrame            # rindas × (periods: summa, %)
-    kpi: pd.DataFrame
-    row_kinds: dict[str, str]     # rindas nosaukums -> S|TVC|TVC_CHILD|T|OE|OE_CHILD|NP|EXCL
-    periods: list[str]            # kolonnu virsraksti (ieskaitot YTD/AVG)
-    amounts: pd.DataFrame         # tikai summas (rindas × periodi) — Excel formulām
-    checks: list[dict]
+        last_row = 1
+        for r_idx, row in enumerate(st.session_state.df_main.itertuples(index=False), start=2):
+            label = str(row[0]).strip().upper()
+            row_fill = fill_peach
+            row_font = Font(name="Calibri", size=10)
 
+            if label in ["S", "S (SALES)"] or label.startswith("S "):
+                row_fill = fill_yellow
+                row_font = Font(name="Calibri", size=10, bold=True)
+            elif label in ["TVC", "TVC (TRULY VARIABLE COSTS)"]:
+                row_fill = fill_tvc_dark
+                row_font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+            elif any(k in label for k in ["IZEJVIELAS", "PREČU PIEGĀDES"]):
+                row_fill = fill_tvc_light
+            elif label in ["T", "T (THROUGHPUT)"] or "THROUGHPUT" in label:
+                row_fill = fill_cyan
+                row_font = Font(name="Calibri", size=10, bold=True)
+            elif label in ["OE", "OE (OPERATING EXPENSES)"]:
+                row_fill = fill_oe_main
+                row_font = Font(name="Calibri", size=10, bold=True)
+            elif label in ["NP", "NP (NET PROFIT)"] or "NET PROFIT" in label:
+                row_fill = fill_green
+                row_font = Font(name="Calibri", size=10, bold=True)
 
-def compute_toc(leaves: list[Leaf], mapping: dict[str, dict], period_cols: list[dict],
-                reported_result: np.ndarray | None = None) -> TocResult:
-    """mapping: {leaf_id: {"group": str, "is_income": bool}}"""
-    income_ids = {i for i, m in mapping.items() if m.get("is_income")}
-    income_ids |= {i for i, m in mapping.items() if m["group"] == "S"}
-    A, _ = leaf_amounts(leaves, income_ids)     # ieņēmumi +, izdevumi −
-    ids = [l.id for l in leaves]
-    groups = np.array([mapping[i]["group"] for i in ids])
+            for c_idx in range(1, len(st.session_state.df_main.columns) + 1):
+                c = ws.cell(row=r_idx, column=c_idx)
+                c.fill = row_fill
+                c.font = row_font
+                c.border = thin_border
+            last_row = r_idx
 
-    labels = [p["label"] for p in period_cols]
-    month_idx = [j for j, p in enumerate(period_cols) if p["kind"] == "month"]
-    other_idx = [j for j, p in enumerate(period_cols) if p["kind"] != "month"]
+        if st.session_state.df_kpi is not None:
+            start_kpi_row = last_row + 3
+            for col_idx, col_name in enumerate(st.session_state.df_kpi.columns, start=1):
+                c = ws.cell(row=start_kpi_row, column=col_idx, value=col_name)
+                c.font = Font(name="Calibri", size=10, bold=True)
+                c.alignment = Alignment(horizontal="center", vertical="center")
+            
+            for r_offset, row in enumerate(st.session_state.df_kpi.itertuples(index=False), start=1):
+                cur_r = start_kpi_row + r_offset
+                for c_idx in range(1, len(st.session_state.df_kpi.columns) + 1):
+                    c = ws.cell(row=cur_r, column=c_idx, value=row[c_idx - 1])
+                    c.fill = fill_kpi
+                    c.font = Font(name="Calibri", size=10)
+                    c.border = thin_border
 
-    def gsum(g: str) -> np.ndarray:
-        m = groups == g
-        return A[m].sum(axis=0) if m.any() else np.zeros(A.shape[1])
+        for col in ws.columns:
+            max_len = max(len(str(cell.value or '')) for cell in col)
+            col_letter = get_column_letter(col[0].column)
+            ws.column_dimensions[col_letter].width = max(max_len + 3, 11)
 
-    rows: dict[str, np.ndarray] = {}
-    kinds: dict[str, str] = {}
-    S = gsum("S"); rows["S"] = S; kinds["S"] = "S"
-    tvc_rows = {}
-    for k in TVC_KEYS:
-        if (groups == k).any():
-            tvc_rows[k] = -gsum(k)
-    TVC = sum(tvc_rows.values()) if tvc_rows else np.zeros_like(S)
-    rows["TVC"] = TVC; kinds["TVC"] = "TVC"
-    for k, v in tvc_rows.items():
-        rows[GROUPS[k][0]] = v; kinds[GROUPS[k][0]] = "TVC_CHILD"
-    T = S - TVC; rows["T"] = T; kinds["T"] = "T"
-    oe_rows = {k: -gsum(k) for k in OE_KEYS if (groups == k).any()}
-    OE = sum(oe_rows.values()) if oe_rows else np.zeros_like(S)
-    rows["OE"] = OE; kinds["OE"] = "OE"
-    for k, v in oe_rows.items():
-        rows[GROUPS[k][0]] = v; kinds[GROUPS[k][0]] = "OE_CHILD"
-    NP = T - OE; rows["NP"] = NP; kinds["NP"] = "NP"
-    EXCL = -gsum("EXCLUDED")                 # izslēgtās izmaksas (pozitīvas = izmaksas)
-    if (groups == "EXCLUDED").any():
-        rows[GROUPS["EXCLUDED"][0]] = EXCL; kinds[GROUPS["EXCLUDED"][0]] = "EXCL"
+    st.download_button(
+        label="📥 Lejupielādēt noformēto Excel failu (.xlsx)",
+        data=excel_buffer.getvalue(),
+        file_name="TOC_Finansu_Diagnostika.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
-    base = pd.DataFrame(rows, index=labels).T            # rindas × periodi
-    # YTD / AVG tikai, ja ir ≥2 mēneši
-    cols = list(base.columns)
-    if len(month_idx) >= 2:
-        mcols = [labels[j] for j in month_idx]
-        year = _year_from_labels(mcols)
-        base[f"{year} YTD"] = base[mcols].sum(axis=1)
-        base[f"{year} AVG YTD"] = base[mcols].mean(axis=1)
-    amounts = base.copy()
+    st.subheader("Finanšu pārskata tabula")
+    styled_main = st.session_state.df_main.style.apply(highlight_main_rows, axis=1)
+    st.dataframe(styled_main, use_container_width=True)
 
-    # galvenā tabula: summa + % no S
-    main = {}
-    for c in amounts.columns:
-        main[c] = amounts[c]
-        s = amounts.loc["S", c]
-        main[f"%|{c}"] = amounts[c] / s if s else np.nan
-    main = pd.DataFrame(main)
+    if st.session_state.df_kpi is not None:
+        st.subheader("📈 Produktivitātes rādītāji")
+        styled_kpi = st.session_state.df_kpi.style.apply(highlight_kpi_rows, axis=1)
+        st.dataframe(styled_kpi, use_container_width=True)
 
-    # KPI
-    def kpi_for(col_vals: pd.Series) -> dict[str, float]:
-        S_, T_, OE_ = col_vals["S"], col_vals["T"], col_vals["OE"]
-        aw = col_vals.get(GROUPS["OE_ADMIN_WAGES"][0], 0.0)
-        ww = col_vals.get(GROUPS["OE_WORKER_WAGES"][0], 0.0)
-        div = lambda a, b: a / b if b else np.nan
-        return {"PR = T/OE": div(T_, OE_), "T% = T/S": div(T_, S_),
-                "Eiro Sales / Eiro algas kopā": div(S_, aw + ww),
-                "Eiro Sales / Eiro administrācijas algas": div(S_, aw),
-                "Eiro Sales / Eiro strādnieku algas": div(S_, ww)}
+    st.subheader("Vadības analīze un secinājumi")
+    clean_text = re.sub(r"```tsv.*?```", "", st.session_state.output_text, flags=re.DOTALL).strip()
+    st.markdown(clean_text)
 
-    kpi = pd.DataFrame({c: kpi_for(amounts[c]) for c in amounts.columns})
-    if len(month_idx) >= 2 and KPI_AVG_MODE == "mean_of_months":
-        mcols = [labels[j] for j in month_idx]
-        kpi[f"{_year_from_labels(mcols)} AVG YTD"] = kpi[mcols].mean(axis=1)
+    st.markdown("---")
+    st.subheader("💬 Uzdod jautājumu par šo TOC analīzi")
 
-    # pārbaudes
-    checks = []
-    tot_ok = np.allclose(NP - EXCL, A.sum(axis=0), atol=1.0)
-    checks.append({"Pārbaude": "NP (TOC) − izslēgtās izmaksas = Σ visu lapu", "Statuss": "OK" if tot_ok else "KĻŪDA",
-                   "Detaļas": "Katra lapa ir tieši vienā grupā."})
-    if reported_result is not None:
-        diff = np.abs(NP - EXCL - reported_result).max()
-        checks.append({"Pārbaude": "NP (TOC) − izslēgtās izmaksas = faila gala rezultāts",
-                       "Statuss": "OK" if diff <= 3.0 else "KĻŪDA",
-                       "Detaļas": f"Lielākā starpība: {diff:,.2f}"})
-    return TocResult(main, kpi, kinds, list(amounts.columns), amounts, checks)
+    for msg in st.session_state.chat_history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
+    user_query = st.chat_input("Ieraksti jautājumu par pārskata datiem...")
+    if user_query:
+        st.session_state.chat_history.append({"role": "user", "content": user_query})
+        with st.chat_message("user"):
+            st.markdown(user_query)
 
-def _year_from_labels(labels: list[str]) -> str:
-    m = re.search(r"(20\d\d)", labels[0])
-    return m.group(1) if m else ""
-
-
-# ------------------------------------------------------------------ EXCEL
-FILLS = {
-    "S": ("FFFF00", True, "000000"), "TVC": ("ED7D31", True, "FFFFFF"), "TVC_CHILD": ("F8CBAD", False, "000000"),
-    "T": ("00B0F0", True, "000000"), "OE": ("F8CECC", True, "000000"), "OE_CHILD": ("FCE4D6", False, "000000"),
-    "NP": ("92D050", True, "000000"), "EXCL": ("D9D9D9", False, "595959"),
-}
-THIN = Side(style="thin", color="BFBFBF")
-BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
-
-
-def build_excel(res: TocResult, path_or_buf, formulas: bool = True) -> None:
-    """formulas=True : kontu grupu rindas = vērtības, T/OE/NP/%/YTD/AVG/KPI = Excel formulas (jāatver Excel/LibreOffice).
-    formulas=False: visas šūnas = vērtības (priekšskatījumiem, Quick Look, Google Drive)."""
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "TOC Diagnostika"
-    fnt = lambda **kw: Font(name=FONT_NAME, size=FONT_SIZE, **kw)
-    amounts = res.amounts
-    periods = list(amounts.columns)
-    row_names = list(amounts.index)
-
-    ws.cell(1, 1, "Rādītājs / Kontugrupa").font = fnt(bold=True)
-    col_of: dict[str, int] = {}
-    c = 2
-    for p in periods:
-        col_of[p] = c
-        ws.cell(1, c, p).font = fnt(bold=True)
-        ws.cell(1, c + 1, "%").font = fnt(bold=True)
-        c += 2
-    for cc in range(1, c):
-        ws.cell(1, cc).alignment = Alignment(horizontal="center", vertical="center")
-
-    r_of = {name: i + 2 for i, name in enumerate(row_names)}
-    months = [p for p in periods if re.match(r"^\d{2}\.\d{4}", p)]
-    ytd = next((p for p in periods if p.endswith(" YTD") and "AVG" not in p), None)
-    avg = next((p for p in periods if "AVG" in p), None)
-    L = get_column_letter
-    child_tvc = [n for n in row_names if res.row_kinds[n] == "TVC_CHILD"]
-    child_oe = [n for n in row_names if res.row_kinds[n] == "OE_CHILD"]
-
-    for name in row_names:
-        r = r_of[name]
-        kind = res.row_kinds[name]
-        ws.cell(r, 1, name)
-        for p in periods:
-            cc = col_of[p]
-            a, pc = ws.cell(r, cc), ws.cell(r, cc + 1)
-            col = L(cc)
-            is_ytd, is_avg = p == ytd, p == avg
-            val = float(round(amounts.loc[name, p], 2))
-            if is_ytd:
-                f = "=" + "+".join(f"{L(col_of[m])}{r}" for m in months)
-            elif is_avg:
-                f = f"=AVERAGE({','.join(f'{L(col_of[m])}{r}' for m in months)})"
-            elif kind == "TVC":
-                f = f"=SUM({col}{r_of[child_tvc[0]]}:{col}{r_of[child_tvc[-1]]})" if child_tvc else 0
-            elif kind == "T":
-                f = f"={col}{r_of['S']}-{col}{r_of['TVC']}"
-            elif kind == "OE":
-                f = f"=SUM({col}{r_of[child_oe[0]]}:{col}{r_of[child_oe[-1]]})" if child_oe else 0
-            elif kind == "NP":
-                f = f"={col}{r_of['T']}-{col}{r_of['OE']}"
-            else:
-                f = val
-            a.value = f if formulas else val
-            pv = res.main.loc[name, f"%|{p}"]
-            pc.value = (f"=IF({col}${r_of['S']}=0,\"\",{col}{r}/{col}${r_of['S']})" if formulas
-                        else (None if pd.isna(pv) else float(pv)))
-            a.number_format = '#,##0;-#,##0;"-"'
-            pc.number_format = "0.0%"
-            for cell in (a, pc):
-                cell.alignment = Alignment(horizontal="right")
-
-        fill, bold, color = FILLS.get(kind, FILLS["OE_CHILD"])
-        for cc in range(1, c):
-            cell = ws.cell(r, cc)
-            cell.fill = PatternFill("solid", start_color=fill, end_color=fill)
-            cell.font = fnt(bold=bold, color=color)
-            cell.border = BORDER
-
-    # KPI
-    k0 = len(row_names) + 4
-    ws.cell(k0, 1, "Rādītājs").font = fnt(bold=True)
-    kpi_cols = list(res.kpi.columns)
-    for j, p in enumerate(kpi_cols):
-        ws.cell(k0, 2 + j, p).font = fnt(bold=True)
-        ws.cell(k0, 2 + j).alignment = Alignment(horizontal="center")
-    S_, T_, OE_ = r_of["S"], r_of["T"], r_of["OE"]
-    aw_n = GROUPS["OE_ADMIN_WAGES"][0]
-    ww_n = GROUPS["OE_WORKER_WAGES"][0]
-    aw = r_of.get(aw_n)
-    ww = r_of.get(ww_n)
-    kpi_names = list(res.kpi.index)
-    for i, kn in enumerate(kpi_names, start=1):
-        r = k0 + i
-        ws.cell(r, 1, kn)
-        for j, p in enumerate(kpi_cols):
-            cell = ws.cell(r, 2 + j)
-            kv = res.kpi.loc[kn, p]
-            avg_of_months = (p == avg and KPI_AVG_MODE == "mean_of_months")
-            if avg_of_months:
-                f = f"=AVERAGE({L(2)}{r}:{L(1 + len(months))}{r})"
-            else:
-                a = L(col_of[p])
-                den_w = "+".join(f"{a}{x}" for x in (aw, ww) if x)
-                f = {
-                    "PR = T/OE": f"=IF({a}{OE_}=0,\"\",{a}{T_}/{a}{OE_})",
-                    "T% = T/S": f"=IF({a}{S_}=0,\"\",{a}{T_}/{a}{S_})",
-                    "Eiro Sales / Eiro algas kopā": f"=IF(({den_w or '0'})=0,\"\",{a}{S_}/({den_w or '1'}))" if den_w else "",
-                    "Eiro Sales / Eiro administrācijas algas": f"=IF({a}{aw}=0,\"\",{a}{S_}/{a}{aw})" if aw else "",
-                    "Eiro Sales / Eiro strādnieku algas": f"=IF({a}{ww}=0,\"\",{a}{S_}/{a}{ww})" if ww else "",
-                }[kn]
-            cell.value = (f or None) if formulas else (None if pd.isna(kv) else float(kv))
-            cell.number_format = "0.0%" if kn.startswith("T%") else "0.00"
-            cell.alignment = Alignment(horizontal="right")
-        for cc in range(1, 2 + len(kpi_cols)):
-            cell = ws.cell(r, cc)
-            cell.fill = PatternFill("solid", start_color="F2F4F4", end_color="F2F4F4")
-            cell.font = fnt()
-            cell.border = BORDER
-
-    # piezīmes
-    n0 = k0 + len(kpi_names) + 2
-    notes = [
-        "Piezīmes:",
-        "Kontu grupu rindas ir vērtības no PZA faila (klasifikāciju apstiprinājis lietotājs); T, OE, NP, %, YTD, AVG un KPI ir formulas.",
-        "OE ietver pārējos saimnieciskās darbības ieņēmumus kā negatīvu izmaksu (samazina OE).",
-        "AVG YTD KPI = mēnešu KPI vidējais aritmētiskais; YTD KPI = no YTD summām." if KPI_AVG_MODE == "mean_of_months"
-        else "AVG YTD KPI = no vidējām summām (sakrīt ar YTD).",
-    ]
-    for i, t in enumerate(notes):
-        ws.cell(n0 + i, 1, t).font = fnt(italic=(i > 0), bold=(i == 0))
-
-    ws.column_dimensions["A"].width = 48
-    for cc in range(2, c + 1):
-        ws.column_dimensions[L(cc)].width = 12
-    ws.freeze_panes = "B2"
-    ws.sheet_view.showGridLines = False
-    wb.calculation.fullCalcOnLoad = True
-    wb.save(path_or_buf)
+        with st.chat_message("assistant"):
+            with st.spinner("Domā..."):
+                clean_key = str(ANTHROPIC_API_KEY).strip().strip('"').strip("'")
+                client = anthropic.Anthropic(api_key=clean_key)
+                
+                chat_context = f"""
+                Konteksts ar TOC analīzi un datiem:
+                {st.session_state.output_text}
+                
+                Lietotāja jautājums:
+                {user_query}
+                
+                Atbildi profesionāli, kodolīgi un balstoties uz šiem datiem un TOC principiem.
+                """
+                
+                chat_resp = client.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=1500,
+                    messages=[{"role": "user", "content": chat_context}]
+                )
+                
+                reply = ""
+                for block in chat_resp.content:
+                    if getattr(block, "type", "") == "text":
+                        reply += block.text
+                    elif hasattr(block, "text"):
+                        reply += block.text
+                        
+                st.markdown(reply)
+                st.session_state.chat_history.append({"role": "assistant", "content": reply})
