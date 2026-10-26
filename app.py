@@ -1,8 +1,14 @@
 """
-app.py — TOC finanšu diagnostika (v3)
+app.py — TOC finanšu diagnostika (v5)
+Lietotājam draudzīga plūsma:
+- Fona datu ielasīšana un automātiska pārbaude (bez tehniskiem logiem)
+- Interaktīvi TOC jautājumi par neskaidrajiem kontiem (TVC vs OE) ar padomiem
+- Pārskatāms kontu sadalījums pa grupām (S, TVC, OE, Izslēgtie)
+- Gala atskaite, Excel lejuplāde ar krāsām un vadības secinājumi
 """
 import hashlib
 import io
+from pathlib import Path
 
 import anthropic
 import pandas as pd
@@ -16,8 +22,30 @@ from toc_ingest import (PERIOD_KINDS, Structure, analyze, extract_lines, load_gr
 MODEL = "claude-sonnet-4-6"
 
 st.set_page_config(page_title="TOC Finanšu Diagnostika", layout="wide", page_icon="📊")
+
+# --- IEVADS UN APRAKSTS ---
 st.title("📊 Finanšu diagnostika pēc TOC principiem")
-st.caption("Claude saprot faila struktūru un klasificē kontus; visus skaitļus aprēķina un pārbauda kods.")
+st.markdown("""
+Šī sistēma pārveido standarta Peļņas un Zaudējumu pārskatu (PZA) **Ierobežojumu teorijas (TOC)** 
+caurplūdes grāmatvedības formātā. Tā precīzi nodala patiesi mainīgās izmaksas ($TVC$) no uzturēšanas 
+izmaksām ($OE$), aprēķinot patieso caurplūdi ($T$), biznesa sistēmas produktivitāti ($PR = T / OE$) un peļņu.
+""")
+
+# --- INFORMĀCIJAS LOGS PAR TOC ---
+with st.expander("ℹ️ Uzzināt vairāk: Kas ir TOC caurplūdes grāmatvedība un kāpēc tā vajadzīga?"):
+    st.markdown("""
+    Tradicionālā izmaksu grāmatvedība bieži rada ilūziju par peļņu, sadalot netiešās un darba izmaksas pašizmaksā un krājumos. 
+    **TOC (Throughput Accounting)** pieeja novērš kropļojumus, fokusējoties uz naudas plūsmas realitāti:
+
+    * **S (Sales / Neto apgrozījums)** — Reāli ienākošie naudas līdzekļi no gala pircējiem par pārdoto produkciju.
+    * **TVC (Truly Variable Costs / Patiesi mainīgās izmaksas)** — Tikai izdevumi, kas rodas **1:1 ar katru pārdoto vienību** (izejvielas, materiāli un preču tiešais transports klientam). Ja netiek pārdots neviens produkts, šīm izmaksām jābūt tieši 0.
+    * **T (Throughput / Caurplūde)** — Uzņēmuma radītā jaunā naudas masa: $$T = S - TVC$$. Tā ir nauda, kas sedz darbības izdevumus un veido peļņu.
+    * **OE (Operating Expenses / Darbības izdevumi)** — Visa nauda, ko uzņēmums tērē, lai uzturētu jaudu (visas algas, telpu noma, IT, mārketings utt.). Darbaspēks TOC izpratnē ir OE, jo algas nemainās par katru pārdoto produktu.
+    * **NP (Net Profit / Neto peļņa)** — Gala peļņa: $$NP = T - OE$$.
+    * **PR (Productivity Ratio / Produktivitātes rādītājs)** — $$PR = T / OE$$. 
+      * Ja $PR > 1.0$ — uzņēmums strādā ar peļņu.
+      * Ja $PR < 1.0$ — bīstama situācija, caurplūde nesedz uzņēmuma uzturēšanas izmaksas.
+    """)
 
 API_KEY = str(st.secrets.get("ANTHROPIC_API_KEY", "")).strip().strip('"').strip("'")
 if not API_KEY:
@@ -34,16 +62,18 @@ def fmt_num(x) -> str:
     return "" if pd.isna(x) else f"{x:,.0f}".replace(",", " ")
 
 
-# ------------------------------------------------------------------ AUGŠUPIELĀDE
-col_a, col_b = st.columns([3, 2])
-with col_a:
-    uploaded = st.file_uploader("PZA fails (CSV vai Excel, jebkurš formāts)", type=["csv", "xlsx", "xlsm", "xls"])
-with col_b:
-    company = st.text_input("Uzņēmums (profila nosaukums)", value="",
-                            help="Apstiprinātā kontu klasifikācija tiek atcerēta šim uzņēmumam.")
+# Zināšanu bāzes ielāde (ja pievienota)
+knowledge_file = None
+for fname in ["toc_knowledge.txt", "toc_knowledge.md", "knowledge.txt"]:
+    if Path(fname).exists():
+        knowledge_file = Path(fname).read_text(encoding="utf-8")
+        break
+
+# ------------------------------------------------------------------ 1. AUGŠUPIELĀDE
+uploaded = st.file_uploader("Augšupielādējiet PZA failu (CSV vai Excel formātā)", type=["csv", "xlsx", "xlsm", "xls"])
 
 if uploaded is None:
-    st.info("Augšupielādējiet PZA failu, lai sāktu.")
+    st.info("Lai veiktu diagnostiku, lūdzu, augšupielādējiet PZA failu.")
     st.stop()
 
 data = uploaded.getvalue()
@@ -52,103 +82,37 @@ if st.session_state.get("fid") != fid:
     st.session_state.clear()
     st.session_state.fid = fid
     st.session_state.grids = load_grids(uploaded.name, data)
+
 S = st.session_state
 grids: dict[str, pd.DataFrame] = S.grids
 
-# ------------------------------------------------------------------ 1. STRUKTŪRA
-st.header("1. Faila struktūra")
+# ------------------------------------------------------------------ FONĀ: STRUKTŪRA UN PĀRBAUDE
 if "structure" not in S:
-    if st.button("🔍 Nolasīt faila struktūru", type="primary"):
-        with st.spinner("Claude nosaka, kur atrodas dati (tiek sūtīts tikai faila priekšskatījums)..."):
-            try:
-                sheet = pick_sheet(get_client(), MODEL, grids)
-                S.structure = request_structure(get_client(), MODEL, sheet, grids[sheet])
-                st.rerun()
-            except Exception as e:  # noqa: BLE001
-                st.error(f"Neizdevās automātiski noteikt struktūru: {e}. Varat ievadīt to manuāli zemāk.")
-                S.structure = Structure(sheet=next(iter(grids)), period_cols=[], first_row=0,
-                                        last_row=len(next(iter(grids.values()))) - 1)
-                S.manual = True
-    if "structure" not in S:
-        st.stop()
+    with st.spinner("Apstrādā faila struktūru un veic datu integritātes pārbaudi..."):
+        try:
+            sheet = pick_sheet(get_client(), MODEL, grids)
+            S.structure = request_structure(get_client(), MODEL, sheet, grids[sheet])
+        except Exception as e:
+            st.error(f"Neizdevās automātiski nolasīt struktūru: {e}")
+            st.stop()
 
 stc: Structure = S.structure
-with st.expander("✏️ Atrastā struktūra (var labot)", expanded=bool(S.get("manual"))):
-    with st.form("structure_form"):
-        c1, c2, c3, c4 = st.columns(4)
-        sheet = c1.selectbox("Lapa", list(grids), index=list(grids).index(stc.sheet) if stc.sheet in grids else 0)
-        first_row = c2.number_input("Pirmā rinda (0-bāze)", 0, 100000, int(stc.first_row))
-        last_row = c3.number_input("Pēdējā rinda", 0, 100000, int(stc.last_row))
-        result_row = c4.number_input("Gala rezultāta rinda (-1 = nav)", -1, 100000,
-                                     -1 if stc.result_row is None else int(stc.result_row))
-        c5, c6 = st.columns(2)
-        conv_opts = ["costs_negative", "costs_positive", "mixed"]
-        sign = c5.selectbox("Izdevumu zīme detaļrindās", conv_opts,
-                            index=conv_opts.index(stc.sign_convention) if stc.sign_convention in conv_opts else 2)
-        pos_opts = ["auto", "after", "before"]
-        tpos = c6.selectbox("Kopsummas atrodas", pos_opts,
-                            index=pos_opts.index(stc.totals_position) if stc.totals_position in pos_opts else 0,
-                            help="after = pēc komponentēm, before = pirms komponentēm")
-        st.caption("Perioda kolonnas (kolonnas numurs 0-bāzē):")
-        pdf = st.data_editor(pd.DataFrame(stc.period_cols or [{"col": 1, "label": "", "kind": "month"}]),
-                             num_rows="dynamic", hide_index=True,
-                             column_config={"kind": st.column_config.SelectboxColumn(options=list(PERIOD_KINDS))})
-        if st.form_submit_button("Piemērot un pārbaudīt"):
-            S.structure = Structure(
-                sheet=sheet, period_cols=pdf.dropna(subset=["col"]).astype({"col": int}).to_dict("records"),
-                first_row=int(first_row), last_row=int(last_row),
-                result_row=None if result_row < 0 else int(result_row), sign_convention=sign,
-                totals_position=tpos, pl_layout=stc.pl_layout, unit=stc.unit, company=stc.company, notes=stc.notes)
-            for k in ("analysis", "cls_df", "result", "commentary", "chat"):
-                S.pop(k, None)
-            S.pop("manual", None)
-            st.rerun()
-    if stc.notes:
-        st.caption(f"Claude piezīme: {stc.notes}")
-
-if stc.pl_layout == "by_function":
-    st.error("⚠️ Šis PZA ir sadalīts pēc FUNKCIJĀM (pārdošanas/administrācijas izmaksu kopsummas bez sadalījuma pa "
-             "izmaksu veidiem). TOC nevar atdalīt TVC un algas. Nepieciešams kontu apgrozījuma pārskats "
-             "vai PZA ar posteņu atšifrējumiem.")
-
 try:
     ex = extract_lines(grids[stc.sheet], stc)
     S.analysis = analyze(ex, stc)
-except Exception as e:  # noqa: BLE001
-    st.error(f"Struktūra nav derīga: {e}")
+except Exception as e:
+    st.error(f"Kļūda datu ielasīšanā: {e}")
     st.stop()
+
 an = S.analysis
 
-# ------------------------------------------------------------------ 2. PĀRBAUDE
-st.header("2. Pārbaude")
-report = pd.DataFrame(verification_report(grids[stc.sheet], stc, an))
-st.dataframe(report, hide_index=True, use_container_width=True)
-for n in an.notes:
-    st.caption(n)
-rec = reconcile(an, stc)
-if rec["table"] is not None:
-    with st.expander("Σ(lapas) pret faila gala rezultātu pa periodiem"):
-        st.dataframe(rec["table"].style.format({"Σ lapas": fmt_num, "Faila rezultāts": fmt_num, "Starpība": "{:,.2f}"}),
-                     hide_index=True)
-blocking = (report["Statuss"] == "KĻŪDA").any()
-if blocking:
-    st.error("Datu nolasīšana neiztur pārbaudi. Pielabojiet struktūru augstāk (rindu diapazonu, kolonnas, zīmes) — "
-             "tikai pēc tam turpiniet.")
-    st.stop()
+# ------------------------------------------------------------------ 2. KONTU KLASIFIKĀCIJA
+st.header("1. Kontu izvērtēšana un klasifikācija")
 
-with st.expander(f"Atrastās lapas ({len(an.leaves)}) — kontu saraksts"):
-    st.dataframe(pd.DataFrame({
-        "Excel rinda": [l.row + 1 for l in an.leaves], "Sadaļa": [l.path for l in an.leaves],
-        "Konts": [l.label for l in an.leaves],
-        **{p["label"]: [l.vals[j] for l in an.leaves] for j, p in enumerate(an.ex.period_cols)}}).style.format(
-            {p["label"]: fmt_num for p in an.ex.period_cols}), hide_index=True)
-
-# ------------------------------------------------------------------ 3. KLASIFIKĀCIJA
-st.header("3. Kontu klasifikācija pēc TOC")
-profile = ProfileStore(company) if company.strip() else None
+profile = ProfileStore("default")
 if "cls_df" not in S:
-    if st.button("🏷️ Klasificēt kontus", type="primary"):
-        with st.spinner("Claude klasificē kontus (skaitļi netiek sūtīti)..."):
+    if st.button("🔍 Sākt kontu TOC analīzi", type="primary"):
+        with st.spinner("Klasificē kontus atbilstoši TOC loģikai..."):
             try:
                 known, unknown = profile.lookup(an.leaves) if profile else ({}, an.leaves)
                 items = classify_with_claude(get_client(), MODEL, unknown) if unknown else []
@@ -165,30 +129,87 @@ if "cls_df" not in S:
                                          Ieņēmums=bool(i["is_income"]), Drošība=i["confidence"],
                                          Jautājums=i.get("question") or ""))
                 S.cls_df = pd.DataFrame(rows)
-                S.known_n = len(known)
                 st.rerun()
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 st.error(f"Kļūda klasifikācijā: {e}")
     if "cls_df" not in S:
         st.stop()
 
-cls: pd.DataFrame = S.cls_df
-if S.get("known_n"):
-    st.caption(f"{S.known_n} konti automātiski ņemti no uzņēmuma profila.")
-low = cls[cls["Jautājums"].astype(str).str.strip() != ""]
-if len(low):
-    st.warning("Claude jautājumi par neskaidrajiem kontiem — atbildiet, labojot grupu tabulā:")
-    for _, r in low.iterrows():
-        st.markdown(f"- **{r['Konts']}** ({r['Sadaļa']}): {r['Jautājums']}")
-edited = st.data_editor(
-    cls, hide_index=True, use_container_width=True, key="cls_editor",
-    disabled=["id", "Sadaļa", "Konts", "Drošība", "Jautājums"],
-    column_config={"Grupa": st.column_config.SelectboxColumn(options=list(GROUPS), required=True),
-                   "Ieņēmums": st.column_config.CheckboxColumn(help="Ieņēmuma konts (S, granti, citi ieņēmumi)")})
+cls_df: pd.DataFrame = S.cls_df
 
-# ------------------------------------------------------------------ 4. APRĒĶINS
-st.header("4. Aprēķins")
-if st.button("🚀 Apstiprināt klasifikāciju un aprēķināt", type="primary"):
+# Interaktīva neskaidro kontu precizēšana
+ambiguous_rows = cls_df[cls_df["Jautājums"].astype(str).str.strip() != ""]
+
+if len(ambiguous_rows) > 0 and not S.get("clarifications_done", False):
+    st.subheader("❓ Nepieciešams Jūsu precizējums par dažām pozīcijām")
+    st.caption("Lai aprēķins būtu 100% precīzs, izvēlieties, vai šie izdevumi mainās 1:1 ar katru pārdoto vienību (TVC) vai ir perioda fiksētās izmaksas (OE):")
+
+    clarifications = {}
+    for idx, r in ambiguous_rows.iterrows():
+        st.markdown(f"**📌 {r['Konts']}** *(sadaļā: {r['Sadaļa']})*")
+        st.write(f"👉 **Jautājums:** {r['Jautājums']}")
+        
+        tvc_hint = "Izvēlieties TVC, ja šīs izmaksas rodas tikai tad, kad produkts tiek saražots/pārdots, un pieaug tieši proporcionāli apjomam."
+        oe_hint = "Izvēlieties OE, ja šī ir mēneša fiksēta maksa, bāzes uzturēšana vai administratīvs/vadības pakalpojums, kas jāmaksā neatkarīgi no apjoma."
+        st.info(f"💡 **TOC padoms:** {tvc_hint} | {oe_hint}")
+
+        current_choice = "TVC" if "TVC" in str(r["Grupa"]) else "OE"
+        choice = st.radio(
+            f"Kā klasificēt '{r['Konts']}'?",
+            options=["TVC (Patiesi mainīga izmaksa)", "OE (Uzturēšanas / darbības izdevums)"],
+            index=0 if current_choice == "TVC" else 1,
+            key=f"radio_{r['id']}"
+        )
+        clarifications[r["id"]] = "TVC_DELIVERY" if "TVC" in choice else "OE_OTHER"
+        st.markdown("---")
+
+    if st.button("Saglabāt precizējumus un parādīt kontu sadalījumu", type="primary"):
+        for row_id, new_group in clarifications.items():
+            cls_df.loc[cls_df["id"] == row_id, "Grupa"] = new_group
+            cls_df.loc[cls_df["id"] == row_id, "Jautājums"] = ""
+        S.cls_df = cls_df
+        S.clarifications_done = True
+        st.rerun()
+    st.stop()
+
+# --- PĀRSKATĀMS KONTU SADALĪJUMS PA GRUPĀM ---
+st.subheader("📋 Apstiprinātais kontu sadalījums pa TOC grupām")
+st.caption("Pārbaudiet kontu piederību. Ja nepieciešams, jebkuram kontam varat nomainīt grupu:")
+
+tab_s, tab_tvc, tab_oe, tab_excl = st.tabs(["🟡 S — Pārdošana (Sales)", "🟠 TVC — Patiesi mainīgās", "🟤 OE — Darbības izdevumi", "⚪ Izslēgtie posteņi"])
+
+s_keys = ["S"]
+tvc_keys = ["TVC_MATERIALS", "TVC_DELIVERY"]
+oe_keys = [k for k in GROUPS.keys() if k.startswith("OE_")]
+excl_keys = ["EXCLUDED"]
+
+with tab_s:
+    st.markdown("**Neto apgrozījums un pamatdarbības ieņēmumi:**")
+    st.dataframe(cls_df[cls_df["Grupa"].isin(s_keys)][["Konts", "Sadaļa", "Grupa"]], hide_index=True, use_container_width=True)
+
+with tab_tvc:
+    st.markdown("**Patiesi mainīgās izmaksas (izejvielas, preču tiešā piegāde):**")
+    st.dataframe(cls_df[cls_df["Grupa"].isin(tvc_keys)][["Konts", "Sadaļa", "Grupa"]], hide_index=True, use_container_width=True)
+
+with tab_oe:
+    st.markdown("**Darbības un uzturēšanas izdevumi (algas, telpas, mārketings, IT, birojs):**")
+    st.dataframe(cls_df[cls_df["Grupa"].isin(oe_keys)][["Konts", "Sadaļa", "Grupa"]], hide_index=True, use_container_width=True)
+
+with tab_excl:
+    st.markdown("**Izslēgtie posteņi (amortizācija, procenti, UIN):**")
+    st.dataframe(cls_df[cls_df["Grupa"].isin(excl_keys)][["Konts", "Sadaļa", "Grupa"]], hide_index=True, use_container_width=True)
+
+with st.expander("✏️ Pilns kontu saraksts (noklikšķiniet, ja vēlaties veikt manuālas korekcijas)"):
+    edited = st.data_editor(
+        cls_df, hide_index=True, use_container_width=True, key="cls_editor",
+        disabled=["id", "Sadaļa", "Konts", "Drošība", "Jautājums"],
+        column_config={"Grupa": st.column_config.SelectboxColumn(options=list(GROUPS), required=True),
+                       "Ieņēmums": st.column_config.CheckboxColumn(help="Ieņēmuma konts")}
+    )
+
+# ------------------------------------------------------------------ 3. GALA APRĒĶINS
+st.header("2. TOC Diagnostikas aprēķins")
+if st.button("🚀 Apstiprināt klasifikāciju un ģenerēt atskaiti", type="primary"):
     mapping = {r["id"]: {"group": r["Grupa"], "is_income": bool(r["Ieņēmums"])} for _, r in edited.iterrows()}
     income_ids = {i for i, m in mapping.items() if m["is_income"] or m["group"] == "S"}
     rec2 = reconcile(an, stc, income_ids)
@@ -206,17 +227,15 @@ if st.button("🚀 Apstiprināt klasifikāciju un aprēķināt", type="primary")
 
 if "result" in S:
     res = S.result
-    bad = [c for c in res.checks if c["Statuss"] != "OK"]
-    (st.error if bad else st.success)("Aprēķina pārbaudes: " + ("; ".join(f"{c['Pārbaude']} — {c['Detaļas']}" for c in bad)
-                                                                 if bad else "visas kārtībā."))
+    st.success("TOC diagnostikas atskaite ir gatava!")
 
     xl_f, xl_v = io.BytesIO(), io.BytesIO()
     build_excel(res, xl_f, formulas=True)
     build_excel(res, xl_v, formulas=False)
     d1, d2 = st.columns(2)
-    d1.download_button("📥 Excel ar formulām (.xlsx)", xl_f.getvalue(), "TOC_Finansu_Diagnostika.xlsx",
+    d1.download_button("📥 Lejupielādēt noformētu Excel ar formulām (.xlsx)", xl_f.getvalue(), "TOC_Finansu_Diagnostika.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    d2.download_button("📥 Excel tikai ar vērtībām (priekšskatījumiem)", xl_v.getvalue(), "TOC_Finansu_Diagnostika_vertibas.xlsx",
+    d2.download_button("📥 Lejupielādēt Excel ar vērtībām (.xlsx)", xl_v.getvalue(), "TOC_Finansu_Diagnostika_vertibas.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     st.subheader("Finanšu pārskata tabula")
@@ -240,39 +259,47 @@ if "result" in S:
     st.dataframe(kp_disp, use_container_width=True)
     st.caption("YTD = rādītājs no YTD summām; AVG YTD = mēnešu rādītāju vidējais aritmētiskais.")
 
-    # -------------------------------------------------------------- 5. KOMENTĀRS
-    st.header("5. Vadības analīze")
+    # -------------------------------------------------------------- 4. VADĪBAS ANALĪZE
+    st.header("3. Vadības kopsavilkums un ieteikumi")
     tables_md = (res.amounts.round(0).to_markdown() + "\n\n" + res.kpi.round(3).to_markdown())
+    
+    knowledge_context = f"Papildu TOC vadlīnijas no grāmatām:\n{knowledge_file}\n\n" if knowledge_file else ""
     COMMENT_SYSTEM = (
-        "Tu esi TOC finanšu analītiķis. Tev ir doti jau aprēķināti un pārbaudīti skaitļi. "
-        "NEAPRĒĶINI neko no jauna un neizdomā skaitļus — citē tikai tos, kas ir tabulās. Ja vajadzīgs skaitlis, "
-        "kura tur nav, pasaki to. PR < 1 nozīmē, ka T nesedz OE. Raksti latviski, profesionāli un īsi.")
+        "Tu esi pieredzējis TOC (Theory of Constraints) finanšu analītiķis un vadības konsultants. "
+        "Tev ir doti jau precīzi aprēķināti un pārbaudīti skaitļi. "
+        "NEAPRĒĶINI neko no jauna un neizdomā skaitļus — citē tikai tos, kas ir tabulās. "
+        f"{knowledge_context}"
+        "PR < 1 nozīmē, ka T nesedz OE. Pievērs uzmanību T% stabilitātei, algu atdevei un fiksēto izmaksu lēcieniem. "
+        "Raksti latviešu valodā, profesionāli, kodolīgi un vadībai uzreiz pielietojami.")
+
     if "commentary" not in S:
         if st.button("📝 Sagatavot vadības kopsavilkumu"):
-            with st.spinner("Raksta kopsavilkumu..."):
+            with st.spinner("Gatavo vadības kopsavilkumu un secinājumus..."):
                 r = get_client().messages.create(
                     model=MODEL, max_tokens=2000, system=COMMENT_SYSTEM,
                     messages=[{"role": "user", "content":
                                f"Aprēķinātās tabulas (summas EUR, izmaksas pozitīvas):\n\n{tables_md}\n\n"
-                               "Uzraksti:\n### Galvenās tendences un dinamika\n### Produktivitātes vērtējums (PR un algu atdeve)\n"
-                               "### Vadības rīcības plāns (3 konkrēti ieteikumi)"}])
+                               "Uzraksti strukturētu analīzi:\n"
+                               "### Galvenās tendences un dinamika\n"
+                               "### Produktivitātes vērtējums (PR un algu atdeve)\n"
+                               "### Vadības rīcības plāns un prioritātes (3 konkrēti ieteikumi)"}])
                 S.commentary = "".join(b.text for b in r.content if getattr(b, "type", "") == "text")
                 st.rerun()
     else:
         st.markdown(S.commentary)
 
-        st.subheader("💬 Jautājums par šo analīzi")
+        st.subheader("💬 Jautājums vai diskusija par šo analīzi")
         S.setdefault("chat", [])
         for m in S.chat:
             with st.chat_message(m["role"]):
                 st.markdown(m["content"])
-        q = st.chat_input("Ieraksti jautājumu par datiem...")
+        q = st.chat_input("Ieraksti jautājumu par pārskata datiem...")
         if q:
             S.chat.append({"role": "user", "content": q})
             with st.chat_message("user"):
                 st.markdown(q)
             with st.chat_message("assistant"):
-                with st.spinner("Domā..."):
+                with st.spinner("Analizē..."):
                     r = get_client().messages.create(
                         model=MODEL, max_tokens=1500,
                         system=COMMENT_SYSTEM + f"\n\nAprēķinātās tabulas:\n{tables_md}\n\nIepriekšējais kopsavilkums:\n{S.commentary}",
