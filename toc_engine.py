@@ -1,15 +1,12 @@
 """
-toc_engine.py  —  4.–5. solis
-
-4. Klasifikācija : Claude piešķir katrai lapai TOC grupu (tikai konta nosaukums + ceļš, BEZ skaitļiem)
-5. Aprēķins      : Python (nevis LLM) rēķina S, TVC, T, OE, NP, %, KPI, YTD, AVG
-                   + Excel ar formulām atvasinātajām rindām
+toc_engine.py — TOC klasifikācija un aprēķini ar zināšanu bāzes atbalstu
 """
 from __future__ import annotations
 
 import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -19,12 +16,10 @@ from openpyxl.utils import get_column_letter
 
 from toc_ingest import Leaf, leaf_amounts
 
-# ------------------------------------------------------------------ KONFIGURĀCIJA
-FONT_NAME = "Calibri"          # viens fonts visam Excel failam
+FONT_NAME = "Calibri"
 FONT_SIZE = 10
-KPI_AVG_MODE = "mean_of_months"   # "mean_of_months" (mēnešu KPI vidējais) | "ratio_of_averages" (= YTD)
+KPI_AVG_MODE = "mean_of_months"
 
-# grupa -> (nosaukums tabulā, sadaļa)
 GROUPS: dict[str, tuple[str, str]] = {
     "S": ("S", "S"),
     "TVC_MATERIALS": ("Izejvielas un materiāli", "TVC"),
@@ -41,18 +36,24 @@ GROUPS: dict[str, tuple[str, str]] = {
 TVC_KEYS = [k for k, v in GROUPS.items() if v[1] == "TVC"]
 OE_KEYS = [k for k, v in GROUPS.items() if v[1] == "OE"]
 
-CLASSIFY_SYSTEM = """Tu esi TOC (Throughput Accounting) finanšu eksperts. Tev jāpiešķir katrai PZA lapai (kontam) TOC grupa.
-Skaitļus tu neredzi un nerēķini — tikai klasificē pēc nosaukuma un ceļa.
+# Zināšanu bāzes ielāde
+KNOWLEDGE_TEXT = ""
+for fname in ["toc_knowledge.txt", "toc_knowledge.md", "knowledge.txt"]:
+    p = Path(fname)
+    if p.exists():
+        KNOWLEDGE_TEXT = f"\n\nPAPILDU VADLĪNIJAS NO TOC LITERATŪRAS:\n{p.read_text(encoding='utf-8')}\n"
+        break
 
-TOC noteikumi:
-- S: neto apgrozījums (pārdošana; atlaides klientiem pret apgrozījumu arī S).
-- TVC (Truly Variable Costs): TIKAI izmaksas, kas mainās 1:1 ar katru pārdoto vienību: izejvielas/materiāli/pirktās preces (TVC_MATERIALS), tiešā preču piegāde/transports uz klientu, komisijas par pārdoto (TVC_DELIVERY).
-- OE: visas pārējās perioda izmaksas. Algas OBLIGĀTI sadali: ražošanas/strādnieku (OE_WORKER_WAGES) un administrācijas (OE_ADMIN_WAGES), ieskaitot sociālās iemaksas un uzkrājumus. Pārējais: OE_MARKETING, OE_PLATFORMS (pārdošanas platformu komisijas u.c.), OE_PREMISES, OE_OFFICE_IT, OE_OTHER.
-- Pārējie saimnieciskās darbības IEŅĒMUMI (granti, citi ieņēmumi, valūtas peļņa) -> OE_OTHER ar is_income=true (tie samazina OE).
-- EXCLUDED: amortizācija/nolietojums, procentu maksājumi, uzņēmumu ienākuma nodoklis (arī 'nodoklis no peļņas'), krājumu vērtības izmaiņas/norakstīšana, ārkārtas posteņi.
-- is_income=true visiem ieņēmumu postenim (S, granti, citi ieņēmumi), false izdevumiem.
-- Ja posteņa daba ir patiesi neskaidra (piem. apakšuzņēmēji, muita, iepakojums, platformu maksas): izvēlies visticamāko grupu, confidence='low' un uzdod vienu konkrētu, vienkāršu jautājumu lietotājam latviski.
-- Vienādi nosaukumi (piem. 'Personāla izmaksas') dažādās sadaļās jāklasificē pēc ceļa (sadaļas)."""
+CLASSIFY_SYSTEM = f"""Tu esi TOC (Throughput Accounting) finanšu eksperts. Tev jāpiešķir katrai PZA lapai (kontam) TOC grupa.
+Skaitļus tu neredzi un nerēķini — tikai klasificē pēc nosaukuma un ceļa.
+{KNOWLEDGE_TEXT}
+TOC pamatnoteikumi:
+- S: neto apgrozījums par precēm un pakalpojumiem.
+- TVC: TIKAI un VIENĪGI izdevumi, kas mainās 1:1 ar katru pārdoto vienību (izejvielas TVC_MATERIALS, tiešā preču piegāde TVC_DELIVERY).
+- OE: visas darbības uzturēšanas izmaksas. Algas OBLIGĀTI jāsadala: ražošanas (OE_WORKER_WAGES) un administrācijas (OE_ADMIN_WAGES).
+- Pārējie ieņēmumi (granti, valūtas peļņa) -> OE_OTHER ar is_income=true (tie samazina OE).
+- EXCLUDED: nolietojums/amortizācija, procentu maksājumi, UIN (peļņas nodoklis), krājumu pārvērtēšana.
+- Ja par kādu posteni ir patiesas šaubas (muita, telpu noma, iepakojums): izvēlies visticamāko grupu, confidence='low' un uzdod īsu, skaidru jautājumu latviski."""
 
 CLASSIFY_TOOL = {
     "name": "classify_accounts",
@@ -81,8 +82,7 @@ CLASSIFY_TOOL = {
 }
 
 
-def leaves_for_llm(leaves: list[Leaf], unit_hint: str = "") -> str:
-    """Kompakts saraksts klasifikācijai. Summas nav iekļautas (tikai zīme/lielums netiek sūtīts)."""
+def leaves_for_llm(leaves: list[Leaf]) -> str:
     rows = [{"id": l.id, "path": l.path, "label": l.label} for l in leaves]
     return json.dumps(rows, ensure_ascii=False)
 
@@ -107,7 +107,6 @@ def validate_classification(items: list[dict], leaves: list[Leaf]) -> list[str]:
 
 
 def classify_with_claude(client, model: str, leaves: list[Leaf], max_tries: int = 3) -> list[dict]:
-    """Klasificē lapas ar tool use; ja nepilns — atkārto ar kļūdu aprakstu."""
     msgs = [{"role": "user", "content": "Klasificē šīs PZA lapas:\n" + leaves_for_llm(leaves)}]
     items: list[dict] = []
     for _ in range(max_tries):
@@ -127,29 +126,26 @@ def classify_with_claude(client, model: str, leaves: list[Leaf], max_tries: int 
     raise ValueError("Klasifikācija nav pilnīga pēc vairākiem mēģinājumiem: " + " ".join(errs))
 
 
-# ------------------------------------------------------------------ APRĒĶINS
 @dataclass
 class TocResult:
-    main: pd.DataFrame            # rindas × (periods: summa, %)
+    main: pd.DataFrame
     kpi: pd.DataFrame
-    row_kinds: dict[str, str]     # rindas nosaukums -> S|TVC|TVC_CHILD|T|OE|OE_CHILD|NP|EXCL
-    periods: list[str]            # kolonnu virsraksti (ieskaitot YTD/AVG)
-    amounts: pd.DataFrame         # tikai summas (rindas × periodi) — Excel formulām
+    row_kinds: dict[str, str]
+    periods: list[str]
+    amounts: pd.DataFrame
     checks: list[dict]
 
 
 def compute_toc(leaves: list[Leaf], mapping: dict[str, dict], period_cols: list[dict],
                 reported_result: np.ndarray | None = None) -> TocResult:
-    """mapping: {leaf_id: {"group": str, "is_income": bool}}"""
     income_ids = {i for i, m in mapping.items() if m.get("is_income")}
     income_ids |= {i for i, m in mapping.items() if m["group"] == "S"}
-    A, _ = leaf_amounts(leaves, income_ids)     # ieņēmumi +, izdevumi −
+    A, _ = leaf_amounts(leaves, income_ids)
     ids = [l.id for l in leaves]
     groups = np.array([mapping[i]["group"] for i in ids])
 
     labels = [p["label"] for p in period_cols]
     month_idx = [j for j, p in enumerate(period_cols) if p["kind"] == "month"]
-    other_idx = [j for j, p in enumerate(period_cols) if p["kind"] != "month"]
 
     def gsum(g: str) -> np.ndarray:
         m = groups == g
@@ -173,11 +169,11 @@ def compute_toc(leaves: list[Leaf], mapping: dict[str, dict], period_cols: list[
     for k, v in oe_rows.items():
         rows[GROUPS[k][0]] = v; kinds[GROUPS[k][0]] = "OE_CHILD"
     NP = T - OE; rows["NP"] = NP; kinds["NP"] = "NP"
-    EXCL = -gsum("EXCLUDED")                 # izslēgtās izmaksas (pozitīvas = izmaksas)
+    EXCL = -gsum("EXCLUDED")
     if (groups == "EXCLUDED").any():
         rows[GROUPS["EXCLUDED"][0]] = EXCL; kinds[GROUPS["EXCLUDED"][0]] = "EXCL"
 
-    base = pd.DataFrame(rows, index=labels).T            # rindas × periodi
+    base = pd.DataFrame(rows, index=labels).T
     cols = list(base.columns)
     if len(month_idx) >= 2:
         mcols = [labels[j] for j in month_idx]
@@ -225,7 +221,6 @@ def _year_from_labels(labels: list[str]) -> str:
     return m.group(1) if m else ""
 
 
-# ------------------------------------------------------------------ EXCEL
 FILLS = {
     "S": ("FFFF00", True, "000000"), "TVC": ("ED7D31", True, "FFFFFF"), "TVC_CHILD": ("F8CBAD", False, "000000"),
     "T": ("00B0F0", True, "000000"), "OE": ("F8CECC", True, "000000"), "OE_CHILD": ("FCE4D6", False, "000000"),
@@ -342,17 +337,6 @@ def build_excel(res: TocResult, path_or_buf, formulas: bool = True) -> None:
             cell.fill = PatternFill("solid", start_color="F2F4F4", end_color="F2F4F4")
             cell.font = fnt()
             cell.border = BORDER
-
-    n0 = k0 + len(kpi_names) + 2
-    notes = [
-        "Piezīmes:",
-        "Kontu grupu rindas ir vērtības no PZA faila (klasifikāciju apstiprinājis lietotājs); T, OE, NP, %, YTD, AVG un KPI ir formulas.",
-        "OE ietver pārējos saimnieciskās darbības ieņēmumus kā negatīvu izmaksu (samazina OE).",
-        "AVG YTD KPI = mēnešu KPI vidējais aritmētiskais; YTD KPI = no YTD summām." if KPI_AVG_MODE == "mean_of_months"
-        else "AVG YTD KPI = no vidējām summām (sakrīt ar YTD).",
-    ]
-    for i, t in enumerate(notes):
-        ws.cell(n0 + i, 1, t).font = fnt(italic=(i > 0), bold=(i == 0))
 
     ws.column_dimensions["A"].width = 48
     for cc in range(2, c + 1):
