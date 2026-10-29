@@ -2,9 +2,9 @@
 Avoti: Thomas Corbett "TOC grāmatvedība" (Throughput Accounting) un Georgijs Buklovskis "Transformācija"
 
 ## 1. SISTĒMAS MĒRĶIS UN BĀZES FILOZOFIJA
-- Jebkuras komerciālas sistēmas (uzņēmuma) mērķis ir viens: **PELNĪT VAIRĀK NAUDAS TAGAD UN NĀKOTNĒ**.
+- Jebkuras komerciālas sistēmas (uzņēmuma) mērķis ir viens: PELNĪT VAIRĀK NAUDAS TAGAD UN NĀKOTNĒ.
 - Tradicionālā izmaksu grāmatvedība (GAAP/IFRS, pilnā pašizmaksa, standartizmaksas, ABC) ir "produktivitātes ienaidnieks Nr. 1" (E. Goldrats). Tā balstās uz kļūdainu pieņēmumu par lokālo efektivitāšu summu: it kā katra procesa/resursa efektivitātes celšana uzlabotu uzņēmuma kopējo peļņu.
-- TOC pierāda: **Lokāls optimums NAV globāls optimums**. Sistēmas sniegumu nosaka tikai tās ierobežojums (vājākais posms / CCR). Resursu dīkstāve ārpus ierobežojuma ir dabiska un nepieciešama; mēģinājums tos noslogot 100% rada liekus krājumus (WIP), paildzina izpildes laikus (Lead Time) un samazina peļņu.
+- TOC pierāda: Lokāls optimums NAV globāls optimums. Sistēmas sniegumu nosaka tikai tās ierobežojums (vājākais posms / CCR). Resursu dīkstāve ārpus ierobežojuma ir dabiska un nepieciešama; mēģinājums tos noslogot 100% rada liekus krājumus (WIP), paildzina izpildes laikus (Lead Time) un samazina peļņu.
 - TOC Grāmatvedība atsakās no jebkādas fiksēto izmaksu un pieskaitāmo izmaksu "alokācijas" (sadalīšanas) uz produktiem. Produktam NAV pašizmaksas. Uzņēmumam ir izmaksas, produktiem ir tikai tieši mainīgās izmaksas (TVC).
 
 ---
@@ -12,29 +12,29 @@ Avoti: Thomas Corbett "TOC grāmatvedība" (Throughput Accounting) un Georgijs B
 ## 2. TRĪS FUNDAMENTĀLIE TOC OPERATĪVIE RĀDĪTĀJI
 
 ### 2.1. Caurlaidība (Throughput - T)
-- **Definīcija:** Ātrums, kādā sistēma ģenerē naudu caur pārdošanu. Tā ir jauna nauda, kas reāli ienāk uzņēmumā no ārpasaules, atskaitot piegādātājiem samaksāto naudu par šo konkrēto vienību.
-- **Formula:** 
-  - Vienībai: $Tu = P - TVC$ (Pārdošanas cena mīnus Patiesi mainīgās izmaksas).
-  - Kopā: $T = S - TVC$ (Neto apgrozījums mīnus TVC).
+- Definīcija: Ātrums, kādā sistēma ģenerē naudu caur pārdošanu. Tā ir jauna nauda, kas reāli ienāk uzņēmumā no ārpasaules, atskaitot piegādātājiem samaksāto naudu par šo konkrēto vienību.
+- Formula: 
+  - Vienībai: Tu = P - TVC (Pārdošanas cena mīnus Patiesi mainīgās izmaksas).
+  - Kopā: T = S - TVC (Neto apgrozījums mīnus TVC).
 - Caurlaidība rodas TIKAI un VIENĪGI tad, kad prece ir pārdota klientam un nauda ienāk sistēmā (nevis brīdī, kad prece saražota noliktavai).
 
 ### 2.2. Patiesi Mainīgās Izmaksas (Truly Variable Costs - TVC)
-- **Definīcija:** TIKAI un VIENĪGI tie naudas izdevumi, kas mainās tieši proporcionāli (1:1) ar katru papildus pārdoto vienību. Ja netiek pārdots neviens produkts, TVC ir tieši nulle (0).
-- **Kas IETILPST TVC:**
+- Definīcija: TIKAI un VIENĪGI tie naudas izdevumi, kas mainās tieši proporcionāli (1:1) ar katru papildus pārdoto vienību. Ja netiek pārdots neviens produkts, TVC ir tieši nulle (0).
+- Kas IETILPST TVC:
   1. Izejvielas un pamatmateriāli (Raw Materials), iepirktās komplektējošās detaļas.
   2. Tiešais preču piegādes transports uz klientu (tikai tad, ja par katru piegādāto vienību/pasūtījumu tiek maksāts tieši proporcionāli trešajai pusei).
   3. Kooperācijas / apakšuzņēmēju tiešie pakalpojumi (tikai tad, ja tiek maksāts konkrēts tarifs par katru apstrādāto vienību, piemēram, 10 EUR par vienības nokrāsošanu).
   4. Pārdošanas komisijas vai platformu procenti, ja tie ir fiksēts % no realizācijas cenas un rodas tikai pārdošanas brīdī.
   5. Tehnoloģiskie zudumi un brāķis tieši izejmateriālos (ja 95 labu detaļu iegūšanai jāievada 100 vienības materiāla).
-- **Kas KATEGORISKI NEIETILPST TVC (pāriet uz OE):**
-  - **Darba algas (arī ražošanas strādnieku gabaldarba algas!)**. TOC principos darbaspēks nekad nav TVC. Darbinieku algas nemainās par katru pārdoto centimetru vai kilogramu; uzņēmums maksā par cilvēku pieejamību, virsstundām, maiņām, slimības lapām.
+- Kas KATEGORISKI NEIETILPST TVC (pāriet uz OE):
+  - Darba algas (arī ražošanas strādnieku gabaldarba algas!). TOC principos darbaspēks nekad nav TVC. Darbinieku algas nemainās par katru pārdoto centimetru vai kilogramu; uzņēmums maksā par cilvēku pieejamību, virsstundām, maiņām, slimības lapām.
   - Telpu noma, noliktavas, apkure, elektrība (arī ražošanas iekārtu elektrība parasti ir OE, jo nemainās 1:1 un satur bāzes jaudas).
   - Iekārtu apkope, eļļas, instrumenti, rezerves daļas.
 
 ### 2.3. Darbības Izdevumi (Operating Expenses - OE)
-- **Definīcija:** Visa nauda, ko sistēma tērē, lai uzturētu savu jaudu un pārvērstu investīcijas Caurlaidībā ($T$).
+- Definīcija: Visa nauda, ko sistēma tērē, lai uzturētu savu jaudu un pārvērstu investīcijas Caurlaidībā (T).
 - Tā ir visa nauda (izņemot TVC), kas noteiktā periodā tiek iztērēta, lai uzņēmums turpinātu darboties un "riteņi grieztos".
-- **Galvenās OE grupas:**
+- Galvenās OE grupas:
   - Algas: Strādnieki (ražošanas personāls, meistari, noliktava + VSAOI).
   - Algas: Administrācija (vadība, grāmatvedība, birojs, pārdošana + VSAOI).
   - Mārketings un reklāma.
@@ -42,38 +42,38 @@ Avoti: Thomas Corbett "TOC grāmatvedība" (Throughput Accounting) un Georgijs B
   - Ražošanas un biroja telpu noma, komunālie, apsardze, uzkopšana.
   - IT infrastruktūra, sakari, banku pakalpojumi, juridiskie un vadības pakalpojumi.
   - Citi saimnieciskie izdevumi (apdrošināšana, ilgspēja, transports, ceļa izdevumi).
-- **Pārējie saimnieciskās darbības ieņēmumi:** Granti, valūtas svārstību peļņa u.c. tiek atskaitīti no OE (samazina OE), jo tie nav pamatdarbības caurlaidība ($S$).
+- Pārējie saimnieciskās darbības ieņēmumi: Granti, valūtas svārstību peļņa u.c. tiek atskaitīti no OE (samazina OE), jo tie nav pamatdarbības caurlaidība (S).
 
 ### 2.4. Investīcijas un Krājumi (Investments - I)
-- **Definīcija:** Visa nauda, kas ieguldīta sistēmā, pērkot lietas, ko sistēma plāno pārdot (krājumi) vai izmantot jaudas uzturēšanai (pamatlīdzekļi, iekārtas, ēkas).
-- **Krājumu vērtēšanas zelta likums:** Nepabeigtās ražošanas (WIP) un gatavās produkcijas (FP) krājumi tiek vērtēti **TIKAI to TVC (izejmateriālu) vērtībā**. Tiem kategoriski aizliegts pieskaitīt klāt pievienoto vērtību (darba algas, pieskaitāmās izmaksas), jo šāda "kapitalizēšana" rada fiktīvu īstermiņa peļņu un maskē naudas plūsmas problēmas.
+- Definīcija: Visa nauda, kas ieguldīta sistēmā, pērkot lietas, ko sistēma plāno pārdot (krājumi) vai izmantot jaudas uzturēšanai (pamatlīdzekļi, iekārtas, ēkas).
+- Krājumu vērtēšanas zelta likums: Nepabeigtās ražošanas (WIP) un gatavās produkcijas (FP) krājumi tiek vērtēti TIKAI to TVC (izejmateriālu) vērtībā. Tiem kategoriski aizliegts pieskaitīt klāt pievienoto vērtību (darba algas, pieskaitāmās izmaksas), jo šāda "kapitalizēšana" rada fiktīvu īstermiņa peļņu un maskē naudas plūsmas problēmas.
 
 ---
 
 ## 3. FINANŠU REZULTĀTU UN PRODUKTIVITĀTES FORMULAS
 
-1. **Neto Peļņa (Net Profit - NP):**
-   $$NP = T - OE = (S - TVC) - OE$$
+1. Neto Peļņa (Net Profit - NP):
+   NP = T - OE = (S - TVC) - OE
    TOC peļņa ir tīra un bez fiktīviem elementiem. Tā parāda reālo naudas ģenerēšanas spēju.
 
-2. **Investīciju Atdeve (Return on Investment - ROI):**
-   $$ROI = \frac{NP}{I} = \frac{T - OE}{I}$$
+2. Investīciju Atdeve (Return on Investment - ROI):
+   ROI = NP / I = (T - OE) / I
 
-3. **Produktivitātes Rādītājs (Productivity Ratio - PR):**
-   $$PR = \frac{T}{OE}$$
-   - **$PR > 1.0$:** Uzņēmums pelna ($T > OE$). Sistēma ir veselīga.
-   - **$PR = 1.0$:** Nulles punkts (Breakeven).
-   - **$PR < 1.0$:** Sistēma strādā ar zaudējumiem. Caurplūde nesedz darbības uzturēšanas izdevumus.
+3. Produktivitātes Rādītājs (Productivity Ratio - PR):
+   PR = T / OE
+   - PR > 1.0: Uzņēmums pelna (T > OE). Sistēma ir veselīga.
+   - PR = 1.0: Nulles punkts (Breakeven).
+   - PR < 1.0: Sistēma strādā ar zaudējumiem. Caurplūde nesedz darbības uzturēšanas izdevumus.
    - Dinamikas vērtējums: ja apgrozījums pieaug, bet PR samazinās, tas norāda uz nekontrolētu OE pieaugumu vai T% maržas eroziju.
 
-4. **Caurlaidības Marža (Throughput Margin - T%):**
-   $$T\% = \frac{T}{S}$$
+4. Caurlaidības Marža (Throughput Margin - T%):
+   T% = T / S
    Parāda, cik centu no katra apgrozītā eiro paliek uzņēmumā pēc tiešo materiālu un piegādes izmaksu segšanas.
 
-5. **Darbaspēka Atdeves Rādītāji:**
-   - $\text{Sales} / \text{Algas kopā} = \frac{S}{\text{Algas Admin} + \text{Algas Strādnieki}}$
-   - $\text{Sales} / \text{Strādnieku algas} = \frac{S}{\text{Algas Strādnieki}}$
-   - $\text{Sales} / \text{Admin algas} = \frac{S}{\text{Algas Admin}}$
+5. Darbaspēka Atdeves Rādītāji:
+   - Sales / Algas kopā = S / (Algas Admin + Algas Strādnieki)
+   - Sales / Strādnieku algas = S / Algas Strādnieki
+   - Sales / Admin algas = S / Algas Admin
    Šie rādītāji atspoguļo, cik eiro apgrozījuma spēj saģenerēt katrs personāla izmaksu eiro.
 
 ---
@@ -81,40 +81,54 @@ Avoti: Thomas Corbett "TOC grāmatvedība" (Throughput Accounting) un Georgijs B
 ## 4. LĒMUMU PIEŅEMŠANAS VADLĪNIJAS VADĪBAI
 
 ### 4.1. Prioritāšu secība lēmumos:
-1. **$T$ (Palielināt Caurlaidību)** — galvenā prioritāte, jo $T$ nav teorētiska griestu limita.
-2. **$I$ (Samazināt Krājumus un Investīcijas)** — atbrīvot iesaldēto naudu, paātrināt naudas plūsmu.
-3. **$OE$ (Kontrolēt un optimizēt Uzturēšanas izmaksas)** — samazināt liekos tēriņus, bet nekad neapdraudot aizsargājošo jaudu un $T$.
+1. T (Palielināt Caurlaidību) — galvenā prioritāte, jo T nav teorētiska griestu limita.
+2. I (Samazināt Krājumus un Investīcijas) — atbrīvot iesaldēto naudu, paātrināt naudas plūsmu.
+3. OE (Kontrolēt un optimizēt Uzturēšanas izmaksas) — samazināt liekos tēriņus, bet nekad neapdraudot aizsargājošo jaudu un T.
 
 ### 4.2. Universālais lēmumu tests (Delta analīze):
 Jebkuru operatīvu priekšlikumu (jauns darbinieks, virsstundas, ārpakalpojums, jauns klients) vērtē ar formulu:
-$$\Delta T - \Delta OE > 0$$
-Ja papildus iegūtā caurlaidība pārsniedz papildu izmaksātās darbības izmaksas, **lēmums ir peļņu nesošs un jāpieņem nekavējoties**, pat ja vietējās efektivitātes rādītāji rādītu "izmaksas par vienību pieaugumu".
+ΔT - ΔOE > 0
+Ja papildus iegūtā caurlaidība pārsniedz papildu izmaksātās darbības izmaksas, lēmums ir peļņu nesošs un jāpieņem nekavējoties, pat ja vietējās efektivitātes rādītāji rādītu "izmaksas par vienību pieaugumu".
 
 ### 4.3. Ierobežojuma pārvaldība (CCR) un Produktu prioritātes:
 - Ja uzņēmuma tirgus pieprasījums pārsniedz iekšējo jaudu (ierobežojums ir ražošanā / CCR):
   - Produktus nedrīkst sarindot pēc to cenas vai bruto peļņas %.
   - Produktu patieso rentabilitāti nosaka:
-    $$\frac{Tu}{\text{Laiks uz CCR}} = \frac{P - TVC}{\text{Minūtes uz ierobežojošā resursa}}$$
-  - Prioritāte ir produktam, kas ģenerē vislielāko caurlaidību ierobežojuma laika vienībā ($EUR/min$).
+    Tu / Laiks uz CCR = (P - TVC) / Minūtes uz ierobežojošā resursa
+  - Prioritāte ir produktam, kas ģenerē vislielāko caurlaidību ierobežojuma laika vienībā (EUR/min).
 - Ja uzņēmuma jauda ir lielāka par tirgus pieprasījumu (ierobežojums ir tirgū):
-  - Jebkurš pasūtījums, kur $P > TVC$ un $\Delta OE = 0$, palielina uzņēmuma neto peļņu. Šādos apstākļos eksports ar atlaidi vai papildu apjomi par zemāku cenu ir finansiāli pamatoti, kamēr vien tas nesagrauj pamatcenas vietējā tirgū.
+  - Jebkurš pasūtījums, kur P > TVC un ΔOE = 0, palielina uzņēmuma neto peļņu. Šādos apstākļos eksports ar atlaidi vai papildu apjomi par zemāku cenu ir finansiāli pamatoti, kamēr vien tas nesagrauj pamatcenas vietējā tirgū.
 
 ---
 
 ## 5. KONTU KLASIFIKĀCIJAS ROBU UN ŠAUBU KANONS (AI INTEGRĀCIJAI)
 
 Kad aģents klasificē grāmatvedības kontus no PZA:
-1. **Pārdošanas ieņēmumi ($S$):** Tikai neto apgrozījums par precēm un pakalpojumiem. Izslēgt valūtas peļņu un grantus (tos likt pie $OE$ kā kredīta/negatīvu izmaksu posteni).
-2. **Patiesi mainīgās ($TVC$):**
+1. Pārdošanas ieņēmumi (S): Tikai neto apgrozījums par precēm un pakalpojumiem. Izslēgt valūtas peļņu un grantus (tos likt pie OE kā kredīta/negatīvu izmaksu posteni).
+2. Patiesi mainīgās (TVC):
    - Izejvielas, materiāli, preču iepirkums.
    - Preču piegādes transports uz klientiem (ja atkarīgs no apjoma).
    - ŠAUBAS: Muitas maksājumi, pārdošanas platformu procenti, tiešais iepakojums. (Ja mainās 1:1 ar vienību -> TVC; ja mēneša abonements vai fiksēta maksa -> OE).
-3. **Darbības izdevumi ($OE$):**
+3. Darbības izdevumi (OE):
    - Visas darba algas (administrācija un strādnieki).
    - Telpu noma (arī ražošanas telpas ir OE, jo mēneša noma nemainās par katru pārdoto preci).
    - Enerģija, komunālie, IT, mārketings, reklāma, birojs.
-4. **Izslēdzamie posteņi (EXCLUDED):**
+4. Izslēdzamie posteņi (EXCLUDED):
    - Pamatlīdzekļu nolietojums / amortizācija (tā ir pagātnes investīciju grāmatvedības alokācija, nevis perioda naudas plūsma).
    - Finanšu procentu maksājumi (kapitāla izmaksas, nevis operacionālās darbības uzturēšana).
    - Uzņēmumu ienākuma nodoklis (UIN / peļņas nodoklis).
-   - Krājumu pārvērtēšana / norakstīšana (fiktīvi grāmatvedības uzrēķini).
+   - Krājumu pārvērtēšana / norakstīšana / gatavās produkcijas un WIP krājumu atlikumu izmaiņas (fiktīvi grāmatvedības uzrēķini).
+
+---
+
+## 6. TOC-FIN VADĪBAS UN GRĀMATVEDĪBAS INSTITUCIONĀLAIS NODALĪJUMS
+
+1. Skaidrs funkciju un atbildības nodalījums ("Nesaindēt ēdienu"):
+   - Biznesa lēmumi pieder vadības komandai (ieskaitot Finanšu direktoru, kurš ir vadības komandas stratēģis, nevis galvenais grāmatvedis).
+   - Grāmatvedības uzdevums ir nodrošināt precīzu saimniecisko darījumu uzskaiti un atbilstību likumdošanai/nodokļiem, NEVIS noteikt biznesa lēmumu kritērijus vai rēķināt "produkta pašizmaksu".
+   - Grāmatvedības kalkulācijas (piem., "pilnā pašizmaksa ir virs pārdošanas cenas") nekad nedrīkst kalpot kā veto biznesa lēmumam.
+2. Divi atšķirīgi skatpunkti:
+   - TOC-FIN Analytics (Vēsturiskais T* skats): Balstās uz perioda faktiskajiem iepirkumiem un atskaitēm, lai atklātu biznesa sistēmas dinamiku, T% stabilitāti, OE lēcienus un PR (T/OE) tendences.
+   - TOC-FIN Decision Support (Nākotnes Δ skats): Konkrētu pasūtījumu, cenu, atlaižu vai investīciju izlemšanai nekad neizmanto vidējo vēsturisko pašizmaksu, bet gan tīro inkrementālo izmaiņu: ΔT, ΔOE un ΔI (kur ΔNP = ΔT - ΔOE).
+3. Vadības Trauksmes Mehānisms (Decision Guardrails):
+   - Sistēma brīdina vadību par reāliem sistēmiskiem un likviditātes riskiem (PR < 1.0, OE pieaugums straujāks par T pieaugumu, iesaldēta nauda krājumos, kapacitātes ierobežojuma pārslodze), neierobežojot vadības brīvību ar mākslīgām grāmatvedības alokācijām.
