@@ -1,5 +1,5 @@
 """
-toc_engine.py — TOC klasifikācija un aprēķini ar zināšanu bāzes atbalstu
+toc_engine.py — TOC klasifikācija un aprēķini ar TOC-FIN zināšanu bāzes atbalstu
 """
 from __future__ import annotations
 
@@ -44,16 +44,16 @@ for fname in ["toc_knowledge.txt", "toc_knowledge.md", "knowledge.txt"]:
         KNOWLEDGE_TEXT = f"\n\nPAPILDU VADLĪNIJAS NO TOC LITERATŪRAS:\n{p.read_text(encoding='utf-8')}\n"
         break
 
-CLASSIFY_SYSTEM = f"""Tu esi TOC (Throughput Accounting) finanšu eksperts. Tev jāpiešķir katrai PZA lapai (kontam) TOC grupa.
+CLASSIFY_SYSTEM = f"""Tu esi TOC-FIN (Throughput Accounting) vadības lēmumu sistēmas eksperts. Tev jāpiešķir katrai PZA lapai (kontam) TOC grupa.
 Skaitļus tu neredzi un nerēķini — tikai klasificē pēc nosaukuma un ceļa.
 {KNOWLEDGE_TEXT}
-TOC pamatnoteikumi:
-- S: neto apgrozījums par precēm un pakalpojumiem.
+TOC-FIN kontu sanitizācijas un klasifikācijas noteikumi:
+- S: neto apgrozījums par pārdotajām precēm un pakalpojumiem.
 - TVC: TIKAI un VIENĪGI izdevumi, kas mainās 1:1 ar katru pārdoto vienību (izejvielas TVC_MATERIALS, tiešā preču piegāde TVC_DELIVERY).
-- OE: visas darbības uzturēšanas izmaksas. Algas OBLIGĀTI jāsadala: ražošanas (OE_WORKER_WAGES) un administrācijas (OE_ADMIN_WAGES).
-- Pārējie ieņēmumi (granti, valūtas peļņa) -> OE_OTHER ar is_income=true (tie samazina OE).
-- EXCLUDED: nolietojums/amortizācija, procentu maksājumi, UIN (peļņas nodoklis), krājumu pārvērtēšana.
-- Ja par kādu posteni ir patiesas šaubas (muita, telpu noma, iepakojums): izvēlies visticamāko grupu, confidence='low' un uzdod īsu, skaidru jautājumu latviski."""
+- OE: visas darbības un kapacitātes uzturēšanas izmaksas. Algas OBLIGĀTI jāsadala: ražošanas (OE_WORKER_WAGES) un administrācijas (OE_ADMIN_WAGES).
+- Pārējie saimnieciskie ieņēmumi (granti, valūtas peļņa) -> OE_OTHER ar is_income=true (tie samazina OE).
+- EXCLUDED: "virtuālie grāmatvedības trokšņi" — nolietojums/amortizācija, procentu maksājumi, UIN (peļņas nodoklis), krājumu pārvērtēšana, gatavās produkcijas un nepabeigtās ražošanas (WIP) krājumu izmaiņas.
+- ŠAUBU GADĪJUMI: Ja par kādu posteni ir patiesas šaubas (piem. muita, iepakojums, platformu komisijas, ārpakalpojumi), izvēlies visticamāko grupu, iestati confidence='low' un uzdod 1 vienkāršu jautājumu vadības valodā (bez grāmatvedības žargona): vai šis izdevums rodas 1:1 ar katru pārdoto vienību (TVC), vai tiek maksāts par perioda darbības uzturēšanu neatkarīgi no apjoma (OE)."""
 
 CLASSIFY_TOOL = {
     "name": "classify_accounts",
@@ -71,7 +71,7 @@ CLASSIFY_TOOL = {
                         "is_income": {"type": "boolean"},
                         "confidence": {"enum": ["high", "medium", "low"]},
                         "question": {"type": ["string", "null"],
-                                     "description": "Short question in Latvian if confidence is low, else null."},
+                                     "description": "Short question in Latvian from economic/decision perspective if confidence is low, else null."},
                     },
                     "required": ["id", "group", "is_income", "confidence"],
                 },
@@ -174,7 +174,6 @@ def compute_toc(leaves: list[Leaf], mapping: dict[str, dict], period_cols: list[
         rows[GROUPS["EXCLUDED"][0]] = EXCL; kinds[GROUPS["EXCLUDED"][0]] = "EXCL"
 
     base = pd.DataFrame(rows, index=labels).T
-    cols = list(base.columns)
     if len(month_idx) >= 2:
         mcols = [labels[j] for j in month_idx]
         year = _year_from_labels(mcols)
