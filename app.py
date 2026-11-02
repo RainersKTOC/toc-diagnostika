@@ -1,12 +1,9 @@
 """
-app.py — TOC-FIN Vadības lēmumu un finanšu diagnostikas sistēma (v9)
+app.py — TOC-FIN Vadības lēmumu un finanšu diagnostikas sistēma (v10)
 Uzlabojumi:
-- Kontu tabula automātiski sakārtota secībā: S -> TVC -> OE Algas -> OE Pārējais -> Izslēgtie
-- Kontu tabula pilnā augstumā (bez vertikālās skrollēšanas)
-- Finanšu pārskata un KPI tabulas pilnā izmērā bez horizontālās vai vertikālās skrollēšanas
-- Kreisā kolonna iekrāsota rindas krāsā; Galvenās grupas Bold, apakšgrupas bez Bold
-- Procentu ailēs virsraksts tikai '%', šauras kolonnas, veseli skaitļi bez komata (piem. 33%)
-- Biezākas līnijas starp mēnešu blokiem (mēnesis + %) un starp galvenajām TOC grupām
+- S apakšgrupas gaišākā dzeltenā tonī zem S; TVC tumši sarkanbrūns; OE tumšāks brūnīgi bēšs
+- Produktivitātes tabula precīzi izlīdzināta vienā līmenī ar Finanšu tabulu (mēnesis pret mēnesi)
+- 2. cilne (TOC-FIN Decision Support): Procentu (%) simulācija pa izvēlēto mēnešu periodu ar pilnu rezultātu tabulu
 """
 import hashlib
 import io
@@ -32,7 +29,7 @@ st.title("📊 TOC-FIN: Finanšu diagnostika un vadības lēmumu sistēma")
 st.markdown("""
 **TOC-FIN** pārvērš grāmatvedības datus vadības lēmumiem piemērotā ekonomiskajā informācijā. 
 Sistēma atbrīvo vadības komandu no mākslīgām pašizmaksas alokācijām, nodalot patiesi mainīgās izmaksas ($TVC$) 
-no kapacitātes uzturēšanas izmaksām ($OE$), lai novērtētu patieso caurlaidību ($T$), produktivitāti ($PR = T / OE$) un modelētu nākotnes lēmumus ($\Delta T - \Delta OE$).
+no kapacitātes uzturēšanas izmaksām ($OE$), lai novērtētu patieso caurlaidību ($T$), produktivitāti ($PR = T / OE$) un modelētu nākotnes lēmumus.
 """)
 
 with st.expander("ℹ️ Uzzināt vairāk: Kāpēc TOC-FIN nodala vadības lēmumus no grāmatvedības pašizmaksas?"):
@@ -68,6 +65,8 @@ def fmt_pct_int(x) -> str:
 
 
 def get_main_cat(group_key: str) -> str:
+    if group_key == "S":
+        group_key = "S_REV"
     code = GROUPS.get(group_key, ("", "OE"))[1]
     return {
         "S": "🟡 S (Ieņēmumi)",
@@ -80,116 +79,111 @@ def get_main_cat(group_key: str) -> str:
 # Stingra kārtošanas secība: S -> TVC -> OE Algas -> OE Pārējais -> Izslēgtie
 GROUP_SORT_ORDER = {
     "S": 1,
-    "TVC_MATERIALS": 2,
-    "TVC_DELIVERY": 3,
-    "OE_ADMIN_WAGES": 4,
-    "OE_WORKER_WAGES": 5,
-    "OE_MARKETING": 6,
-    "OE_PLATFORMS": 7,
-    "OE_PREMISES": 8,
-    "OE_OFFICE_IT": 9,
-    "OE_FIN_TAX": 10,
-    "OE_OTHER": 11,
-    "EXCLUDED": 12,
+    "S_REV": 1,
+    "S_OTHER": 2,
+    "TVC_MATERIALS": 3,
+    "TVC_DELIVERY": 4,
+    "OE_ADMIN_WAGES": 5,
+    "OE_WORKER_WAGES": 6,
+    "OE_MARKETING": 7,
+    "OE_PLATFORMS": 8,
+    "OE_PREMISES": 9,
+    "OE_OFFICE_IT": 10,
+    "OE_FIN_TAX": 11,
+    "OE_OTHER": 12,
+    "EXCLUDED": 13,
 }
 
 
-def render_toc_main_html(res) -> str:
-    """Ģenerē pilna platuma HTML tabulu bez skrollēšanas, ar iekrāsotu kreiso aili un biezajām līnijām."""
-    periods = list(res.amounts.columns)
-    row_names = list(res.amounts.index)
-    kinds = [res.row_kinds.get(rn, "OE_CHILD") for rn in row_names]
+def render_unified_toc_tables_html(amounts_df: pd.DataFrame, main_df: pd.DataFrame, kpi_df: pd.DataFrame, row_kinds: dict[str, str], title_kpi: str = "📈 Produktivitātes un atdeves rādītāji") -> str:
+    """Renderē gan Finanšu tabulu, gan Produktivitātes tabulu vienā kopīgā HTML režģī, lai mēnesis ir precīzi pret mēnesi."""
+    periods = list(amounts_df.columns)
+    row_names = list(amounts_df.index)
+    kinds = [row_kinds.get(rn, "OE_CHILD") for rn in row_names]
 
-    html = ["""
+    # Aprēķinām fiksētās kolonnu proporcijas, lai abas daļas ir 100% vienā līnijā
+    lbl_width_pct = 23.0
+    rem_pct = 100.0 - lbl_width_pct
+    per_period_pct = rem_pct / max(len(periods), 1)
+    val_w = per_period_pct * 0.68
+    pct_w = per_period_pct * 0.32
+
+    html = [f"""
     <style>
-    .toc-table-wrap { width: 100%; overflow-x: visible; margin-bottom: 18px; }
-    table.toc-fin { width: 100%; border-collapse: collapse; font-family: 'Calibri', sans-serif; font-size: 12px; table-layout: auto; }
-    table.toc-fin th { background-color: #EAECEE; color: #111111; font-weight: 700; text-align: center; padding: 5px 3px; border-top: 2px solid #404040; border-bottom: 2px solid #404040; white-space: nowrap; }
-    table.toc-fin td { padding: 4px 4px; white-space: nowrap; }
-    table.toc-fin td.lbl-main { text-align: left; font-weight: 700; padding-left: 6px; border-left: 2px solid #404040; border-right: 2px solid #404040; }
-    table.toc-fin td.lbl-sub { text-align: left; font-weight: 400; padding-left: 16px; border-left: 2px solid #404040; border-right: 2px solid #404040; }
-    table.toc-fin td.val-col { text-align: right; border-left: 1px solid #BFBFBF; }
-    table.toc-fin td.pct-col { text-align: right; width: 34px; font-size: 11px; padding-right: 4px; border-left: 1px dotted #D0D3D4; border-right: 2px solid #595959; }
-    table.toc-fin th.th-val { border-left: 1px solid #BFBFBF; }
-    table.toc-fin th.th-pct { width: 34px; font-size: 11px; border-left: 1px dotted #BFBFBF; border-right: 2px solid #595959; }
-    table.toc-fin th.th-lbl { text-align: left; padding-left: 6px; border-left: 2px solid #404040; border-right: 2px solid #404040; }
+    .toc-table-wrap {{ width: 100%; overflow-x: visible; margin-bottom: 14px; }}
+    table.toc-unified {{ width: 100%; border-collapse: collapse; font-family: 'Calibri', sans-serif; font-size: 12px; table-layout: fixed; }}
+    table.toc-unified th {{ background-color: #EAECEE; color: #111111; font-weight: 700; text-align: center; padding: 5px 2px; border-top: 2px solid #404040; border-bottom: 2px solid #404040; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+    table.toc-unified td {{ padding: 4px 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+    table.toc-unified td.lbl-main {{ text-align: left; font-weight: 700; padding-left: 6px; border-left: 2px solid #404040; border-right: 2px solid #404040; }}
+    table.toc-unified td.lbl-sub {{ text-align: left; font-weight: 400; padding-left: 16px; border-left: 2px solid #404040; border-right: 2px solid #404040; }}
+    table.toc-unified td.val-col {{ text-align: right; border-left: 1px solid #BFBFBF; }}
+    table.toc-unified td.pct-col {{ text-align: right; font-size: 11px; padding-right: 3px; border-left: 1px dotted #D0D3D4; border-right: 2px solid #595959; }}
+    table.toc-unified th.th-val {{ border-left: 1px solid #BFBFBF; }}
+    table.toc-unified th.th-pct {{ font-size: 11px; border-left: 1px dotted #BFBFBF; border-right: 2px solid #595959; }}
+    table.toc-unified th.th-lbl {{ text-align: left; padding-left: 6px; border-left: 2px solid #404040; border-right: 2px solid #404040; }}
+    table.toc-unified tr.spacer-row td {{ background: transparent !important; border: none !important; height: 26px; padding: 10px 0 4px 0; font-size: 16px; font-weight: 700; color: #1f2937; }}
     </style>
-    <div class="toc-table-wrap"><table class="toc-fin">
-    <thead><tr>
-    <th class="th-lbl">Rādītājs / Kontugrupa</th>
+    <div class="toc-table-wrap"><table class="toc-unified">
+    <colgroup>
+        <col style="width: {lbl_width_pct:.2f}%;">
     """]
-
+    for _ in periods:
+        html.append(f'<col style="width: {val_w:.3f}%;"><col style="width: {pct_w:.3f}%;">')
+    html.append("</colgroup><thead><tr>")
+    html.append('<th class="th-lbl">Rādītājs / Kontugrupa</th>')
     for p in periods:
         html.append(f'<th class="th-val">{p}</th><th class="th-pct">%</th>')
     html.append("</tr></thead><tbody>")
 
+    # 1. Finanšu pārskata rindas
     for i, rname in enumerate(row_names):
         kind = kinds[i]
         next_kind = kinds[i + 1] if i + 1 < len(kinds) else None
         fill_hex, is_bold, text_hex = FILLS.get(kind, FILLS["OE_CHILD"])
 
-        # Noteicam, vai zem šīs rindas vajag biezo horizontālo līniju (grupas beigas)
-        thick_bottom = False
-        if kind == "S":
-            thick_bottom = True
-        elif kind in ("TVC", "TVC_CHILD") and next_kind not in ("TVC", "TVC_CHILD"):
-            thick_bottom = True
-        elif kind == "T":
-            thick_bottom = True
-        elif kind in ("OE", "OE_CHILD") and next_kind not in ("OE", "OE_CHILD"):
-            thick_bottom = True
-        elif kind == "NP":
-            thick_bottom = True
-        elif i == len(row_names) - 1:
-            thick_bottom = True
-
-        # Vai virs šīs rindas ir apakšgrupu atdalījums no galvenās rindas
-        border_top = "1px solid #BFBFBF"
+        thick_bottom = (
+            kind in ("T", "NP")
+            or (kind in ("S", "S_CHILD") and next_kind not in ("S", "S_CHILD"))
+            or (kind in ("TVC", "TVC_CHILD") and next_kind not in ("TVC", "TVC_CHILD"))
+            or (kind in ("OE", "OE_CHILD") and next_kind not in ("OE", "OE_CHILD"))
+            or i == len(row_names) - 1
+        )
         border_bottom = "2.5px solid #404040" if thick_bottom else "1px solid #BFBFBF"
         font_w = "700" if is_bold else "400"
         lbl_cls = "lbl-main" if is_bold else "lbl-sub"
 
-        row_style = f"background-color: #{fill_hex}; color: #{text_hex}; font-weight: {font_w}; border-top: {border_top}; border-bottom: {border_bottom};"
-        html.append(f'<tr style="{row_style}">')
-        html.append(f'<td class="{lbl_cls}">{rname}</td>')
+        row_style = f"background-color: #{fill_hex}; color: #{text_hex}; font-weight: {font_w}; border-top: 1px solid #BFBFBF; border-bottom: {border_bottom};"
+        html.append(f'<tr style="{row_style}"><td class="{lbl_cls}" title="{rname}">{rname}</td>')
 
         for p in periods:
-            val_str = fmt_num(res.main.loc[rname, p])
-            pct_str = fmt_pct_int(res.main.loc[rname, f"%|{p}"])
+            val_str = fmt_num(main_df.loc[rname, p])
+            pct_str = fmt_pct_int(main_df.loc[rname, f"%|{p}"])
             html.append(f'<td class="val-col">{val_str}</td><td class="pct-col">{pct_str}</td>')
         html.append("</tr>")
 
-    html.append("</tbody></table></div>")
-    return "".join(html)
+    # 2. Atstarpe un Produktivitātes rādītāju bloks (tieši tajās pašās kolonnās!)
+    total_cols = 1 + 2 * len(periods)
+    html.append(f'<tr class="spacer-row"><td colspan="{total_cols}">{title_kpi}</td></tr>')
 
+    html.append("<tr>")
+    html.append('<th class="th-lbl" style="background-color: #EAECEE; border-top: 2px solid #404040; border-bottom: 2px solid #404040;">Produktivitātes rādītājs</th>')
+    for p in periods:
+        html.append(f'<th colspan="2" style="background-color: #EAECEE; border-top: 2px solid #404040; border-bottom: 2px solid #404040; border-left: 1px solid #BFBFBF; border-right: 2px solid #595959;">{p}</th>')
+    html.append("</tr>")
 
-def render_toc_kpi_html(res) -> str:
-    """Ģenerē pilna platuma KPI tabulu bez skrollēšanas."""
-    kp = res.kpi
-    cols = list(kp.columns)
-
-    html = ["""
-    <div class="toc-table-wrap"><table class="toc-fin">
-    <thead><tr>
-    <th class="th-lbl">Produktivitātes rādītājs</th>
-    """]
-    for c in cols:
-        html.append(f'<th style="border-right: 2px solid #595959;">{c}</th>')
-    html.append("</tr></thead><tbody>")
-
-    for i, idx_name in enumerate(kp.index):
-        b_bot = "2px solid #404040" if i == len(kp.index) - 1 else "1px solid #BFBFBF"
-        html.append(f'<tr style="background-color: #F2F4F4; color: #000000; border-bottom: {b_bot};">')
-        html.append(f'<td class="lbl-main" style="font-weight: 600;">{idx_name}</td>')
-        for c in cols:
-            v = kp.loc[idx_name, c]
+    for i, idx_name in enumerate(kpi_df.index):
+        b_bot = "2.5px solid #404040" if i == len(kpi_df.index) - 1 else "1px solid #BFBFBF"
+        html.append(f'<tr style="background-color: #F2F4F4; color: #000000; border-top: 1px solid #BFBFBF; border-bottom: {b_bot};">')
+        html.append(f'<td class="lbl-main" style="font-weight: 600;" title="{idx_name}">{idx_name}</td>')
+        for p in periods:
+            v = kpi_df.loc[idx_name, p]
             if pd.isna(v):
                 s = ""
             elif idx_name.startswith("T%"):
                 s = f"{v * 100:.0f}%"
             else:
                 s = f"{v:.2f}"
-            html.append(f'<td style="text-align: right; padding: 4px 6px; border-right: 2px solid #595959; font-weight: 600;">{s}</td>')
+            html.append(f'<td colspan="2" style="text-align: right; padding: 4px 6px; border-left: 1px solid #BFBFBF; border-right: 2px solid #595959; font-weight: 600;">{s}</td>')
         html.append("</tr>")
 
     html.append("</tbody></table></div>")
@@ -253,11 +247,12 @@ if "cls_df" not in S:
                 rows = []
                 for lf in an.leaves:
                     i = by_id[lf.id]
+                    grp_code = "S_REV" if i["group"] == "S" else i["group"]
                     display_name = f"{lf.label} ({lf.path})" if lf.path and lf.label.lower().startswith(("personāla", "sociālās", "telpu", "pārējās")) else lf.label
                     rows.append(dict(
                         id=lf.id,
                         Konts=display_name,
-                        Grupa=i["group"],
+                        Grupa=grp_code,
                         Ieņēmums=bool(i["is_income"]),
                         Jautājums=i.get("question") or ""
                     ))
@@ -269,6 +264,7 @@ if "cls_df" not in S:
         st.stop()
 
 cls_df: pd.DataFrame = S.cls_df
+cls_df["Grupa"] = cls_df["Grupa"].replace({"S": "S_REV"})
 
 # Interaktīva neskaidro kontu precizēšana
 ambiguous_rows = cls_df[cls_df["Jautājums"].astype(str).str.strip() != ""]
@@ -284,7 +280,7 @@ if len(ambiguous_rows) > 0 and not S.get("clarifications_done", False):
         st.info("💡 **TOC-FIN orientieris:** **S** = reāli ienākošā nauda | **TVC** = mainās 1:1 ar katru pārdoto vienību | **OE** = perioda uzturēšanas izdevums | **Izslēgt** = virtuāls grāmatvedības ieraksts (amortizācija).")
 
         grp = str(r["Grupa"])
-        default_idx = 0 if grp == "S" else (1 if "TVC" in grp else (3 if grp == "EXCLUDED" else 2))
+        default_idx = 0 if grp.startswith("S") else (1 if "TVC" in grp else (3 if grp == "EXCLUDED" else 2))
 
         choice = st.radio(
             f"Kā klasificēt '{r['Konts']}' šajā situācijā?",
@@ -298,13 +294,13 @@ if len(ambiguous_rows) > 0 and not S.get("clarifications_done", False):
             key=f"radio_{r['id']}"
         )
         if choice.startswith("🟡"):
-            clarifications[r["id"]] = ("S", True)
+            clarifications[r["id"]] = ("S_OTHER" if any(w in r["Konts"].lower() for w in ["grant", "pārēj"]) else "S_REV", True)
         elif choice.startswith("🟠"):
-            clarifications[r["id"]] = ("TVC_DELIVERY" if "piegād" in r["Konts"].lower() else "TVC_MATERIALS", False)
+            clarifications[r["id"]] = ("TVC_DELIVERY" if "piegād" in r["Konts"].lower() and "izejviel" not in r["Konts"].lower() else "TVC_MATERIALS", False)
         elif choice.startswith("⚪"):
             clarifications[r["id"]] = ("EXCLUDED", False)
         else:
-            clarifications[r["id"]] = (grp if grp.startswith("OE_") else "OE_OTHER", bool(r["Ieņēmums"]))
+            clarifications[r["id"]] = (grp if grp.startswith("OE_") else "OE_OTHER", False)
         st.markdown("---")
 
     if st.button("Apstiprināt atbildes un atvērt kontu pārskatu", type="primary"):
@@ -321,13 +317,12 @@ if len(ambiguous_rows) > 0 and not S.get("clarifications_done", False):
 st.subheader("📋 Kontu sadalījums pa grupām un apakšgrupām")
 st.caption("Konti ir automātiski sakārtoti secībā: **S → TVC → OE Algas → OE Pārējais → Izslēgtie**. Jūs varat brīvi mainīt gan Lielo grupu, gan Apakšgrupu:")
 
-# Sakārtojam cls_df pēc stingrās TOC secības
 cls_df["_sort"] = cls_df["Grupa"].map(lambda g: GROUP_SORT_ORDER.get(g, 99))
 cls_df = cls_df.sort_values(by=["_sort", "Konts"], kind="mergesort").drop(columns=["_sort"]).reset_index(drop=True)
 S.cls_df = cls_df
 
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("🟡 S (Ieņēmumi)", f"{(cls_df['Grupa'] == 'S').sum()} konti")
+c1.metric("🟡 S (Ieņēmumi)", f"{cls_df['Grupa'].str.startswith('S_').sum()} konti")
 c2.metric("🟠 TVC (Mainīgās)", f"{cls_df['Grupa'].str.startswith('TVC').sum()} konti")
 c3.metric("🟤 OE (Uzturēšana)", f"{cls_df['Grupa'].str.startswith('OE_').sum()} konti")
 c4.metric("⚪ Izslēgtie (Virtuālie)", f"{(cls_df['Grupa'] == 'EXCLUDED').sum()} konti")
@@ -338,7 +333,6 @@ view_df = pd.DataFrame({
     "Apakšgrupa (Rinda atskaitē)": cls_df["Grupa"].map(SUBGROUP_LABELS),
 })
 
-# Pilns augstums, lai nekas nav jāskrollē
 full_editor_height = (len(view_df) + 1) * 36 + 12
 
 edited_view = st.data_editor(
@@ -357,7 +351,7 @@ edited_view = st.data_editor(
             width="medium",
         ),
         "Apakšgrupa (Rinda atskaitē)": st.column_config.SelectboxColumn(
-            "Apakšgrupa / Rinda atskaitē (OE sadalījums u.c.)",
+            "Apakšgrupa / Rinda atskaitē (S, TVC, OE sadalījums)",
             options=list(SUBGROUP_LABELS.values()),
             required=True,
             width="large",
@@ -388,14 +382,14 @@ for idx in range(len(cls_df)):
 
 if changed:
     cls_df["Grupa"] = updated_groups
-    cls_df["Ieņēmums"] = cls_df["Grupa"] == "S"
+    cls_df["Ieņēmums"] = cls_df["Grupa"].str.startswith("S_")
     S.cls_df = cls_df
     st.rerun()
 
 # ------------------------------------------------------------------ 3. GALA APRĒĶINS
 st.header("2. TOC-FIN Diagnostika un Lēmumu Atbalsts")
 if st.button("🚀 Apstiprināt klasifikāciju un veikt TOC-FIN aprēķinu", type="primary"):
-    mapping = {r["id"]: {"group": r["Grupa"], "is_income": bool(r["Grupa"] == "S" or r["Ieņēmums"])} for _, r in cls_df.iterrows()}
+    mapping = {r["id"]: {"group": r["Grupa"], "is_income": bool(str(r["Grupa"]).startswith("S_") or r["Ieņēmums"])} for _, r in cls_df.iterrows()}
     pos = next((l.pos for l in an.ex.lines if l.row == stc.result_row), None)
     reported = an.ex.lines[pos].vals if pos is not None else None
     S.result = compute_toc(an.leaves, mapping, an.ex.period_cols, reported)
@@ -409,7 +403,7 @@ if "result" in S:
 
     main_tab1, main_tab2 = st.tabs([
         "📊 1. TOC-FIN Analytics (Vēsturiskā diagnostika un Trauksmes)", 
-        "⚡ 2. TOC-FIN Decision Support (ΔT / ΔOE Lēmumu Simulators)"
+        "⚡ 2. TOC-FIN Decision Support (Procentu % Simulācija pa periodiem)"
     ])
 
     with main_tab1:
@@ -423,10 +417,7 @@ if "result" in S:
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         st.subheader("Finanšu pārskata tabula (T* skats)")
-        st.markdown(render_toc_main_html(res), unsafe_allow_html=True)
-
-        st.subheader("📈 Produktivitātes un atdeves rādītāji")
-        st.markdown(render_toc_kpi_html(res), unsafe_allow_html=True)
+        st.markdown(render_unified_toc_tables_html(res.amounts, res.main, res.kpi, res.row_kinds), unsafe_allow_html=True)
 
         # --- VADĪBAS TRAUKSMES PANELIS (DECISION GUARDRAILS) ---
         st.markdown("---")
@@ -509,69 +500,166 @@ if "result" in S:
                 S.chat.append({"role": "assistant", "content": reply})
 
     # ==================================================================
-    # 2. CILNE: TOC-FIN DECISION SUPPORT (DELTA SIMULATORS)
+    # 2. CILNE: TOC-FIN DECISION SUPPORT (PROCENTU % SIMULĀCIJA UN TABULA)
     # ==================================================================
     with main_tab2:
-        st.subheader("⚡ Jauna lēmuma, pasūtījuma vai investīcijas simulācija (Δ skats)")
+        st.subheader("⚡ Interaktīvā scenāriju un mērķu simulācija (% izmaiņas pret izvēlēto periodu)")
         st.markdown("""
-        Šis rīks ļauj vadības komandai novērtēt konkrētu biznesa lēmumu (piemēram, papildu pasūtījumu ar atlaidi, jauna darbinieka pieņemšanu vai iekārtas iegādi) 
-        pēc tā **faktiskajām papildu izmaiņām ($\Delta T$, $\Delta OE$, $\Delta I$)**, nevis vidējās grāmatvedības pašizmaksas.
+        Izvēlieties atskaites periodu (piemēram, 6 mēnešus no `01.2026.` līdz `06.2026.` vai visus mēnešus) un ievadiet plānotās **procentuālās izmaiņas (`%`)** 
+        pārdošanai ($S$), mainīgajām izmaksām ($TVC$) un darbības izdevumu ($OE$) pozīcijām. Zemāk redzēsiet pilnu pārrēķināto TOC-FIN tabulu!
         """)
 
-        ref_col = next((c for c in res.amounts.columns if "AVG" in c), res.amounts.columns[-1])
-        base_s = float(res.amounts.loc["S", ref_col])
-        base_tvc = float(res.amounts.loc["TVC", ref_col])
-        base_t = float(res.amounts.loc["T", ref_col])
-        base_oe = float(res.amounts.loc["OE", ref_col])
-        base_np = float(res.amounts.loc["NP", ref_col])
-        base_t_pct = (base_t / base_s) if base_s else 0.5
+        all_months = [c for c in res.amounts.columns if not ("YTD" in c or "AVG" in c)]
+        if not all_months:
+            all_months = list(res.amounts.columns)
 
-        st.info(f"📌 **Salīdzinājuma bāze ({ref_col}):** Apgrozījums $S = {fmt_num(base_s)}$ € | Caurlaidība $T = {fmt_num(base_t)}$ € ({base_t_pct:.0%}) | Darbības izmaksas $OE = {fmt_num(base_oe)}$ € | Neto peļņa $NP = {fmt_num(base_np)}$ €")
+        # 1. Perioda izvēle
+        st.markdown("#### 1. Izvēlieties bāzes periodu simulācijai")
+        p_col1, p_col2 = st.columns([1, 2])
+        with p_col1:
+            preset = st.selectbox(
+                "Ātrā perioda izvēle:",
+                options=[
+                    f"Visi pieejamie mēneši ({len(all_months)} mēn.)",
+                    "Pirmie 6 mēneši (01.–06.)" if len(all_months) >= 6 else "Pirmie 3 mēneši",
+                    "Pirmie 3 mēneši (01.–03.)" if len(all_months) >= 3 else "Pēdējais mēnesis",
+                    "Manuāla mēnešu izvēle"
+                ]
+            )
+        if "Pirmie 6" in preset and len(all_months) >= 6:
+            default_sel = all_months[:6]
+        elif "Pirmie 3" in preset and len(all_months) >= 3:
+            default_sel = all_months[:3]
+        else:
+            default_sel = all_months
 
-        col_s1, col_s2, col_s3 = st.columns(3)
-        with col_s1:
-            st.markdown("#### 1. Ietekme uz Caurlaidību ($\Delta T$)")
-            delta_s = st.number_input("Papildu pārdošanas ieņēmumi (ΔS, EUR mēnesī)", value=20000, step=1000)
-            default_dtvc = int(round(delta_s * (1.0 - base_t_pct)))
-            delta_tvc = st.number_input("Papildu tiešās materiālu/piegādes izmaksas (ΔTVC, EUR)", value=default_dtvc, step=500)
-            delta_t = delta_s - delta_tvc
-            st.metric("Papildu Caurlaidība (ΔT = ΔS - ΔTVC)", f"{fmt_num(delta_t)} €")
+        with p_col2:
+            selected_months = st.multiselect(
+                "Simulācijā iekļautie mēneši:",
+                options=all_months,
+                default=default_sel
+            )
 
-        with col_s2:
-            st.markdown("#### 2. Ietekme uz Kapacitāti ($\Delta OE$ un $\Delta I$)")
-            delta_oe = st.number_input("Papildu uzturēšanas izmaksas (ΔOE, EUR mēnesī)", value=2000, step=500)
-            delta_i = st.number_input("Nepieciešamā papildu investīcija / iesaldētā nauda (ΔI, EUR)", value=0, step=1000)
-            ccr_impact = st.selectbox("Ietekme uz uzņēmuma ierobežojumu (CCR / vājāko posmu):", [
-                "Nepārslogo CCR (tiek izmantota brīvā kapacitāte)",
-                "Noslogo CCR, bet neizspiež citus pasūtījumus",
-                "UZMANĪBU: Izspiež citus esošos pasūtījumus uz CCR!"
-            ])
-
-        with col_s3:
-            st.markdown("#### 3. Lēmuma Rezultāts un Guardrails")
-            delta_np = delta_t - delta_oe
-            new_np = base_np + delta_np
-            new_pr = (base_t + delta_t) / (base_oe + delta_oe) if (base_oe + delta_oe) else 0
-            old_pr = base_t / base_oe if base_oe else 0
-
-            st.metric("Papildu Neto Peļņa (ΔNP = ΔT - ΔOE)", f"{fmt_num(delta_np)} €",
-                      delta=f"Jaunā mēneša NP: {fmt_num(new_np)} €")
-            st.metric("Jaunais Produktivitātes Rādītājs (PR)", f"{new_pr:.2f}",
-                      delta=f"{new_pr - old_pr:+.2f} pret bāzi ({old_pr:.2f})")
-
-            if delta_i > 0:
-                annual_roi = (delta_np * 12) / delta_i
-                payback_months = delta_i / delta_np if delta_np > 0 else float("inf")
-                st.metric("Investīcijas Gada Atdeve (ROI)", f"{annual_roi:.0%}",
-                          delta=f"Atmaksāšanās: {payback_months:.1f} mēn." if delta_np > 0 else "Neatmaksājas")
+        if not selected_months:
+            st.warning("Lūdzu, izvēlieties vismaz vienu mēnesi simulācijai.")
+            st.stop()
 
         st.markdown("---")
-        if delta_np > 0 and "Izspiež" not in ccr_impact:
-            st.success(f"✅ **TOC-FIN Lēmuma slēdziens:** Lēmums ir finansiāli pamatots ($\Delta T - \Delta OE = +{fmt_num(delta_np)}$ €/mēn.). Pat ja tradicionālā grāmatvedības pilnā pašizmaksa šim darījumam izskatītos 'nerentabla', brīvās jaudas apstākļos tas tieši palielina uzņēmuma tīro peļņu un naudas plūsmu.")
-        elif delta_np > 0 and "Izspiež" in ccr_impact:
-            st.warning(f"⚠️ **Trauksme par CCR noslodzi:** Lai gan $\Delta NP$ ir pozitīvs ($+{fmt_num(delta_np)}$ €), šis lēmums izspiež citus pasūtījumus ierobežojumā! Pārliecinieties, ka jaunā pasūtījuma caurlaidība uz 1 CCR minūti ($T_u / CCR_{{min}}$) ir augstāka nekā izspiestajiem produktiem.")
+        st.markdown("#### 2. Iestatiet procentuālās izmaiņas (%) katrai pozīcijai")
+        st.caption("Ievadiet plānoto izmaiņu procentos (piemēram, `10` nozīmē `+10%`, `-5` nozīmē `-5%`).")
+
+        s_children = [r for r in res.amounts.index if res.row_kinds.get(r) == "S_CHILD"]
+        tvc_children = [r for r in res.amounts.index if res.row_kinds.get(r) == "TVC_CHILD"]
+        oe_children = [r for r in res.amounts.index if res.row_kinds.get(r) == "OE_CHILD"]
+
+        pct_changes: dict[str, float] = {}
+
+        sc1, sc2, sc3 = st.columns(3)
+        with sc1:
+            st.markdown("🟡 **Ieņēmumi (S)**")
+            s_all_pct = st.number_input("Kopējā S izmaiņa (%)", value=10.0, step=1.0, format="%.1f", key="sim_s_all")
+            for sc_name in s_children:
+                pct_changes[sc_name] = s_all_pct
+
+        with sc2:
+            st.markdown("🟠 **Mainīgās izmaksas (TVC)**")
+            for tc_name in tvc_children:
+                pct_changes[tc_name] = st.number_input(
+                    f"{tc_name} (%)", value=10.0, step=1.0, format="%.1f", key=f"sim_{tc_name}"
+                )
+
+        with sc3:
+            st.markdown("🟤 **Darbības izdevumi (OE pa grupām)**")
+            for oc_name in oe_children:
+                default_oe_v = 5.0 if "alga" in oc_name.lower() else (1.0 if "ražošanas telp" in oc_name.lower() else 0.0)
+                pct_changes[oc_name] = st.number_input(
+                    f"{oc_name} (%)", value=default_oe_v, step=1.0, format="%.1f", key=f"sim_{oc_name}"
+                )
+
+        # 3. Pārrēķinām visu tabulu izvēlētajiem mēnešiem
+        sim_amounts = res.amounts[selected_months].copy().astype(float)
+        base_sub = res.amounts[selected_months].copy().astype(float)
+
+        for rname, pct_val in pct_changes.items():
+            if rname in sim_amounts.index:
+                sim_amounts.loc[rname] = base_sub.loc[rname] * (1.0 + pct_val / 100.0)
+
+        # Pārrēķinām virsrindas S, TVC, T, OE, NP
+        if s_children:
+            sim_amounts.loc["S"] = sim_amounts.loc[s_children].sum(axis=0)
         else:
-            st.error(f"🛑 **Stop-krāns (Negatīvs $\Delta NP$):** Šis lēmums samazina uzņēmuma peļņu par **{fmt_num(abs(delta_np))} €** mēnesī, jo papildu uzturēšanas izmaksas ($\Delta OE$) pārsniedz iegūto caurlaidību ($\Delta T$). Nepieciešams stratēģisks pamatojums vai izmaksu pārskatīšana.")
+            sim_amounts.loc["S"] = base_sub.loc["S"] * (1.0 + s_all_pct / 100.0)
+
+        if tvc_children:
+            sim_amounts.loc["TVC"] = sim_amounts.loc[tvc_children].sum(axis=0)
+        sim_amounts.loc["T"] = sim_amounts.loc["S"] - sim_amounts.loc["TVC"]
+
+        if oe_children:
+            sim_amounts.loc["OE"] = sim_amounts.loc[oe_children].sum(axis=0)
+        sim_amounts.loc["NP"] = sim_amounts.loc["T"] - sim_amounts.loc["OE"]
+
+        # Pievienojam kopsavilkuma kolonnas: Bāzes KOPĀ, Simulētais KOPĀ, Starpība (Δ EUR) un Simulētais VIDĒJAIS
+        n_m = len(selected_months)
+        base_sum = base_sub.sum(axis=1)
+        sim_sum = sim_amounts[selected_months].sum(axis=1)
+        diff_sum = sim_sum - base_sum
+
+        sim_amounts["Bāze KOPĀ"] = base_sum
+        sim_amounts["Simulācija KOPĀ"] = sim_sum
+        sim_amounts["Δ Izmaiņa (€)"] = diff_sum
+        sim_amounts["Simulācija AVG"] = sim_amounts[selected_months].mean(axis=1)
+
+        # Izveidojam main_df ar % pret S (bet kolonnā 'Δ Izmaiņa (€)' % rāda pašas rindas izmaiņu % pret bāzi!)
+        sim_main = {}
+        for c in sim_amounts.columns:
+            sim_main[c] = sim_amounts[c]
+            if c == "Δ Izmaiņa (€)":
+                sim_main[f"%|{c}"] = np.where(base_sum != 0, diff_sum / np.abs(base_sum), np.nan)
+            else:
+                s_col = sim_amounts.loc["S", c]
+                sim_main[f"%|{c}"] = sim_amounts[c] / s_col if s_col else np.nan
+        sim_main_df = pd.DataFrame(sim_main, index=sim_amounts.index)
+
+        # Pārrēķinām KPI tabulu simulācijai
+        def sim_kpi_for(col_name: str, col_vals: pd.Series) -> dict[str, float]:
+            S_, T_, OE_ = col_vals["S"], col_vals["T"], col_vals["OE"]
+            aw = col_vals.get(GROUPS["OE_ADMIN_WAGES"][0], 0.0)
+            ww = col_vals.get(GROUPS["OE_WORKER_WAGES"][0], 0.0)
+            div = lambda a, b: a / b if b else np.nan
+            return {
+                "PR = T/OE": div(T_, OE_),
+                "T% = T/S": div(T_, S_),
+                "Eiro Sales / Eiro algas kopā": div(S_, aw + ww),
+                "Eiro Sales / Eiro administrācijas algas": div(S_, aw),
+                "Eiro Sales / Eiro strādnieku algas": div(S_, ww),
+            }
+
+        sim_kpi_df = pd.DataFrame({c: sim_kpi_for(c, sim_amounts[c]) for c in sim_amounts.columns})
+        sim_kpi_df["Δ Izmaiņa (€)"] = sim_kpi_df["Simulācija KOPĀ"] - sim_kpi_df["Bāze KOPĀ"]
+
+        # Ātrie kopsavilkuma rādītāji virs tabulas
+        st.markdown("---")
+        st.markdown(f"#### 3. Simulācijas rezultāts izvēlētajam periodam ({n_m} mēn. kopā)")
+        m1, m2, m3, m4 = st.columns(4)
+        ds_val = diff_sum["S"]
+        dt_val = diff_sum["T"]
+        doe_val = diff_sum["OE"]
+        dnp_val = diff_sum["NP"]
+
+        m1.metric("Simulētais S (Kopā)", f"{fmt_num(sim_sum['S'])} €", delta=f"{ds_val:+,.0f} € ({ds_val/base_sum['S']*100:+.0f}%)".replace(",", " ") if base_sum["S"] else "")
+        m2.metric("Simulētais T (Caurlaidība)", f"{fmt_num(sim_sum['T'])} €", delta=f"{dt_val:+,.0f} € ({dt_val/base_sum['T']*100:+.0f}%)".replace(",", " ") if base_sum["T"] else "")
+        m3.metric("Simulētais OE (Uzturēšana)", f"{fmt_num(sim_sum['OE'])} €", delta=f"{doe_val:+,.0f} € ({doe_val/base_sum['OE']*100:+.0f}%)".replace(",", " ") if base_sum["OE"] else "", delta_color="inverse")
+        m4.metric("Simulētā Neto Peļņa (NP)", f"{fmt_num(sim_sum['NP'])} €", delta=f"{dnp_val:+,.0f} € (Bāze: {fmt_num(base_sum['NP'])} €)".replace(",", " "))
+
+        st.subheader("📊 Simulētā Finanšu un Produktivitātes tabula")
+        st.caption("Kolonnā **'Δ Izmaiņa (€)'** procentu aile rāda konkrētās rindas izmaiņu `%` pret bāzes periodu.")
+        st.markdown(
+            render_unified_toc_tables_html(
+                sim_amounts, sim_main_df, sim_kpi_df, res.row_kinds,
+                title_kpi="📈 Simulētie Produktivitātes un atdeves rādītāji"
+            ),
+            unsafe_allow_html=True
+        )
 
 if st.button("🔄 Sākt no jauna"):
     st.session_state.clear()
