@@ -1,5 +1,5 @@
 """
-app.py — TOC-FIN Vadības lēmumu un finanšu diagnostikas sistēma (v10.2 ar Supabase)
+app.py — TOC-FIN Vadības lēmumu un finanšu diagnostikas sistēma (v10.3 ar Supabase un labojumiem)
 Project ID: amprqueamdcxpjufigvm
 """
 import hashlib
@@ -254,6 +254,17 @@ if len(ambiguous_rows) > 0 and not S.get("clarifications_done", False):
     for idx, r in ambiguous_rows.iterrows():
         st.markdown(f"**📌 {r['Konts']}**")
         st.write(f"👉 **Aģenta jautājums:** {r['Jautājums']}")
+        
+        # Nosakām aģenta ieteikto indeksu radio pogām
+        agent_group = r.get("Grupa", "OE_OTHER")
+        default_idx = 2
+        if str(agent_group).startswith("S_"):
+            default_idx = 0
+        elif str(agent_group).startswith("TVC"):
+            default_idx = 1
+        elif str(agent_group) == "EXCLUDED":
+            default_idx = 3
+
         choice = st.radio(
             f"Kā klasificēt '{r['Konts']}'?",
             options=[
@@ -262,6 +273,7 @@ if len(ambiguous_rows) > 0 and not S.get("clarifications_done", False):
                 "🟤 OE — Uzturēšanas / darbības izdevums",
                 "⚪ Izslēgt — Virtuāla nauda (amortizācija)"
             ],
+            index=default_idx,
             key=f"radio_{r['id']}"
         )
         if choice.startswith("🟡"):
@@ -314,20 +326,25 @@ edited_view = st.data_editor(
 
 updated_groups = []
 changed = False
-for idx in range(len(cls_df)):
-    old_grp = cls_df.iloc[idx]["Grupa"]
+
+for idx, row in cls_df.iterrows():
+    old_grp = row["Grupa"]
     old_main = get_main_cat(old_grp)
     old_sub = SUBGROUP_LABELS[old_grp]
 
-    new_main = edited_view.iloc[idx]["Lielā grupa"]
-    new_sub = edited_view.iloc[idx]["Apakšgrupa (Rinda atskaitē)"]
+    matching_edited = edited_view[edited_view["Konts"] == row["Konts"]]
+    if not matching_edited.empty:
+        new_main = matching_edited.iloc[0]["Lielā grupa"]
+        new_sub = matching_edited.iloc[0]["Apakšgrupa (Rinda atskaitē)"]
 
-    if new_sub != old_sub:
-        updated_groups.append(LABEL_TO_KEY[new_sub])
-        changed = True
-    elif new_main != old_main:
-        updated_groups.append(MAIN_GROUP_TO_DEFAULT_SUB[new_main])
-        changed = True
+        if new_sub != old_sub:
+            updated_groups.append(LABEL_TO_KEY[new_sub])
+            changed = True
+        elif new_main != old_main:
+            updated_groups.append(MAIN_GROUP_TO_DEFAULT_SUB[new_main])
+            changed = True
+        else:
+            updated_groups.append(old_grp)
     else:
         updated_groups.append(old_grp)
 
