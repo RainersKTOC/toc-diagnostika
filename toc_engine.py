@@ -1,5 +1,5 @@
 """
-toc_engine.py — TOC-FIN klasifikācija un Excel eksports ar biezajām grupu un mēnešu līnijām
+toc_engine.py — TOC-FIN klasifikācija, S apakšgrupas, harmonizētas krāsas un Excel eksports
 """
 from __future__ import annotations
 
@@ -20,8 +20,10 @@ FONT_NAME = "Calibri"
 FONT_SIZE = 10
 KPI_AVG_MODE = "mean_of_months"
 
+# Grupu definīcijas: kods -> (Cilvēcīgais apakšgrupas nosaukums atskaitē, Lielā grupa)
 GROUPS: dict[str, tuple[str, str]] = {
-    "S": ("Neto apgrozījums un ieņēmumi (S)", "S"),
+    "S_REV": ("Neto apgrozījums (pamatdarbība)", "S"),
+    "S_OTHER": ("Granti un pārējie ieņēmumi", "S"),
     "TVC_MATERIALS": ("Izejvielas un materiāli", "TVC"),
     "TVC_DELIVERY": ("Preču piegādes izdevumi", "TVC"),
     "OE_ADMIN_WAGES": ("Administrācijas algas (+ sociālās iemaksas)", "OE"),
@@ -39,12 +41,13 @@ SUBGROUP_LABELS: dict[str, str] = {k: v[0] for k, v in GROUPS.items()}
 LABEL_TO_KEY: dict[str, str] = {v[0]: k for k, v in GROUPS.items()}
 
 MAIN_GROUP_TO_DEFAULT_SUB: dict[str, str] = {
-    "🟡 S (Ieņēmumi)": "S",
+    "🟡 S (Ieņēmumi)": "S_REV",
     "🟠 TVC (Mainīgās izmaksas)": "TVC_MATERIALS",
     "🟤 OE (Uzturēšanas izdevumi)": "OE_OTHER",
     "⚪ Izslēgtie (Virtuālā nauda)": "EXCLUDED",
 }
 
+S_KEYS = [k for k, v in GROUPS.items() if v[1] == "S"]
 TVC_KEYS = [k for k, v in GROUPS.items() if v[1] == "TVC"]
 OE_KEYS = [k for k, v in GROUPS.items() if v[1] == "OE"]
 
@@ -56,21 +59,21 @@ for fname in ["toc_knowledge.txt", "toc_knowledge.md", "knowledge.txt"]:
         break
 
 CLASSIFY_SYSTEM = f"""Tu esi TOC-FIN (Throughput Accounting) vadības un finanšu eksperts.
-Tavs uzdevums ir kritiski un pēc būtības izvērtēt katru PZA kontu (pēc tā nosaukuma un atrašanās sadaļas) un piešķirt tam atbilstošo TOC grupu.
+Tavs uzdevums ir kritiski un pēc būtības izvērtēt katru PZA kontu (pēc tā nosaukuma un atrašanās sadaļas) un piešķirt tam atbilstošo TOC apakšgrupu.
 {KNOWLEDGE_TEXT}
 VADLĪNIJAS SITUATĪVAI IZVĒRTĒŠANAI:
-1. Izproti atšķirību starp reālo naudu un virtuālo naudu:
-   - Tikai virtuālie grāmatvedības ieraksti (nolietojums/amortizācija, krājumu pārvērtēšana, uzkrājumi) ir EXCLUDED.
-   - Reālie naudas izdevumi, piemēram, procentu maksājumi un uzņēmumu ienākuma nodoklis (UIN), ir reāla nauda, kas aizplūst no uzņēmuma, tāpēc tos liec pie OE (OE_FIN_TAX).
-2. Izproti ieņēmumu dabu (S):
-   - Neto apgrozījums, kā arī saņemts granta finansējums un pārējie ieņēmumi ir nauda, kas ienāk sistēmā -> liec tos pie 'S' (ar is_income=true).
-   - Ja kādā konkrētā situācijā pārējo ieņēmumu vai granta daba varētu būt diskutabla, izvēlies 'S', bet vari uzdot jautājumu (confidence='low'), lai lietotājs pats izvēlas.
-3. Izproti algas pēc konteksta (Sadaļas/Ceļa):
+1. Izproti ieņēmumu (S) sadalījumu:
+   - Pamatdarbības preču un pakalpojumu pārdošana ('Neto apgrozījums') -> S_REV (is_income=true).
+   - Saņemts granta finansējums, valsts atbalsts un 'Pārējie ieņēmumi' -> S_OTHER (is_income=true). Ja kādā situācijā ir šaubas par pārējiem ieņēmumiem, liec S_OTHER un vari uzdot jautājumu (confidence='low').
+2. Stingri nodali TVC apakšgrupas:
+   - 'Izejvielu un materiālu iepirkšanas un piegādes izd.' (vai izejvielas/materiāli ražošanā) -> OBLIGĀTI TVC_MATERIALS (confidence='high', neliec to pie TVC_DELIVERY!).
+   - 'Preču piegādes izdevumi' (pārdošanas piegāde klientiem) -> TVC_DELIVERY (confidence='high').
+3. Izproti algas un OE pēc konteksta (Sadaļas/Ceļa):
    - Ja 'Personāla izmaksas' un 'Sociālās iemaksas' atrodas zem ražošanas pašizmaksas sadaļas -> OE_WORKER_WAGES.
    - Ja tās atrodas zem administrācijas vai pārdošanas sadaļas -> OE_ADMIN_WAGES.
-4. Kritiski izvērtē robežgadījumus starp TVC un OE:
-   - Izejvielas un materiāli -> TVC_MATERIALS; Preču piegādes izdevumi -> TVC_DELIVERY.
-   - Uzdod jautājumu (confidence='low') tikai tad, ja pēc konta nosaukuma nav viennozīmīgi skaidrs, vai izmaksa mainās 1:1 ar katru pārdoto vienību (TVC) vai ir perioda uzturēšanas izdevums (OE)."""
+   - Reālie naudas izdevumi — procentu maksājumi un uzņēmumu ienākuma nodoklis (UIN) -> OE_FIN_TAX.
+4. Izslēgtie (EXCLUDED):
+   - Tikai virtuālie grāmatvedības ieraksti bez naudas plūsmas: pamatlīdzekļu nolietojums/amortizācija, krājumu pārvērtēšana, uzkrājumi."""
 
 CLASSIFY_TOOL = {
     "name": "classify_accounts",
@@ -154,10 +157,18 @@ class TocResult:
 
 def compute_toc(leaves: list[Leaf], mapping: dict[str, dict], period_cols: list[dict],
                 reported_result: np.ndarray | None = None) -> TocResult:
-    income_ids = {i for i, m in mapping.items() if m.get("is_income") or m["group"] == "S"}
+    # Atbalsts arī vecajam 'S' kodam no profila, pārvēršot par 'S_REV'
+    norm_map = {}
+    for k, m in mapping.items():
+        g = m["group"]
+        if g == "S":
+            g = "S_REV"
+        norm_map[k] = {"group": g, "is_income": bool(m.get("is_income") or g in S_KEYS)}
+
+    income_ids = {i for i, m in norm_map.items() if m["is_income"]}
     A, _ = leaf_amounts(leaves, income_ids)
     ids = [l.id for l in leaves]
-    groups = np.array([mapping[i]["group"] for i in ids])
+    groups = np.array([norm_map[i]["group"] for i in ids])
 
     labels = [p["label"] for p in period_cols]
     month_idx = [j for j, p in enumerate(period_cols) if p["kind"] == "month"]
@@ -168,25 +179,55 @@ def compute_toc(leaves: list[Leaf], mapping: dict[str, dict], period_cols: list[
 
     rows: dict[str, np.ndarray] = {}
     kinds: dict[str, str] = {}
-    S = gsum("S"); rows["S"] = S; kinds["S"] = "S"
+
+    # 1. S un S apakšgrupas
+    s_rows = {}
+    for k in S_KEYS:
+        if (groups == k).any():
+            s_rows[k] = gsum(k)
+    S_tot = sum(s_rows.values()) if s_rows else np.zeros(A.shape[1])
+    rows["S"] = S_tot
+    kinds["S"] = "S"
+    for k, v in s_rows.items():
+        rows[GROUPS[k][0]] = v
+        kinds[GROUPS[k][0]] = "S_CHILD"
+
+    # 2. TVC un TVC apakšgrupas
     tvc_rows = {}
     for k in TVC_KEYS:
         if (groups == k).any():
             tvc_rows[k] = -gsum(k)
-    TVC = sum(tvc_rows.values()) if tvc_rows else np.zeros_like(S)
-    rows["TVC"] = TVC; kinds["TVC"] = "TVC"
+    TVC = sum(tvc_rows.values()) if tvc_rows else np.zeros_like(S_tot)
+    rows["TVC"] = TVC
+    kinds["TVC"] = "TVC"
     for k, v in tvc_rows.items():
-        rows[GROUPS[k][0]] = v; kinds[GROUPS[k][0]] = "TVC_CHILD"
-    T = S - TVC; rows["T"] = T; kinds["T"] = "T"
+        rows[GROUPS[k][0]] = v
+        kinds[GROUPS[k][0]] = "TVC_CHILD"
+
+    # 3. T (Throughput)
+    T = S_tot - TVC
+    rows["T"] = T
+    kinds["T"] = "T"
+
+    # 4. OE un OE apakšgrupas
     oe_rows = {k: -gsum(k) for k in OE_KEYS if (groups == k).any()}
-    OE = sum(oe_rows.values()) if oe_rows else np.zeros_like(S)
-    rows["OE"] = OE; kinds["OE"] = "OE"
+    OE = sum(oe_rows.values()) if oe_rows else np.zeros_like(S_tot)
+    rows["OE"] = OE
+    kinds["OE"] = "OE"
     for k, v in oe_rows.items():
-        rows[GROUPS[k][0]] = v; kinds[GROUPS[k][0]] = "OE_CHILD"
-    NP = T - OE; rows["NP"] = NP; kinds["NP"] = "NP"
+        rows[GROUPS[k][0]] = v
+        kinds[GROUPS[k][0]] = "OE_CHILD"
+
+    # 5. NP (Net Profit)
+    NP = T - OE
+    rows["NP"] = NP
+    kinds["NP"] = "NP"
+
+    # 6. Izslēgtie (ja ir)
     EXCL = -gsum("EXCLUDED")
     if (groups == "EXCLUDED").any():
-        rows[GROUPS["EXCLUDED"][0]] = EXCL; kinds[GROUPS["EXCLUDED"][0]] = "EXCL"
+        rows[GROUPS["EXCLUDED"][0]] = EXCL
+        kinds[GROUPS["EXCLUDED"][0]] = "EXCL"
 
     base = pd.DataFrame(rows, index=labels).T
     if len(month_idx) >= 2:
@@ -208,10 +249,13 @@ def compute_toc(leaves: list[Leaf], mapping: dict[str, dict], period_cols: list[
         aw = col_vals.get(GROUPS["OE_ADMIN_WAGES"][0], 0.0)
         ww = col_vals.get(GROUPS["OE_WORKER_WAGES"][0], 0.0)
         div = lambda a, b: a / b if b else np.nan
-        return {"PR = T/OE": div(T_, OE_), "T% = T/S": div(T_, S_),
-                "Eiro Sales / Eiro algas kopā": div(S_, aw + ww),
-                "Eiro Sales / Eiro administrācijas algas": div(S_, aw),
-                "Eiro Sales / Eiro strādnieku algas": div(S_, ww)}
+        return {
+            "PR = T/OE": div(T_, OE_),
+            "T% = T/S": div(T_, S_),
+            "Eiro Sales / Eiro algas kopā": div(S_, aw + ww),
+            "Eiro Sales / Eiro administrācijas algas": div(S_, aw),
+            "Eiro Sales / Eiro strādnieku algas": div(S_, ww),
+        }
 
     kpi = pd.DataFrame({c: kpi_for(amounts[c]) for c in amounts.columns})
     if len(month_idx) >= 2 and KPI_AVG_MODE == "mean_of_months":
@@ -235,10 +279,22 @@ def _year_from_labels(labels: list[str]) -> str:
     return m.group(1) if m else ""
 
 
+# Harmonizētā krāsu palete:
+# S = Koši dzeltens (FFFF00), S_CHILD = Gaiši dzeltens (FFF2CC)
+# TVC = Tumši sarkanbrūns/rūsas (C55A11), TVC_CHILD = Gaišs terakotas/oranžs (F8CBAD)
+# T = Spilgti zils (00B0F0)
+# OE = Silti brūnīgs smilšu/persiku (F4B084), OE_CHILD = Gaiši brūnīgs persiku (FCE4D6)
+# NP = Spilgti zaļš (92D050)
 FILLS = {
-    "S": ("FFFF00", True, "000000"), "TVC": ("ED7D31", True, "FFFFFF"), "TVC_CHILD": ("F8CBAD", False, "000000"),
-    "T": ("00B0F0", True, "000000"), "OE": ("F8CECC", True, "000000"), "OE_CHILD": ("FCE4D6", False, "000000"),
-    "NP": ("92D050", True, "000000"), "EXCL": ("D9D9D9", False, "595959"),
+    "S": ("FFFF00", True, "000000"),
+    "S_CHILD": ("FFF2CC", False, "000000"),
+    "TVC": ("C55A11", True, "FFFFFF"),
+    "TVC_CHILD": ("F8CBAD", False, "000000"),
+    "T": ("00B0F0", True, "000000"),
+    "OE": ("F4B084", True, "000000"),
+    "OE_CHILD": ("FCE4D6", False, "000000"),
+    "NP": ("92D050", True, "000000"),
+    "EXCL": ("D9D9D9", False, "595959"),
 }
 THIN = Side(style="thin", color="BFBFBF")
 MEDIUM = Side(style="medium", color="404040")
@@ -275,6 +331,7 @@ def build_excel(res: TocResult, path_or_buf, formulas: bool = True) -> None:
     ytd = next((p for p in periods if p.endswith(" YTD") and "AVG" not in p), None)
     avg = next((p for p in periods if "AVG" in p), None)
     L = get_column_letter
+    child_s = [n for n in row_names if res.row_kinds[n] == "S_CHILD"]
     child_tvc = [n for n in row_names if res.row_kinds[n] == "TVC_CHILD"]
     child_oe = [n for n in row_names if res.row_kinds[n] == "OE_CHILD"]
 
@@ -285,7 +342,8 @@ def build_excel(res: TocResult, path_or_buf, formulas: bool = True) -> None:
         fill, bold, color = FILLS.get(kind, FILLS["OE_CHILD"])
 
         thick_bottom = (
-            kind in ("S", "T", "NP")
+            kind in ("T", "NP")
+            or (kind in ("S", "S_CHILD") and next_kind not in ("S", "S_CHILD"))
             or (kind in ("TVC", "TVC_CHILD") and next_kind not in ("TVC", "TVC_CHILD"))
             or (kind in ("OE", "OE_CHILD") and next_kind not in ("OE", "OE_CHILD"))
             or i == len(row_names) - 1
@@ -307,12 +365,14 @@ def build_excel(res: TocResult, path_or_buf, formulas: bool = True) -> None:
                 f = "=" + "+".join(f"{L(col_of[m])}{r}" for m in months)
             elif is_avg:
                 f = f"=AVERAGE({','.join(f'{L(col_of[m])}{r}' for m in months)})"
-            elif kind == "TVC":
-                f = f"=SUM({col}{r_of[child_tvc[0]]}:{col}{r_of[child_tvc[-1]]})" if child_tvc else 0
+            elif kind == "S" and child_s:
+                f = f"=SUM({col}{r_of[child_s[0]]}:{col}{r_of[child_s[-1]]})"
+            elif kind == "TVC" and child_tvc:
+                f = f"=SUM({col}{r_of[child_tvc[0]]}:{col}{r_of[child_tvc[-1]]})"
             elif kind == "T":
                 f = f"={col}{r_of['S']}-{col}{r_of['TVC']}"
-            elif kind == "OE":
-                f = f"=SUM({col}{r_of[child_oe[0]]}:{col}{r_of[child_oe[-1]]})" if child_oe else 0
+            elif kind == "OE" and child_oe:
+                f = f"=SUM({col}{r_of[child_oe[0]]}:{col}{r_of[child_oe[-1]]})"
             elif kind == "NP":
                 f = f"={col}{r_of['T']}-{col}{r_of['OE']}"
             else:
@@ -331,15 +391,18 @@ def build_excel(res: TocResult, path_or_buf, formulas: bool = True) -> None:
                 cell_item.font = fnt(bold=bold, color=color)
                 cell_item.border = Border(left=THIN, right=right_b, top=THIN, bottom=b_bot)
 
-    k0 = len(row_names) + 4
-    ws.cell(k0, 1, "Rādītājs").font = fnt(bold=True)
+    # KPI novietoti precīzi zem tām pašām mēnešu kolonnām (mēnesis pret mēnesi)
+    k0 = len(row_names) + 3
+    ws.cell(k0, 1, "Produktivitātes un atdeves rādītājs").font = fnt(bold=True)
     ws.cell(k0, 1).border = Border(left=MEDIUM, right=MEDIUM, top=MEDIUM, bottom=MEDIUM)
-    kpi_cols = list(res.kpi.columns)
-    for j, p in enumerate(kpi_cols):
-        kc = ws.cell(k0, 2 + j, p)
+    for p in periods:
+        cc = col_of[p]
+        ws.merge_cells(start_row=k0, start_column=cc, end_row=k0, end_column=cc + 1)
+        kc = ws.cell(k0, cc, p)
         kc.font = fnt(bold=True)
         kc.alignment = Alignment(horizontal="center")
-        kc.border = Border(left=THIN, right=MEDIUM, top=MEDIUM, bottom=MEDIUM)
+        ws.cell(k0, cc).border = Border(left=THIN, right=THIN, top=MEDIUM, bottom=MEDIUM)
+        ws.cell(k0, cc + 1).border = Border(left=THIN, right=MEDIUM, top=MEDIUM, bottom=MEDIUM)
 
     S_, T_, OE_ = r_of["S"], r_of["T"], r_of["OE"]
     aw = r_of.get(GROUPS["OE_ADMIN_WAGES"][0])
@@ -353,14 +416,16 @@ def build_excel(res: TocResult, path_or_buf, formulas: bool = True) -> None:
         lc.font = fnt(bold=True)
         lc.border = Border(left=MEDIUM, right=MEDIUM, top=THIN, bottom=b_bot)
 
-        for j, p in enumerate(kpi_cols):
-            cell = ws.cell(r, 2 + j)
+        for p in periods:
+            cc = col_of[p]
+            ws.merge_cells(start_row=r, start_column=cc, end_row=r, end_column=cc + 1)
+            cell = ws.cell(r, cc)
             kv = res.kpi.loc[kn, p]
             avg_of_months = (p == avg and KPI_AVG_MODE == "mean_of_months")
             if avg_of_months:
-                f = f"=AVERAGE({L(2)}{r}:{L(1 + len(months))}{r})"
+                f = f"=AVERAGE({','.join(f'{L(col_of[m])}{r}' for m in months)})"
             else:
-                a = L(col_of[p])
+                a = L(cc)
                 den_w = "+".join(f"{a}{x}" for x in (aw, ww) if x)
                 f = {
                     "PR = T/OE": f"=IF({a}{OE_}=0,\"\",{a}{T_}/{a}{OE_})",
@@ -372,9 +437,11 @@ def build_excel(res: TocResult, path_or_buf, formulas: bool = True) -> None:
             cell.value = (f or None) if formulas else (None if pd.isna(kv) else float(kv))
             cell.number_format = "0%" if kn.startswith("T%") else "0.00"
             cell.alignment = Alignment(horizontal="right")
-            cell.fill = PatternFill("solid", start_color="F2F4F4", end_color="F2F4F4")
-            cell.font = fnt()
-            cell.border = Border(left=THIN, right=MEDIUM, top=THIN, bottom=b_bot)
+            for sub_c, rb in ((cc, THIN), (cc + 1, MEDIUM)):
+                sc = ws.cell(r, sub_c)
+                sc.fill = PatternFill("solid", start_color="F2F4F4", end_color="F2F4F4")
+                sc.font = fnt(bold=True)
+                sc.border = Border(left=THIN, right=rb, top=THIN, bottom=b_bot)
 
     ws.column_dimensions["A"].width = 45
     for p in periods:
