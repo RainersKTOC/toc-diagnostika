@@ -1,5 +1,5 @@
 """
-toc_engine.py — TOC-FIN klasifikācija un aprēķini ar situatīvu aģenta izpratni
+toc_engine.py — TOC-FIN klasifikācija un Excel eksports ar biezajām grupu un mēnešu līnijām
 """
 from __future__ import annotations
 
@@ -20,7 +20,6 @@ FONT_NAME = "Calibri"
 FONT_SIZE = 10
 KPI_AVG_MODE = "mean_of_months"
 
-# Grupu definīcijas: kods -> (Cilvēcīgais apakšgrupas nosaukums atskaitē, Lielā grupa)
 GROUPS: dict[str, tuple[str, str]] = {
     "S": ("Neto apgrozījums un ieņēmumi (S)", "S"),
     "TVC_MATERIALS": ("Izejvielas un materiāli", "TVC"),
@@ -49,7 +48,6 @@ MAIN_GROUP_TO_DEFAULT_SUB: dict[str, str] = {
 TVC_KEYS = [k for k, v in GROUPS.items() if v[1] == "TVC"]
 OE_KEYS = [k for k, v in GROUPS.items() if v[1] == "OE"]
 
-# Zināšanu bāzes ielāde
 KNOWLEDGE_TEXT = ""
 for fname in ["toc_knowledge.txt", "toc_knowledge.md", "knowledge.txt"]:
     p = Path(fname)
@@ -66,13 +64,13 @@ VADLĪNIJAS SITUATĪVAI IZVĒRTĒŠANAI:
    - Reālie naudas izdevumi, piemēram, procentu maksājumi un uzņēmumu ienākuma nodoklis (UIN), ir reāla nauda, kas aizplūst no uzņēmuma, tāpēc tos liec pie OE (OE_FIN_TAX).
 2. Izproti ieņēmumu dabu (S):
    - Neto apgrozījums, kā arī saņemts granta finansējums un pārējie ieņēmumi ir nauda, kas ienāk sistēmā -> liec tos pie 'S' (ar is_income=true).
-   - Ja kādā konkrētā situācijā pārējo ieņēmumu vai granta daba varētu būt diskutabla (piem., vai lietotājs to vēlas redzēt kā S vai kā OE izmaksu kompensāciju), izvēlies 'S', bet vari uzdot jautājumu (confidence='low'), lai lietotājs pats izvēlas.
+   - Ja kādā konkrētā situācijā pārējo ieņēmumu vai granta daba varētu būt diskutabla, izvēlies 'S', bet vari uzdot jautājumu (confidence='low'), lai lietotājs pats izvēlas.
 3. Izproti algas pēc konteksta (Sadaļas/Ceļa):
    - Ja 'Personāla izmaksas' un 'Sociālās iemaksas' atrodas zem ražošanas pašizmaksas sadaļas -> OE_WORKER_WAGES.
    - Ja tās atrodas zem administrācijas vai pārdošanas sadaļas -> OE_ADMIN_WAGES.
-   - Ja sadaļa ir skaidri redzama, nejautā lietotājam liekus jautājumus par algām.
 4. Kritiski izvērtē robežgadījumus starp TVC un OE:
-   - Uzdod jautājumu (confidence='low') tikai tad, ja pēc konta nosaukuma nav viennozīmīgi skaidrs, vai izmaksa mainās 1:1 ar katru pārdoto vienību (TVC), ir perioda uzturēšanas izdevums (OE), ieņēmums (S) vai satur virtuālu amortizāciju (EXCLUDED)."""
+   - Izejvielas un materiāli -> TVC_MATERIALS; Preču piegādes izdevumi -> TVC_DELIVERY.
+   - Uzdod jautājumu (confidence='low') tikai tad, ja pēc konta nosaukuma nav viennozīmīgi skaidrs, vai izmaksa mainās 1:1 ar katru pārdoto vienību (TVC) vai ir perioda uzturēšanas izdevums (OE)."""
 
 CLASSIFY_TOOL = {
     "name": "classify_accounts",
@@ -89,8 +87,7 @@ CLASSIFY_TOOL = {
                         "group": {"enum": list(GROUPS)},
                         "is_income": {"type": "boolean"},
                         "confidence": {"enum": ["high", "medium", "low"]},
-                        "question": {"type": ["string", "null"],
-                                     "description": "Concise question in Latvian if the item requires management judgment, else null."},
+                        "question": {"type": ["string", "null"]},
                     },
                     "required": ["id", "group", "is_income", "confidence"],
                 },
@@ -244,7 +241,7 @@ FILLS = {
     "NP": ("92D050", True, "000000"), "EXCL": ("D9D9D9", False, "595959"),
 }
 THIN = Side(style="thin", color="BFBFBF")
-BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+MEDIUM = Side(style="medium", color="404040")
 
 
 def build_excel(res: TocResult, path_or_buf, formulas: bool = True) -> None:
@@ -255,14 +252,20 @@ def build_excel(res: TocResult, path_or_buf, formulas: bool = True) -> None:
     amounts = res.amounts
     periods = list(amounts.columns)
     row_names = list(amounts.index)
+    kinds = [res.row_kinds.get(rn, "OE_CHILD") for rn in row_names]
 
     ws.cell(1, 1, "Rādītājs / Kontugrupa").font = fnt(bold=True)
+    ws.cell(1, 1).border = Border(left=MEDIUM, right=MEDIUM, top=MEDIUM, bottom=MEDIUM)
     col_of: dict[str, int] = {}
     c = 2
     for p in periods:
         col_of[p] = c
-        ws.cell(1, c, p).font = fnt(bold=True)
-        ws.cell(1, c + 1, "%").font = fnt(bold=True)
+        c_val = ws.cell(1, c, p)
+        c_pct = ws.cell(1, c + 1, "%")
+        c_val.font = fnt(bold=True)
+        c_pct.font = fnt(bold=True)
+        c_val.border = Border(left=THIN, right=THIN, top=MEDIUM, bottom=MEDIUM)
+        c_pct.border = Border(left=THIN, right=MEDIUM, top=MEDIUM, bottom=MEDIUM)
         c += 2
     for cc in range(1, c):
         ws.cell(1, cc).alignment = Alignment(horizontal="center", vertical="center")
@@ -275,10 +278,25 @@ def build_excel(res: TocResult, path_or_buf, formulas: bool = True) -> None:
     child_tvc = [n for n in row_names if res.row_kinds[n] == "TVC_CHILD"]
     child_oe = [n for n in row_names if res.row_kinds[n] == "OE_CHILD"]
 
-    for name in row_names:
+    for i, name in enumerate(row_names):
         r = r_of[name]
-        kind = res.row_kinds[name]
-        ws.cell(r, 1, name)
+        kind = kinds[i]
+        next_kind = kinds[i + 1] if i + 1 < len(kinds) else None
+        fill, bold, color = FILLS.get(kind, FILLS["OE_CHILD"])
+
+        thick_bottom = (
+            kind in ("S", "T", "NP")
+            or (kind in ("TVC", "TVC_CHILD") and next_kind not in ("TVC", "TVC_CHILD"))
+            or (kind in ("OE", "OE_CHILD") and next_kind not in ("OE", "OE_CHILD"))
+            or i == len(row_names) - 1
+        )
+        b_bot = MEDIUM if thick_bottom else THIN
+
+        lbl_cell = ws.cell(r, 1, name if bold else f"   {name}")
+        lbl_cell.fill = PatternFill("solid", start_color=fill, end_color=fill)
+        lbl_cell.font = fnt(bold=bold, color=color)
+        lbl_cell.border = Border(left=MEDIUM, right=MEDIUM, top=THIN, bottom=b_bot)
+
         for p in periods:
             cc = col_of[p]
             a, pc = ws.cell(r, cc), ws.cell(r, cc + 1)
@@ -304,32 +322,37 @@ def build_excel(res: TocResult, path_or_buf, formulas: bool = True) -> None:
             pc.value = (f"=IF({col}${r_of['S']}=0,\"\",{col}{r}/{col}${r_of['S']})" if formulas
                         else (None if pd.isna(pv) else float(pv)))
             a.number_format = '#,##0;-#,##0;"-"'
-            pc.number_format = "0.0%"
-            for cell in (a, pc):
-                cell.alignment = Alignment(horizontal="right")
+            pc.number_format = "0%"
+            a.alignment = Alignment(horizontal="right")
+            pc.alignment = Alignment(horizontal="right")
 
-        fill, bold, color = FILLS.get(kind, FILLS["OE_CHILD"])
-        for cc in range(1, c):
-            cell = ws.cell(r, cc)
-            cell.fill = PatternFill("solid", start_color=fill, end_color=fill)
-            cell.font = fnt(bold=bold, color=color)
-            cell.border = BORDER
+            for cell_item, right_b in ((a, THIN), (pc, MEDIUM)):
+                cell_item.fill = PatternFill("solid", start_color=fill, end_color=fill)
+                cell_item.font = fnt(bold=bold, color=color)
+                cell_item.border = Border(left=THIN, right=right_b, top=THIN, bottom=b_bot)
 
     k0 = len(row_names) + 4
     ws.cell(k0, 1, "Rādītājs").font = fnt(bold=True)
+    ws.cell(k0, 1).border = Border(left=MEDIUM, right=MEDIUM, top=MEDIUM, bottom=MEDIUM)
     kpi_cols = list(res.kpi.columns)
     for j, p in enumerate(kpi_cols):
-        ws.cell(k0, 2 + j, p).font = fnt(bold=True)
-        ws.cell(k0, 2 + j).alignment = Alignment(horizontal="center")
+        kc = ws.cell(k0, 2 + j, p)
+        kc.font = fnt(bold=True)
+        kc.alignment = Alignment(horizontal="center")
+        kc.border = Border(left=THIN, right=MEDIUM, top=MEDIUM, bottom=MEDIUM)
+
     S_, T_, OE_ = r_of["S"], r_of["T"], r_of["OE"]
-    aw_n = GROUPS["OE_ADMIN_WAGES"][0]
-    ww_n = GROUPS["OE_WORKER_WAGES"][0]
-    aw = r_of.get(aw_n)
-    ww = r_of.get(ww_n)
+    aw = r_of.get(GROUPS["OE_ADMIN_WAGES"][0])
+    ww = r_of.get(GROUPS["OE_WORKER_WAGES"][0])
     kpi_names = list(res.kpi.index)
     for i, kn in enumerate(kpi_names, start=1):
         r = k0 + i
-        ws.cell(r, 1, kn)
+        b_bot = MEDIUM if i == len(kpi_names) else THIN
+        lc = ws.cell(r, 1, kn)
+        lc.fill = PatternFill("solid", start_color="F2F4F4", end_color="F2F4F4")
+        lc.font = fnt(bold=True)
+        lc.border = Border(left=MEDIUM, right=MEDIUM, top=THIN, bottom=b_bot)
+
         for j, p in enumerate(kpi_cols):
             cell = ws.cell(r, 2 + j)
             kv = res.kpi.loc[kn, p]
@@ -347,17 +370,17 @@ def build_excel(res: TocResult, path_or_buf, formulas: bool = True) -> None:
                     "Eiro Sales / Eiro strādnieku algas": f"=IF({a}{ww}=0,\"\",{a}{S_}/{a}{ww})" if ww else "",
                 }[kn]
             cell.value = (f or None) if formulas else (None if pd.isna(kv) else float(kv))
-            cell.number_format = "0.0%" if kn.startswith("T%") else "0.00"
+            cell.number_format = "0%" if kn.startswith("T%") else "0.00"
             cell.alignment = Alignment(horizontal="right")
-        for cc in range(1, 2 + len(kpi_cols)):
-            cell = ws.cell(r, cc)
             cell.fill = PatternFill("solid", start_color="F2F4F4", end_color="F2F4F4")
             cell.font = fnt()
-            cell.border = BORDER
+            cell.border = Border(left=THIN, right=MEDIUM, top=THIN, bottom=b_bot)
 
-    ws.column_dimensions["A"].width = 48
-    for cc in range(2, c + 1):
-        ws.column_dimensions[L(cc)].width = 12
+    ws.column_dimensions["A"].width = 45
+    for p in periods:
+        cc = col_of[p]
+        ws.column_dimensions[L(cc)].width = 11
+        ws.column_dimensions[L(cc + 1)].width = 6
     ws.freeze_panes = "B2"
     ws.sheet_view.showGridLines = False
     wb.calculation.fullCalcOnLoad = True
