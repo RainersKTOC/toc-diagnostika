@@ -1,5 +1,5 @@
 """
-toc_engine.py — TOC klasifikācija un aprēķini ar TOC-FIN zināšanu bāzes atbalstu
+toc_engine.py — TOC-FIN klasifikācija un aprēķini (Reālā naudas plūsma vs Virtuālā nauda)
 """
 from __future__ import annotations
 
@@ -20,8 +20,9 @@ FONT_NAME = "Calibri"
 FONT_SIZE = 10
 KPI_AVG_MODE = "mean_of_months"
 
+# Grupu definīcijas: kods -> (Cilvēcīgais apakšgrupas nosaukums tabulā, Lielā grupa)
 GROUPS: dict[str, tuple[str, str]] = {
-    "S": ("S", "S"),
+    "S": ("Neto apgrozījums un citi ieņēmumi (S)", "S"),
     "TVC_MATERIALS": ("Izejvielas un materiāli", "TVC"),
     "TVC_DELIVERY": ("Preču piegādes izdevumi", "TVC"),
     "OE_ADMIN_WAGES": ("Administrācijas algas (+ sociālās iemaksas)", "OE"),
@@ -30,9 +31,22 @@ GROUPS: dict[str, tuple[str, str]] = {
     "OE_PLATFORMS": ("Pārdošanas platformas un citas pārdošanas izm.", "OE"),
     "OE_PREMISES": ("Ražošanas telpu noma un uzturēšana", "OE"),
     "OE_OFFICE_IT": ("Biroja, IT un sakaru izmaksas", "OE"),
-    "OE_OTHER": ("Citi saimnieciskie izdevumi", "OE"),
-    "EXCLUDED": ("Izslēgtie (memo)", "EXCL"),
+    "OE_FIN_TAX": ("Procentu maksājumi un nodokļi (UIN)", "OE"),
+    "OE_OTHER": ("Citi saimnieciskie uzturēšanas izdevumi", "OE"),
+    "EXCLUDED": ("Virtuālā nauda (Amortizācija / Krājumu pārvērtēšana)", "EXCL"),
 }
+
+# Vārdnīcas ērtai attēlošanai lietotāja saskarnē
+SUBGROUP_LABELS: dict[str, str] = {k: v[0] for k, v in GROUPS.items()}
+LABEL_TO_KEY: dict[str, str] = {v[0]: k for k, v in GROUPS.items()}
+
+MAIN_GROUP_LABELS = {
+    "S": "🟡 S — Ieņēmumi un Pārdošana",
+    "TVC": "🟠 TVC — Patiesi mainīgās izmaksas",
+    "OE": "🟤 OE — Darbības un uzturēšanas izdevumi",
+    "EXCL": "⚪ Izslēgtie (Tikai virtuālā nauda / amortizācija)",
+}
+
 TVC_KEYS = [k for k, v in GROUPS.items() if v[1] == "TVC"]
 OE_KEYS = [k for k, v in GROUPS.items() if v[1] == "OE"]
 
@@ -47,13 +61,28 @@ for fname in ["toc_knowledge.txt", "toc_knowledge.md", "knowledge.txt"]:
 CLASSIFY_SYSTEM = f"""Tu esi TOC-FIN (Throughput Accounting) vadības lēmumu sistēmas eksperts. Tev jāpiešķir katrai PZA lapai (kontam) TOC grupa.
 Skaitļus tu neredzi un nerēķini — tikai klasificē pēc nosaukuma un ceļa.
 {KNOWLEDGE_TEXT}
-TOC-FIN kontu sanitizācijas un klasifikācijas noteikumi:
-- S: neto apgrozījums par pārdotajām precēm un pakalpojumiem.
-- TVC: TIKAI un VIENĪGI izdevumi, kas mainās 1:1 ar katru pārdoto vienību (izejvielas TVC_MATERIALS, tiešā preču piegāde TVC_DELIVERY).
-- OE: visas darbības un kapacitātes uzturēšanas izmaksas. Algas OBLIGĀTI jāsadala: ražošanas (OE_WORKER_WAGES) un administrācijas (OE_ADMIN_WAGES).
-- Pārējie saimnieciskie ieņēmumi (granti, valūtas peļņa) -> OE_OTHER ar is_income=true (tie samazina OE).
-- EXCLUDED: "virtuālie grāmatvedības trokšņi" — nolietojums/amortizācija, procentu maksājumi, UIN (peļņas nodoklis), krājumu pārvērtēšana, gatavās produkcijas un nepabeigtās ražošanas (WIP) krājumu izmaiņas.
-- ŠAUBU GADĪJUMI: Ja par kādu posteni ir patiesas šaubas (piem. muita, iepakojums, platformu komisijas, ārpakalpojumi), izvēlies visticamāko grupu, iestati confidence='low' un uzdod 1 vienkāršu jautājumu vadības valodā (bez grāmatvedības žargona): vai šis izdevums rodas 1:1 ar katru pārdoto vienību (TVC), vai tiek maksāts par perioda darbības uzturēšanu neatkarīgi no apjoma (OE)."""
+KRITISKIE KLASIFIKĀCIJAS NOTEIKUMI (REĀLĀ NAUDA PRET VIRTUĀLO NAUDU):
+1. S (Visi ienākošie naudas līdzekļi, is_income=true):
+   - Neto apgrozījums, preču un pakalpojumu pārdošana -> grupa 'S', is_income=true.
+   - Saņemts granta finansējums, valsts atbalsts, Pārējie saimnieciskās darbības ieņēmumi -> OBLIGĀTI grupa 'S' un is_income=true! (Neliec tos pie OE!).
+2. TVC (Patiesi mainīgās izmaksas, is_income=false):
+   - TIKAI izdevumi, kas mainās 1:1 ar katru pārdoto vienību: izejvielas/materiāli (TVC_MATERIALS) un tiešā preču piegāde klientam (TVC_DELIVERY).
+3. OE (Visi reālie uzturēšanas un darbības naudas izdevumi, is_income=false):
+   - Algas OBLIGĀTI jāsadala pēc sadaļas (ceļa):
+     * Ražošanas/pašizmaksas sadaļas personāla algas un VSAOI -> OE_WORKER_WAGES (confidence='high', NEJAUTĀ par to lietotājam!).
+     * Administrācijas/pārdošanas sadaļas algas un VSAOI -> OE_ADMIN_WAGES (confidence='high', NEJAUTĀ par to lietotājam!).
+   - Mārketings un reklāma -> OE_MARKETING.
+   - Pārdošanas platformas, mājas lapa, US TAX, pārējās pārdošanas izmaksas -> OE_PLATFORMS.
+   - Ražošanas telpu noma, uzturēšana, pārējās ražošanas izmaksas -> OE_PREMISES.
+   - Birojs, IT infrastruktūra, sakari, bankas, telpu noma admin -> OE_OFFICE_IT.
+   - Procentu maksājumi un Uzņēmumu ienākuma nodoklis (UIN) -> OBLIGĀTI OE_FIN_TAX (tā ir reāla nauda, kas aiziet no uzņēmuma, NELIEC pie EXCLUDED!).
+   - Pārējie saimnieciskie izdevumi, transports, ziedojumi, valūtas zaudējumi, darbinieku apdrošināšana, ilgtspēja -> OE_OTHER.
+4. EXCLUDED (Tikai un vienīgi VIRTUĀLĀ nauda, is_income=false):
+   - Pamatlīdzekļu un nemateriālo aktīvu nolietojums / amortizācija.
+   - Krājumu pārvērtēšana vai gatavās produkcijas/WIP krājumu atlikumu izmaiņas.
+   - Nākamo periodu vai debitoru virtuālie uzkrājumi.
+5. KAD JAUTĀT LIETOTĀJAM (confidence='low'):
+   - Uzdod jautājumu TIKAI tad, ja postenis patiešām var būt gan TVC (1:1 ar produktu), gan OE (fiksēts). Par algām, grantiem, procentiem un UIN jautājumus NEUZDOD (confidence='high')."""
 
 CLASSIFY_TOOL = {
     "name": "classify_accounts",
@@ -71,7 +100,7 @@ CLASSIFY_TOOL = {
                         "is_income": {"type": "boolean"},
                         "confidence": {"enum": ["high", "medium", "low"]},
                         "question": {"type": ["string", "null"],
-                                     "description": "Short question in Latvian from economic/decision perspective if confidence is low, else null."},
+                                     "description": "Short question in Latvian if genuinely ambiguous between S, TVC, OE, else null."},
                     },
                     "required": ["id", "group", "is_income", "confidence"],
                 },
@@ -138,8 +167,7 @@ class TocResult:
 
 def compute_toc(leaves: list[Leaf], mapping: dict[str, dict], period_cols: list[dict],
                 reported_result: np.ndarray | None = None) -> TocResult:
-    income_ids = {i for i, m in mapping.items() if m.get("is_income")}
-    income_ids |= {i for i, m in mapping.items() if m["group"] == "S"}
+    income_ids = {i for i, m in mapping.items() if m.get("is_income") or m["group"] == "S"}
     A, _ = leaf_amounts(leaves, income_ids)
     ids = [l.id for l in leaves]
     groups = np.array([mapping[i]["group"] for i in ids])
