@@ -1,25 +1,20 @@
 """
-app.py — TOC-FIN Vadības lēmumu un finanšu diagnostikas sistēma (v6)
-Ietver:
-- Automātisku fona struktūras un kopsummu pārbaudi (bez tehniskiem logiem)
-- Interaktīvus jautājumus šaubīgajām pozīcijām (TVC vs OE)
-- Kontu sadalījumu pa cilnēm (S, TVC, OE, Izslēgtie grāmatvedības trokšņi)
-- TOC-FIN Analytics: Vēsturisko T* tabulu, KPI un krāsainu Excel eksportu
-- Vadības Trauksmes Mehānismu (Decision Guardrails)
-- TOC-FIN Decision Support: Interaktīvu ΔT / ΔOE / ΔI lēmumu un pasūtījumu simulatoru
+app.py — TOC-FIN Vadības lēmumu un finanšu diagnostikas sistēma (v8)
+- Nekādas automātiskas (hardcoded) pārrakstīšanas: aģents pats situatīvi izvērtē katru PZA posteni
+- Jautājumu blokā pilna izvēle: S, TVC, OE (ar apakšgrupām) vai Izslēgtie
+- Pārskatāma kontu tabula, kur var brīvi mainīt gan Lielo grupu, gan Apakšgrupu (bez id, Sadaļa, Drošība, Jautājums)
 """
 import hashlib
 import io
-import re
 from pathlib import Path
 
 import anthropic
-import numpy as np
 import pandas as pd
 import streamlit as st
 
 from profile_store import ProfileStore
-from toc_engine import (GROUPS, FILLS, build_excel, classify_with_claude, compute_toc)
+from toc_engine import (GROUPS, SUBGROUP_LABELS, LABEL_TO_KEY, MAIN_GROUP_TO_DEFAULT_SUB,
+                        FILLS, build_excel, classify_with_claude, compute_toc)
 from toc_ingest import (Structure, analyze, extract_lines, load_grids, pick_sheet,
                         reconcile, request_structure)
 
@@ -35,18 +30,17 @@ Sistēma atbrīvo vadības komandu no mākslīgām pašizmaksas alokācijām, no
 no kapacitātes uzturēšanas izmaksām ($OE$), lai novērtētu patieso caurlaidību ($T$), produktivitāti ($PR = T / OE$) un modelētu nākotnes lēmumus ($\Delta T - \Delta OE$).
 """)
 
-# --- INFORMĀCIJAS LOGS PAR TOC-FIN ---
 with st.expander("ℹ️ Uzzināt vairāk: Kāpēc TOC-FIN nodala vadības lēmumus no grāmatvedības pašizmaksas?"):
     st.markdown("""
     **Organizatoriskais princips:** Biznesa lēmumi pieder vadības komandai (ieskaitot finanšu direktoru). Grāmatvedības uzdevums ir precīza darījumu uzskaite un nodokļu atbilstība, nevis biznesa lēmumu lietderības noteikšana.
 
-    * **S (Sales / Neto apgrozījums)** — Reāli ienākošā nauda no pircējiem par pārdoto produkciju.
+    * **S (Sales / Ieņēmumi)** — Visa reālā nauda, kas ienāk uzņēmumā (pamatdarbības apgrozījums, granti, citi ieņēmumi).
     * **TVC (Truly Variable Costs / Patiesi mainīgās izmaksas)** — Tikai izdevumi, kas mainās **1:1 ar katru pārdoto vienību** (izejvielas, materiāli un tiešais transports klientam). Ja nepārdod nevienu vienību, TVC = 0.
     * **T (Throughput / Caurlaidība)** — Jaunā naudas masa, ko uzņēmums ģenerē: $$T = S - TVC$$.
-    * **OE (Operating Expenses / Uzturēšanas izdevumi)** — Visa nauda, ko uzņēmums tērē, lai uzturētu sistēmas jaudu (visas algas, telpas, IT, mārketings). Darbaspēks ir OE, nevis TVC!
+    * **OE (Operating Expenses / Uzturēšanas izdevumi)** — Visa reālā nauda, ko uzņēmums tērē darbības nodrošināšanai (visas algas, telpas, IT, mārketings, kā arī procentu maksājumi un UIN).
+    * **Izslēgtie (Virtuālā nauda)** — Tikai grāmatvedības ieraksti bez reālas naudas plūsmas šajā periodā (amortizācija/nolietojums, krājumu pārvērtēšana).
     * **NP (Net Profit / Neto peļņa)** — $$NP = T - OE$$.
-    * **PR (Productivity Ratio / Produktivitātes rādītājs)** — $$PR = T / OE$$ (cik eiro caurlaidības ģenerē katrs uzturēšanā ieguldītais eiro).
-    * **Vēsturiskais $T^*$ pret Lēmumu $\Delta T$:** Vēsturiskie PZA dati rāda sistēmas tendences ($T^*$), savukārt katru jaunu pasūtījumu vai investīciju vadība vērtē pēc tīrās izmaiņas: $$\Delta NP = \Delta T - \Delta OE > 0$$.
+    * **PR (Productivity Ratio / Produktivitātes rādītājs)** — $$PR = T / OE$$.
     """)
 
 API_KEY = str(st.secrets.get("ANTHROPIC_API_KEY", "")).strip().strip('"').strip("'")
@@ -62,6 +56,16 @@ def get_client() -> anthropic.Anthropic:
 
 def fmt_num(x) -> str:
     return "" if pd.isna(x) else f"{x:,.0f}".replace(",", " ")
+
+
+def get_main_cat(group_key: str) -> str:
+    code = GROUPS.get(group_key, ("", "OE"))[1]
+    return {
+        "S": "🟡 S (Ieņēmumi)",
+        "TVC": "🟠 TVC (Mainīgās izmaksas)",
+        "OE": "🟤 OE (Uzturēšanas izdevumi)",
+        "EXCL": "⚪ Izslēgtie (Virtuālā nauda)"
+    }.get(code, "🟤 OE (Uzturēšanas izdevumi)")
 
 
 # Zināšanu bāzes ielāde
@@ -114,22 +118,22 @@ st.header("1. Kontu ekonomiskā klasifikācija")
 profile = ProfileStore("default")
 if "cls_df" not in S:
     if st.button("🔍 Sākt kontu TOC-FIN klasifikāciju", type="primary"):
-        with st.spinner("Analizē kontus pēc ekonomiskās būtības (S, TVC, OE, Grāmatvedības troksnis)..."):
+        with st.spinner("Aģents izvērtē kontus pēc TOC-FIN principiem un situācijas konteksta..."):
             try:
-                known, unknown = profile.lookup(an.leaves) if profile else ({}, an.leaves)
-                items = classify_with_claude(get_client(), MODEL, unknown) if unknown else []
+                items = classify_with_claude(get_client(), MODEL, an.leaves)
                 by_id = {i["id"]: i for i in items}
                 rows = []
                 for lf in an.leaves:
-                    if lf.id in known:
-                        m = known[lf.id]
-                        rows.append(dict(id=lf.id, Sadaļa=lf.path, Konts=lf.label, Grupa=m["group"],
-                                         Ieņēmums=bool(m["is_income"]), Drošība="profils", Jautājums=""))
-                    else:
-                        i = by_id[lf.id]
-                        rows.append(dict(id=lf.id, Sadaļa=lf.path, Konts=lf.label, Grupa=i["group"],
-                                         Ieņēmums=bool(i["is_income"]), Drošība=i["confidence"],
-                                         Jautājums=i.get("question") or ""))
+                    i = by_id[lf.id]
+                    # Ja konta nosaukums atkārtojas dažādās PZA sadaļās, pievienojam sadaļu iekavās, lai lietotājs redz kontekstu
+                    display_name = f"{lf.label} ({lf.path})" if lf.path and lf.label.lower().startswith(("personāla", "sociālās", "telpu", "pārējās")) else lf.label
+                    rows.append(dict(
+                        id=lf.id,
+                        Konts=display_name,
+                        Grupa=i["group"],
+                        Ieņēmums=bool(i["is_income"]),
+                        Jautājums=i.get("question") or ""
+                    ))
                 S.cls_df = pd.DataFrame(rows)
                 st.rerun()
             except Exception as e:
@@ -139,96 +143,139 @@ if "cls_df" not in S:
 
 cls_df: pd.DataFrame = S.cls_df
 
-# Interaktīva neskaidro kontu precizēšana
+# Interaktīva neskaidro kontu precizēšana (ar visām opcijām: S, TVC, OE, Izslēgtie)
 ambiguous_rows = cls_df[cls_df["Jautājums"].astype(str).str.strip() != ""]
 
 if len(ambiguous_rows) > 0 and not S.get("clarifications_done", False):
-    st.subheader("❓ Nepieciešams vadības precizējums par robežpozīcijām")
-    st.caption("Izvērtējiet šos posteņus pēc to reālās naudas plūsmas dabas (nevis grāmatvedības konta nosaukuma):")
+    st.subheader("❓ Nepieciešams vadības lēmums par dažām pozīcijām")
+    st.caption("Aģents ir identificējis pozīcijas, kuru klasifikācija ir atkarīga no jūsu biznesa situācijas:")
 
     clarifications = {}
     for idx, r in ambiguous_rows.iterrows():
-        st.markdown(f"**📌 {r['Konts']}** *(sadaļā: {r['Sadaļa']})*")
-        st.write(f"👉 **Jautājums:** {r['Jautājums']}")
-        
-        tvc_hint = "Izvēlieties TVC TIKAI tad, ja šis izdevums pieaug tieši par 1 vienību ikreiz, kad pārdodat vēl 1 produktu klientam."
-        oe_hint = "Izvēlieties OE, ja šo summu maksājat par perioda darbības vai jaudas uzturēšanu neatkarīgi no pārdotā skaita."
-        st.info(f"💡 **TOC-FIN kritērijs:** {tvc_hint} | {oe_hint}")
+        st.markdown(f"**📌 {r['Konts']}**")
+        st.write(f"👉 **Aģenta jautājums:** {r['Jautājums']}")
+        st.info("💡 **TOC-FIN orientieris:** **S** = reāli ienākošā nauda | **TVC** = mainās 1:1 ar katru pārdoto vienību | **OE** = perioda uzturēšanas izdevums (vai izmaksu kompensācija) | **Izslēgt** = virtuāls grāmatvedības ieraksts (amortizācija).")
 
-        current_choice = "TVC" if "TVC" in str(r["Grupa"]) else "OE"
+        grp = str(r["Grupa"])
+        default_idx = 0 if grp == "S" else (1 if "TVC" in grp else (3 if grp == "EXCLUDED" else 2))
+
         choice = st.radio(
-            f"Kā klasificēt '{r['Konts']}'?",
-            options=["TVC (Patiesi mainīga izmaksa — 1:1 ar pārdošanu)", "OE (Uzturēšanas / kapacitātes izdevums)"],
-            index=0 if current_choice == "TVC" else 1,
+            f"Kā klasificēt '{r['Konts']}' šajā situācijā?",
+            options=[
+                "🟡 S — Pievienot pie Ieņēmumiem (Sales)",
+                "🟠 TVC — Patiesi mainīga izmaksa (1:1 ar pārdoto vienību)",
+                "🟤 OE — Darbības un uzturēšanas izdevums (Operating Expense)",
+                "⚪ Izslēgt — Virtuāla nauda (amortizācija / pārvērtēšana)"
+            ],
+            index=default_idx,
             key=f"radio_{r['id']}"
         )
-        clarifications[r["id"]] = "TVC_DELIVERY" if "TVC" in choice else "OE_OTHER"
+        if choice.startswith("🟡"):
+            clarifications[r["id"]] = ("S", True)
+        elif choice.startswith("🟠"):
+            clarifications[r["id"]] = ("TVC_DELIVERY" if "piegād" in r["Konts"].lower() else "TVC_MATERIALS", False)
+        elif choice.startswith("⚪"):
+            clarifications[r["id"]] = ("EXCLUDED", False)
+        else:
+            clarifications[r["id"]] = (grp if grp.startswith("OE_") else "OE_OTHER", bool(r["Ieņēmums"]))
         st.markdown("---")
 
-    if st.button("Saglabāt izvēles un parādīt kontu sadalījumu", type="primary"):
-        for row_id, new_group in clarifications.items():
+    if st.button("Apstiprināt atbildes un atvērt kontu pārskatu", type="primary"):
+        for row_id, (new_group, is_inc) in clarifications.items():
             cls_df.loc[cls_df["id"] == row_id, "Grupa"] = new_group
+            cls_df.loc[cls_df["id"] == row_id, "Ieņēmums"] = is_inc
             cls_df.loc[cls_df["id"] == row_id, "Jautājums"] = ""
         S.cls_df = cls_df
         S.clarifications_done = True
         st.rerun()
     st.stop()
 
-# --- PĀRSKATĀMS KONTU SADALĪJUMS PA GRUPĀM ---
-st.subheader("📋 Kontu sadalījums pa TOC-FIN ekonomiskajām grupām")
+# --- SKAIDRS UN PĀRSKATĀMS KONTU SADALĪJUMS AR 2 LĪMEŅU REDIĢĒŠANU ---
+st.subheader("📋 Kontu sadalījums pa grupām un apakšgrupām")
+st.caption("Pārskatiet, kā aģents ir sadalījis kontus. Jūs varat brīvi mainīt gan **Lielo grupu** (S, TVC, OE, Izslēgtie), gan **Apakšgrupu (rindu atskaitē)** tieši šajā tabulā:")
 
-tab_s, tab_tvc, tab_oe, tab_excl = st.tabs([
-    "🟡 S — Pārdošana (Sales)", 
-    "🟠 TVC — Patiesi mainīgās", 
-    "🟤 OE — Uzturēšanas izdevumi", 
-    "⚪ Izslēgtie (Grāmatvedības korekcijas / UIN / Amortizācija)"
-])
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("🟡 S (Ieņēmumi)", f"{(cls_df['Grupa'] == 'S').sum()} konti")
+c2.metric("🟠 TVC (Mainīgās)", f"{cls_df['Grupa'].str.startswith('TVC').sum()} konti")
+c3.metric("🟤 OE (Uzturēšana)", f"{cls_df['Grupa'].str.startswith('OE_').sum()} konti")
+c4.metric("⚪ Izslēgtie (Virtuālie)", f"{(cls_df['Grupa'] == 'EXCLUDED').sum()} konti")
 
-s_keys = ["S"]
-tvc_keys = ["TVC_MATERIALS", "TVC_DELIVERY"]
-oe_keys = [k for k in GROUPS.keys() if k.startswith("OE_")]
-excl_keys = ["EXCLUDED"]
+view_df = pd.DataFrame({
+    "Konts": cls_df["Konts"],
+    "Lielā grupa": cls_df["Grupa"].map(get_main_cat),
+    "Apakšgrupa (Rinda atskaitē)": cls_df["Grupa"].map(SUBGROUP_LABELS),
+})
 
-with tab_s:
-    st.dataframe(cls_df[cls_df["Grupa"].isin(s_keys)][["Konts", "Sadaļa", "Grupa"]], hide_index=True, use_container_width=True)
-with tab_tvc:
-    st.dataframe(cls_df[cls_df["Grupa"].isin(tvc_keys)][["Konts", "Sadaļa", "Grupa"]], hide_index=True, use_container_width=True)
-with tab_oe:
-    st.dataframe(cls_df[cls_df["Grupa"].isin(oe_keys)][["Konts", "Sadaļa", "Grupa"]], hide_index=True, use_container_width=True)
-with tab_excl:
-    st.caption("Šie posteņi tiek izslēgti no operatīvās TOC caurlaidības, lai novērstu virtuālo izmaksu un krājumu pārvērtēšanas radītos kropļojumus:")
-    st.dataframe(cls_df[cls_df["Grupa"].isin(excl_keys)][["Konts", "Sadaļa", "Grupa"]], hide_index=True, use_container_width=True)
+edited_view = st.data_editor(
+    view_df,
+    hide_index=True,
+    use_container_width=True,
+    key="clean_cls_editor",
+    disabled=["Konts"],
+    column_config={
+        "Konts": st.column_config.TextColumn("Konta nosaukums", width="large"),
+        "Lielā grupa": st.column_config.SelectboxColumn(
+            "Lielā grupa (S / TVC / OE / Izslēgtie)",
+            options=list(MAIN_GROUP_TO_DEFAULT_SUB.keys()),
+            required=True,
+            width="medium",
+            help="Izvēlieties galveno TOC grupu."
+        ),
+        "Apakšgrupa (Rinda atskaitē)": st.column_config.SelectboxColumn(
+            "Apakšgrupa / Rinda atskaitē (OE sadalījums u.c.)",
+            options=list(SUBGROUP_LABELS.values()),
+            required=True,
+            width="large",
+            help="Izvēlieties konkrēto apakšgrupu, kurā konts tiks summēts gala tabulā."
+        ),
+    }
+)
 
-with st.expander("✏️ Atvērt pilno kontu tabulu (ja vēlaties manuāli pārcelt kādu posteni)"):
-    edited = st.data_editor(
-        cls_df, hide_index=True, use_container_width=True, key="cls_editor",
-        disabled=["id", "Sadaļa", "Konts", "Drošība", "Jautājums"],
-        column_config={"Grupa": st.column_config.SelectboxColumn(options=list(GROUPS), required=True),
-                       "Ieņēmums": st.column_config.CheckboxColumn(help="Ieņēmuma konts")}
-    )
+# Loģika: ja lietotājs nomaina Lielo grupu vai Apakšgrupu, sinhronizējam abus
+updated_groups = []
+changed = False
+for idx in range(len(cls_df)):
+    old_grp = cls_df.iloc[idx]["Grupa"]
+    old_main = get_main_cat(old_grp)
+    old_sub = SUBGROUP_LABELS[old_grp]
+
+    new_main = edited_view.iloc[idx]["Lielā grupa"]
+    new_sub = edited_view.iloc[idx]["Apakšgrupa (Rinda atskaitē)"]
+
+    if new_sub != old_sub:
+        # Lietotājs nomainīja apakšgrupu -> atjauninām grupas kodu
+        g_code = LABEL_TO_KEY[new_sub]
+        updated_groups.append(g_code)
+        changed = True
+    elif new_main != old_main:
+        # Lietotājs nomainīja Lielo grupu -> uzliekam šīs Lielās grupas noklusēto apakšgrupu
+        g_code = MAIN_GROUP_TO_DEFAULT_SUB[new_main]
+        updated_groups.append(g_code)
+        changed = True
+    else:
+        updated_groups.append(old_grp)
+
+if changed:
+    cls_df["Grupa"] = updated_groups
+    cls_df["Ieņēmums"] = cls_df["Grupa"] == "S"
+    S.cls_df = cls_df
+    st.rerun()
 
 # ------------------------------------------------------------------ 3. GALA APRĒĶINS
 st.header("2. TOC-FIN Diagnostika un Lēmumu Atbalsts")
 if st.button("🚀 Apstiprināt klasifikāciju un veikt TOC-FIN aprēķinu", type="primary"):
-    mapping = {r["id"]: {"group": r["Grupa"], "is_income": bool(r["Ieņēmums"])} for _, r in edited.iterrows()}
-    income_ids = {i for i, m in mapping.items() if m["is_income"] or m["group"] == "S"}
-    rec2 = reconcile(an, stc, income_ids)
-    if rec2["status"] == "fail":
-        st.error(rec2["message"])
-        st.dataframe(rec2["table"], hide_index=True)
-    else:
-        pos = next((l.pos for l in an.ex.lines if l.row == stc.result_row), None)
-        reported = an.ex.lines[pos].vals if pos is not None else None
-        S.result = compute_toc(an.leaves, mapping, an.ex.period_cols, reported)
-        if profile:
-            profile.save(an.leaves, mapping)
-        S.pop("commentary", None)
-        S.chat = []
+    mapping = {r["id"]: {"group": r["Grupa"], "is_income": bool(r["Grupa"] == "S" or r["Ieņēmums"])} for _, r in cls_df.iterrows()}
+    pos = next((l.pos for l in an.ex.lines if l.row == stc.result_row), None)
+    reported = an.ex.lines[pos].vals if pos is not None else None
+    S.result = compute_toc(an.leaves, mapping, an.ex.period_cols, reported)
+    if profile:
+        profile.save(an.leaves, mapping)
+    S.pop("commentary", None)
+    S.chat = []
 
 if "result" in S:
     res = S.result
 
-    # Galvenās cilnes: Analytics (Vēsturiskais T*) vs Decision Support (Nākotnes Delta)
     main_tab1, main_tab2 = st.tabs([
         "📊 1. TOC-FIN Analytics (Vēsturiskā diagnostika un Trauksmes)", 
         "⚡ 2. TOC-FIN Decision Support (ΔT / ΔOE Lēmumu Simulators)"
@@ -272,14 +319,12 @@ if "result" in S:
         alerts_found = False
 
         if month_cols:
-            # 1. PR < 1.0 pārbaude
             pr_series = res.kpi.loc["PR = T/OE", month_cols]
             bad_pr_months = pr_series[pr_series < 1.0].index.tolist()
             if bad_pr_months:
                 alerts_found = True
                 st.error(f"🔴 **Kritiska trauksme (PR < 1.0):** Periodos **{', '.join(bad_pr_months)}** uzturēšanas izmaksas ($OE$) pārsniedza ģenerēto caurlaidību ($T$). Uzņēmums šajos mēnešos dedzināja naudas rezerves.")
 
-            # 2. TVC% anomālijas pārbaude (iesaldēti krājumi vai maržas kritums)
             t_pct_series = res.kpi.loc["T% = T/S", month_cols]
             mean_t_pct = t_pct_series.mean()
             low_t_months = t_pct_series[t_pct_series < (mean_t_pct - 0.07)].index.tolist()
@@ -287,7 +332,6 @@ if "result" in S:
                 alerts_found = True
                 st.warning(f"🟡 **Caurlaidības / Krājumu brīdinājums:** Periodos **{', '.join(low_t_months)}** caurlaidības marža ($T\\%$) nokritās vairāk nekā par 7 procentpunktiem zem vidējā ({mean_t_pct:.1%}). Pārbaudiet, vai šajā mēnesī netika iepirkta liela materiālu partija noliktavai (iesaldējot naudu $I$) vai piešķirtas pārmērīgas cenu atlaides.")
 
-            # 3. OE lēciena pārbaude
             oe_series = res.amounts.loc["OE", month_cols]
             mean_oe = oe_series.mean()
             high_oe_months = oe_series[oe_series > (mean_oe * 1.15)].index.tolist()
@@ -357,7 +401,6 @@ if "result" in S:
         pēc tā **faktiskajām papildu izmaiņām ($\Delta T$, $\Delta OE$, $\Delta I$)**, nevis vidējās grāmatvedības pašizmaksas.
         """)
 
-        # Bāzes rādītāji (no AVG YTD vai pēdējā mēneša)
         ref_col = next((c for c in res.amounts.columns if "AVG" in c), res.amounts.columns[-1])
         base_s = float(res.amounts.loc["S", ref_col])
         base_tvc = float(res.amounts.loc["TVC", ref_col])
@@ -409,7 +452,6 @@ if "result" in S:
                           delta=f"Atmaksāšanās: {payback_months:.1f} mēn." if delta_np > 0 else "Neatmaksājas")
 
         st.markdown("---")
-        # Lēmuma trauksmes loģika
         if delta_np > 0 and "Izspiež" not in ccr_impact:
             st.success(f"✅ **TOC-FIN Lēmuma slēdziens:** Lēmums ir finansiāli pamatots ($\Delta T - \Delta OE = +{fmt_num(delta_np)}$ €/mēn.). Pat ja tradicionālā grāmatvedības pilnā pašizmaksa šim darījumam izskatītos 'nerentabla', brīvās jaudas apstākļos tas tieši palielina uzņēmuma tīro peļņu un naudas plūsmu.")
         elif delta_np > 0 and "Izspiež" in ccr_impact:
