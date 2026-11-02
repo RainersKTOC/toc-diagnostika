@@ -1,9 +1,6 @@
 """
-app.py — TOC-FIN Vadības lēmumu un finanšu diagnostikas sistēma (v10)
-Uzlabojumi:
-- S apakšgrupas gaišākā dzeltenā tonī zem S; TVC tumši sarkanbrūns; OE tumšāks brūnīgi bēšs
-- Produktivitātes tabula precīzi izlīdzināta vienā līmenī ar Finanšu tabulu (mēnesis pret mēnesi)
-- 2. cilne (TOC-FIN Decision Support): Procentu (%) simulācija pa izvēlēto mēnešu periodu ar pilnu rezultātu tabulu
+app.py — TOC-FIN Vadības lēmumu un finanšu diagnostikas sistēma (v10.2 ar Supabase)
+Project ID: amprqueamdcxpjufigvm
 """
 import hashlib
 import io
@@ -14,7 +11,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from profile_store import ProfileStore
+from db import SupabaseProfileStore
 from toc_engine import (GROUPS, SUBGROUP_LABELS, LABEL_TO_KEY, MAIN_GROUP_TO_DEFAULT_SUB,
                         FILLS, build_excel, classify_with_claude, compute_toc)
 from toc_ingest import (Structure, analyze, extract_lines, load_grids, pick_sheet,
@@ -76,32 +73,20 @@ def get_main_cat(group_key: str) -> str:
     }.get(code, "🟤 OE (Uzturēšanas izdevumi)")
 
 
-# Stingra kārtošanas secība: S -> TVC -> OE Algas -> OE Pārējais -> Izslēgtie
 GROUP_SORT_ORDER = {
-    "S": 1,
-    "S_REV": 1,
-    "S_OTHER": 2,
-    "TVC_MATERIALS": 3,
-    "TVC_DELIVERY": 4,
-    "OE_ADMIN_WAGES": 5,
-    "OE_WORKER_WAGES": 6,
-    "OE_MARKETING": 7,
-    "OE_PLATFORMS": 8,
-    "OE_PREMISES": 9,
-    "OE_OFFICE_IT": 10,
-    "OE_FIN_TAX": 11,
-    "OE_OTHER": 12,
-    "EXCLUDED": 13,
+    "S": 1, "S_REV": 1, "S_OTHER": 2,
+    "TVC_MATERIALS": 3, "TVC_DELIVERY": 4,
+    "OE_ADMIN_WAGES": 5, "OE_WORKER_WAGES": 6, "OE_MARKETING": 7,
+    "OE_PLATFORMS": 8, "OE_PREMISES": 9, "OE_OFFICE_IT": 10,
+    "OE_FIN_TAX": 11, "OE_OTHER": 12, "EXCLUDED": 13,
 }
 
 
 def render_unified_toc_tables_html(amounts_df: pd.DataFrame, main_df: pd.DataFrame, kpi_df: pd.DataFrame, row_kinds: dict[str, str], title_kpi: str = "📈 Produktivitātes un atdeves rādītāji") -> str:
-    """Renderē gan Finanšu tabulu, gan Produktivitātes tabulu vienā kopīgā HTML režģī, lai mēnesis ir precīzi pret mēnesi."""
     periods = list(amounts_df.columns)
     row_names = list(amounts_df.index)
     kinds = [row_kinds.get(rn, "OE_CHILD") for rn in row_names]
 
-    # Aprēķinām fiksētās kolonnu proporcijas, lai abas daļas ir 100% vienā līnijā
     lbl_width_pct = 23.0
     rem_pct = 100.0 - lbl_width_pct
     per_period_pct = rem_pct / max(len(periods), 1)
@@ -135,7 +120,6 @@ def render_unified_toc_tables_html(amounts_df: pd.DataFrame, main_df: pd.DataFra
         html.append(f'<th class="th-val">{p}</th><th class="th-pct">%</th>')
     html.append("</tr></thead><tbody>")
 
-    # 1. Finanšu pārskata rindas
     for i, rname in enumerate(row_names):
         kind = kinds[i]
         next_kind = kinds[i + 1] if i + 1 < len(kinds) else None
@@ -161,7 +145,6 @@ def render_unified_toc_tables_html(amounts_df: pd.DataFrame, main_df: pd.DataFra
             html.append(f'<td class="val-col">{val_str}</td><td class="pct-col">{pct_str}</td>')
         html.append("</tr>")
 
-    # 2. Atstarpe un Produktivitātes rādītāju bloks (tieši tajās pašās kolonnās!)
     total_cols = 1 + 2 * len(periods)
     html.append(f'<tr class="spacer-row"><td colspan="{total_cols}">{title_kpi}</td></tr>')
 
@@ -214,9 +197,8 @@ if st.session_state.get("fid") != fid:
 S = st.session_state
 grids: dict[str, pd.DataFrame] = S.grids
 
-# ------------------------------------------------------------------ FONĀ: STRUKTŪRA UN PĀRBAUDE
 if "structure" not in S:
-    with st.spinner("Nolasa faila struktūru un attīra datus no kopsummu dublikātiem..."):
+    with st.spinner("Nolasa faila struktūru un attīra datus..."):
         try:
             sheet = pick_sheet(get_client(), MODEL, grids)
             S.structure = request_structure(get_client(), MODEL, sheet, grids[sheet])
@@ -234,28 +216,26 @@ except Exception as e:
 
 an = S.analysis
 
-# ------------------------------------------------------------------ 2. KONTU KLASIFIKĀCIJA
+# ------------------------------------------------------------------ 2. KONTU KLASIFIKĀCIJA un SUPABASE PROFILE STORE
 st.header("1. Kontu ekonomiskā klasifikācija")
 
-profile = ProfileStore("default")
+profile = SupabaseProfileStore(user_id="default_user")
+
 if "cls_df" not in S:
     if st.button("🔍 Sākt kontu TOC-FIN klasifikāciju", type="primary"):
-        with st.spinner("Aģents izvērtē kontus pēc TOC-FIN principiem un situācijas konteksta..."):
+        with st.spinner("Analizē un salīdzina ar saglabāto Supabase profilu..."):
             try:
-                items = classify_with_claude(get_client(), MODEL, an.leaves)
+                known, unknown = profile.lookup(an.leaves)
+                items = classify_with_claude(get_client(), MODEL, unknown) if unknown else []
                 by_id = {i["id"]: i for i in items}
                 rows = []
                 for lf in an.leaves:
-                    i = by_id[lf.id]
-                    grp_code = "S_REV" if i["group"] == "S" else i["group"]
-                    display_name = f"{lf.label} ({lf.path})" if lf.path and lf.label.lower().startswith(("personāla", "sociālās", "telpu", "pārējās")) else lf.label
-                    rows.append(dict(
-                        id=lf.id,
-                        Konts=display_name,
-                        Grupa=grp_code,
-                        Ieņēmums=bool(i["is_income"]),
-                        Jautājums=i.get("question") or ""
-                    ))
+                    if lf.id in known:
+                        m = known[lf.id]
+                        rows.append(dict(id=lf.id, Konts=lf.label, Grupa=m["group"], Ieņēmums=bool(m["is_income"]), Jautājums=""))
+                    else:
+                        i = by_id[lf.id]
+                        rows.append(dict(id=lf.id, Konts=lf.label, Grupa=i["group"], Ieņēmums=bool(i["is_income"]), Jautājums=i.get("question") or ""))
                 S.cls_df = pd.DataFrame(rows)
                 st.rerun()
             except Exception as e:
@@ -266,44 +246,35 @@ if "cls_df" not in S:
 cls_df: pd.DataFrame = S.cls_df
 cls_df["Grupa"] = cls_df["Grupa"].replace({"S": "S_REV"})
 
-# Interaktīva neskaidro kontu precizēšana
 ambiguous_rows = cls_df[cls_df["Jautājums"].astype(str).str.strip() != ""]
 
 if len(ambiguous_rows) > 0 and not S.get("clarifications_done", False):
     st.subheader("❓ Nepieciešams vadības lēmums par dažām pozīcijām")
-    st.caption("Aģents ir identificējis pozīcijas, kuru klasifikācija ir atkarīga no jūsu biznesa situācijas:")
-
     clarifications = {}
     for idx, r in ambiguous_rows.iterrows():
         st.markdown(f"**📌 {r['Konts']}**")
         st.write(f"👉 **Aģenta jautājums:** {r['Jautājums']}")
-        st.info("💡 **TOC-FIN orientieris:** **S** = reāli ienākošā nauda | **TVC** = mainās 1:1 ar katru pārdoto vienību | **OE** = perioda uzturēšanas izdevums | **Izslēgt** = virtuāls grāmatvedības ieraksts (amortizācija).")
-
-        grp = str(r["Grupa"])
-        default_idx = 0 if grp.startswith("S") else (1 if "TVC" in grp else (3 if grp == "EXCLUDED" else 2))
-
         choice = st.radio(
-            f"Kā klasificēt '{r['Konts']}' šajā situācijā?",
+            f"Kā klasificēt '{r['Konts']}'?",
             options=[
-                "🟡 S — Pievienot pie Ieņēmumiem (Sales)",
-                "🟠 TVC — Patiesi mainīga izmaksa (1:1 ar pārdoto vienību)",
-                "🟤 OE — Darbības un uzturēšanas izdevums (Operating Expense)",
-                "⚪ Izslēgt — Virtuāla nauda (amortizācija / pārvērtēšana)"
+                "🟡 S — Ieņēmumi (Sales)",
+                "🟠 TVC — Patiesi mainīga izmaksa (1:1 ar pārdošanu)",
+                "🟤 OE — Uzturēšanas / darbības izdevums",
+                "⚪ Izslēgt — Virtuāla nauda (amortizācija)"
             ],
-            index=default_idx,
             key=f"radio_{r['id']}"
         )
         if choice.startswith("🟡"):
-            clarifications[r["id"]] = ("S_OTHER" if any(w in r["Konts"].lower() for w in ["grant", "pārēj"]) else "S_REV", True)
+            clarifications[r["id"]] = ("S_OTHER" if "grant" in r["Konts"].lower() else "S_REV", True)
         elif choice.startswith("🟠"):
-            clarifications[r["id"]] = ("TVC_DELIVERY" if "piegād" in r["Konts"].lower() and "izejviel" not in r["Konts"].lower() else "TVC_MATERIALS", False)
+            clarifications[r["id"]] = ("TVC_DELIVERY" if "piegād" in r["Konts"].lower() else "TVC_MATERIALS", False)
         elif choice.startswith("⚪"):
             clarifications[r["id"]] = ("EXCLUDED", False)
         else:
-            clarifications[r["id"]] = (grp if grp.startswith("OE_") else "OE_OTHER", False)
+            clarifications[r["id"]] = ("OE_OTHER", False)
         st.markdown("---")
 
-    if st.button("Apstiprināt atbildes un atvērt kontu pārskatu", type="primary"):
+    if st.button("Apstiprināt atbildes", type="primary"):
         for row_id, (new_group, is_inc) in clarifications.items():
             cls_df.loc[cls_df["id"] == row_id, "Grupa"] = new_group
             cls_df.loc[cls_df["id"] == row_id, "Ieņēmums"] = is_inc
@@ -313,10 +284,7 @@ if len(ambiguous_rows) > 0 and not S.get("clarifications_done", False):
         st.rerun()
     st.stop()
 
-# --- SKAIDRS UN SAKĀRTOTS KONTU SADALĪJUMS PILNĀ AUGSTUMĀ ---
 st.subheader("📋 Kontu sadalījums pa grupām un apakšgrupām")
-st.caption("Konti ir automātiski sakārtoti secībā: **S → TVC → OE Algas → OE Pārējais → Izslēgtie**. Jūs varat brīvi mainīt gan Lielo grupu, gan Apakšgrupu:")
-
 cls_df["_sort"] = cls_df["Grupa"].map(lambda g: GROUP_SORT_ORDER.get(g, 99))
 cls_df = cls_df.sort_values(by=["_sort", "Konts"], kind="mergesort").drop(columns=["_sort"]).reset_index(drop=True)
 S.cls_df = cls_df
@@ -336,26 +304,11 @@ view_df = pd.DataFrame({
 full_editor_height = (len(view_df) + 1) * 36 + 12
 
 edited_view = st.data_editor(
-    view_df,
-    hide_index=True,
-    use_container_width=True,
-    height=full_editor_height,
-    key="clean_cls_editor",
-    disabled=["Konts"],
+    view_df, hide_index=True, use_container_width=True, height=full_editor_height, key="clean_cls_editor", disabled=["Konts"],
     column_config={
         "Konts": st.column_config.TextColumn("Konta nosaukums", width="large"),
-        "Lielā grupa": st.column_config.SelectboxColumn(
-            "Lielā grupa (S / TVC / OE / Izslēgtie)",
-            options=list(MAIN_GROUP_TO_DEFAULT_SUB.keys()),
-            required=True,
-            width="medium",
-        ),
-        "Apakšgrupa (Rinda atskaitē)": st.column_config.SelectboxColumn(
-            "Apakšgrupa / Rinda atskaitē (S, TVC, OE sadalījums)",
-            options=list(SUBGROUP_LABELS.values()),
-            required=True,
-            width="large",
-        ),
+        "Lielā grupa": st.column_config.SelectboxColumn("Lielā grupa", options=list(MAIN_GROUP_TO_DEFAULT_SUB.keys()), required=True, width="medium"),
+        "Apakšgrupa (Rinda atskaitē)": st.column_config.SelectboxColumn("Apakšgrupa / Rinda atskaitē", options=list(SUBGROUP_LABELS.values()), required=True, width="large"),
     }
 )
 
@@ -370,12 +323,10 @@ for idx in range(len(cls_df)):
     new_sub = edited_view.iloc[idx]["Apakšgrupa (Rinda atskaitē)"]
 
     if new_sub != old_sub:
-        g_code = LABEL_TO_KEY[new_sub]
-        updated_groups.append(g_code)
+        updated_groups.append(LABEL_TO_KEY[new_sub])
         changed = True
     elif new_main != old_main:
-        g_code = MAIN_GROUP_TO_DEFAULT_SUB[new_main]
-        updated_groups.append(g_code)
+        updated_groups.append(MAIN_GROUP_TO_DEFAULT_SUB[new_main])
         changed = True
     else:
         updated_groups.append(old_grp)
@@ -392,7 +343,9 @@ if st.button("🚀 Apstiprināt klasifikāciju un veikt TOC-FIN aprēķinu", typ
     mapping = {r["id"]: {"group": r["Grupa"], "is_income": bool(str(r["Grupa"]).startswith("S_") or r["Ieņēmums"])} for _, r in cls_df.iterrows()}
     pos = next((l.pos for l in an.ex.lines if l.row == stc.result_row), None)
     reported = an.ex.lines[pos].vals if pos is not None else None
-    S.result = compute_toc(an.leaves, mapping, an.ex.period_cols, reported)
+    
+    res = compute_toc(an.leaves, mapping, an.ex.period_cols, reported)
+    S.result = res
     if profile:
         profile.save(an.leaves, mapping)
     S.pop("commentary", None)
@@ -411,46 +364,12 @@ if "result" in S:
         build_excel(res, xl_f, formulas=True)
         build_excel(res, xl_v, formulas=False)
         d1, d2 = st.columns(2)
-        d1.download_button("📥 Lejupielādēt Excel ar formulām (.xlsx)", xl_f.getvalue(), "TOC_Finansu_Diagnostika.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        d2.download_button("📥 Lejupielādēt Excel ar vērtībām (.xlsx)", xl_v.getvalue(), "TOC_Finansu_Diagnostika_vertibas.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        d1.download_button("📥 Lejupielādēt Excel ar formulām (.xlsx)", xl_f.getvalue(), "TOC_Finansu_Diagnostika.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        d2.download_button("📥 Lejupielādēt Excel ar vērtībām (.xlsx)", xl_v.getvalue(), "TOC_Finansu_Diagnostika_vertibas.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         st.subheader("Finanšu pārskata tabula (T* skats)")
         st.markdown(render_unified_toc_tables_html(res.amounts, res.main, res.kpi, res.row_kinds), unsafe_allow_html=True)
 
-        # --- VADĪBAS TRAUKSMES PANELIS (DECISION GUARDRAILS) ---
-        st.markdown("---")
-        st.subheader("🚦 Vadības Trauksmes Panelis (Decision Guardrails)")
-        
-        month_cols = [c for c in res.amounts.columns if not ("YTD" in c or "AVG" in c)]
-        alerts_found = False
-
-        if month_cols:
-            pr_series = res.kpi.loc["PR = T/OE", month_cols]
-            bad_pr_months = pr_series[pr_series < 1.0].index.tolist()
-            if bad_pr_months:
-                alerts_found = True
-                st.error(f"🔴 **Kritiska trauksme (PR < 1.0):** Periodos **{', '.join(bad_pr_months)}** uzturēšanas izmaksas ($OE$) pārsniedza ģenerēto caurlaidību ($T$). Uzņēmums šajos mēnešos dedzināja naudas rezerves.")
-
-            t_pct_series = res.kpi.loc["T% = T/S", month_cols]
-            mean_t_pct = t_pct_series.mean()
-            low_t_months = t_pct_series[t_pct_series < (mean_t_pct - 0.07)].index.tolist()
-            if low_t_months:
-                alerts_found = True
-                st.warning(f"🟡 **Caurlaidības / Krājumu brīdinājums:** Periodos **{', '.join(low_t_months)}** caurlaidības marža ($T\\%$) nokritās vairāk nekā par 7 procentpunktiem zem vidējā ({mean_t_pct:.0%}). Pārbaudiet, vai šajā mēnesī netika iepirkta liela materiālu partija noliktavai (iesaldējot naudu $I$) vai piešķirtas pārmērīgas cenu atlaides.")
-
-            oe_series = res.amounts.loc["OE", month_cols]
-            mean_oe = oe_series.mean()
-            high_oe_months = oe_series[oe_series > (mean_oe * 1.15)].index.tolist()
-            if high_oe_months:
-                alerts_found = True
-                st.warning(f"🟠 **Kapacitātes izmaksu ($OE$) lēciens:** Periodos **{', '.join(high_oe_months)}** darbības izdevumi pārsniedza vidējo līmeni ({fmt_num(mean_oe)} €) par vairāk nekā 15%. Pārbaudiet, vai šis $OE$ pieaugums deva adekvātu $\\Delta T$ pieaugumu.")
-
-            if not alerts_found:
-                st.success("🟢 **Sistēmas darbība stabila:** Visos periodos $PR \\ge 1.0$ un nav konstatētas kritiskas $OE$ vai $T\\%$ novirzes.")
-
-        # --- VADĪBAS KOPSAVILKUMS ---
         st.markdown("---")
         st.subheader("📝 Vadības kopsavilkums un stratēģiskie secinājumi")
         tables_md = (res.amounts.round(0).to_markdown() + "\n\n" + res.kpi.round(3).to_markdown())
@@ -459,7 +378,6 @@ if "result" in S:
         COMMENT_SYSTEM = (
             "Tu esi pieredzējis TOC-FIN finanšu direktora padomnieks un vadības konsultants. "
             "Uzrunā lietotāju kā Vadības komandu. Nekad nelieto grāmatvedības pašizmaksas klišejas. "
-            "Tev ir doti jau precīzi aprēķināti skaitļi — citē tikai tos, kas ir tabulās. "
             f"{knowledge_context}"
             "Raksti latviešu valodā, strukturēti, asi un uz lēmumiem vērsti.")
 
@@ -468,115 +386,58 @@ if "result" in S:
                 with st.spinner("Sagatavo TOC-FIN vadības kopsavilkumu..."):
                     r = get_client().messages.create(
                         model=MODEL, max_tokens=2500, system=COMMENT_SYSTEM,
-                        messages=[{"role": "user", "content":
-                                   f"Aprēķinātās tabulas (summas EUR):\n\n{tables_md}\n\n"
-                                   "Uzraksti vadības analīzi:\n"
-                                   "### 1. Galvenās tendences un Caurlaidības (T*) dinamika\n"
-                                   "### 2. Produktivitātes (PR) un darbaspēka atdeves vērtējums\n"
-                                   "### 3. Vadības fokusēšanās soļi un rīcības plāns (3 konkrēti lēmumi)"}])
+                        messages=[{"role": "user", "content": f"Aprēķinātās tabulas (summas EUR):\n\n{tables_md}\n\nUzraksti vadības analīzi."}])
                     S.commentary = "".join(b.text for b in r.content if getattr(b, "type", "") == "text")
                     st.rerun()
         else:
             st.markdown(S.commentary)
 
-            st.subheader("💬 Diskusija ar TOC-FIN aģentu")
-            S.setdefault("chat", [])
-            for m in S.chat:
-                with st.chat_message(m["role"]):
-                    st.markdown(m["content"])
-            q = st.chat_input("Uzdodiet jautājumu par datiem vai konkrētu biznesa lēmumu...")
-            if q:
-                S.chat.append({"role": "user", "content": q})
-                with st.chat_message("user"):
-                    st.markdown(q)
-                with st.chat_message("assistant"):
-                    with st.spinner("Analizē..."):
-                        r = get_client().messages.create(
-                            model=MODEL, max_tokens=1500,
-                            system=COMMENT_SYSTEM + f"\n\nAprēķinātās tabulas:\n{tables_md}\n\nKopsavilkums:\n{S.commentary}",
-                            messages=S.chat)
-                        reply = "".join(b.text for b in r.content if getattr(b, "type", "") == "text")
-                        st.markdown(reply)
-                S.chat.append({"role": "assistant", "content": reply})
-
-    # ==================================================================
-    # 2. CILNE: TOC-FIN DECISION SUPPORT (PROCENTU % SIMULĀCIJA UN TABULA)
-    # ==================================================================
     with main_tab2:
         st.subheader("⚡ Interaktīvā scenāriju un mērķu simulācija (% izmaiņas pret izvēlēto periodu)")
-        st.markdown("""
-        Izvēlieties atskaites periodu (piemēram, 6 mēnešus no `01.2026.` līdz `06.2026.` vai visus mēnešus) un ievadiet plānotās **procentuālās izmaiņas (`%`)** 
-        pārdošanai ($S$), mainīgajām izmaksām ($TVC$) un darbības izdevumu ($OE$) pozīcijām. Zemāk redzēsiet pilnu pārrēķināto TOC-FIN tabulu!
-        """)
-
         all_months = [c for c in res.amounts.columns if not ("YTD" in c or "AVG" in c)]
         if not all_months:
             all_months = list(res.amounts.columns)
 
-        # 1. Perioda izvēle
-        st.markdown("#### 1. Izvēlieties bāzes periodu simulācijai")
         p_col1, p_col2 = st.columns([1, 2])
         with p_col1:
-            preset = st.selectbox(
-                "Ātrā perioda izvēle:",
-                options=[
-                    f"Visi pieejamie mēneši ({len(all_months)} mēn.)",
-                    "Pirmie 6 mēneši (01.–06.)" if len(all_months) >= 6 else "Pirmie 3 mēneši",
-                    "Pirmie 3 mēneši (01.–03.)" if len(all_months) >= 3 else "Pēdējais mēnesis",
-                    "Manuāla mēnešu izvēle"
-                ]
-            )
-        if "Pirmie 6" in preset and len(all_months) >= 6:
+            preset = st.selectbox("Ātrā perioda izvēle:", options=[f"Visi mēneši ({len(all_months)} mēn.)", "Pirmie 6 mēneši" if len(all_months) >= 6 else "Pirmie 3", "Manuāla izvēle"])
+        if "6" in preset and len(all_months) >= 6:
             default_sel = all_months[:6]
-        elif "Pirmie 3" in preset and len(all_months) >= 3:
+        elif "3" in preset and len(all_months) >= 3:
             default_sel = all_months[:3]
         else:
             default_sel = all_months
 
         with p_col2:
-            selected_months = st.multiselect(
-                "Simulācijā iekļautie mēneši:",
-                options=all_months,
-                default=default_sel
-            )
+            selected_months = st.multiselect("Simulācijā iekļautie mēneši:", options=all_months, default=default_sel)
 
         if not selected_months:
-            st.warning("Lūdzu, izvēlieties vismaz vienu mēnesi simulācijai.")
+            st.warning("Lūdzu, izvēlieties vismaz vienu mēnesi.")
             st.stop()
 
         st.markdown("---")
-        st.markdown("#### 2. Iestatiet procentuālās izmaiņas (%) katrai pozīcijai")
-        st.caption("Ievadiet plānoto izmaiņu procentos (piemēram, `10` nozīmē `+10%`, `-5` nozīmē `-5%`).")
-
+        st.markdown("#### Iestatiet procentuālās izmaiņas (%) katrai pozīcijai")
+        
         s_children = [r for r in res.amounts.index if res.row_kinds.get(r) == "S_CHILD"]
         tvc_children = [r for r in res.amounts.index if res.row_kinds.get(r) == "TVC_CHILD"]
         oe_children = [r for r in res.amounts.index if res.row_kinds.get(r) == "OE_CHILD"]
 
-        pct_changes: dict[str, float] = {}
-
+        pct_changes = {}
         sc1, sc2, sc3 = st.columns(3)
         with sc1:
-            st.markdown("🟡 **Ieņēmumi (S)**")
-            s_all_pct = st.number_input("Kopējā S izmaiņa (%)", value=10.0, step=1.0, format="%.1f", key="sim_s_all")
+            st.markdown("🟡 **Ieņēmumi (S apakšgrupas)**")
             for sc_name in s_children:
-                pct_changes[sc_name] = s_all_pct
-
+                pct_changes[sc_name] = st.number_input(f"{sc_name} (%)", value=10.0, step=1.0, format="%.1f", key=f"sim_{sc_name}")
         with sc2:
-            st.markdown("🟠 **Mainīgās izmaksas (TVC)**")
+            st.markdown("🟠 **Mainīgās (TVC)**")
             for tc_name in tvc_children:
-                pct_changes[tc_name] = st.number_input(
-                    f"{tc_name} (%)", value=10.0, step=1.0, format="%.1f", key=f"sim_{tc_name}"
-                )
-
+                pct_changes[tc_name] = st.number_input(f"{tc_name} (%)", value=10.0, step=1.0, format="%.1f", key=f"sim_{tc_name}")
         with sc3:
-            st.markdown("🟤 **Darbības izdevumi (OE pa grupām)**")
+            st.markdown("🟤 **Darbības izdevumi (OE)**")
             for oc_name in oe_children:
-                default_oe_v = 5.0 if "alga" in oc_name.lower() else (1.0 if "ražošanas telp" in oc_name.lower() else 0.0)
-                pct_changes[oc_name] = st.number_input(
-                    f"{oc_name} (%)", value=default_oe_v, step=1.0, format="%.1f", key=f"sim_{oc_name}"
-                )
+                def_v = 5.0 if "alga" in oc_name.lower() else 0.0
+                pct_changes[oc_name] = st.number_input(f"{oc_name} (%)", value=def_v, step=1.0, format="%.1f", key=f"sim_{oc_name}")
 
-        # 3. Pārrēķinām visu tabulu izvēlētajiem mēnešiem
         sim_amounts = res.amounts[selected_months].copy().astype(float)
         base_sub = res.amounts[selected_months].copy().astype(float)
 
@@ -584,22 +445,15 @@ if "result" in S:
             if rname in sim_amounts.index:
                 sim_amounts.loc[rname] = base_sub.loc[rname] * (1.0 + pct_val / 100.0)
 
-        # Pārrēķinām virsrindas S, TVC, T, OE, NP
         if s_children:
             sim_amounts.loc["S"] = sim_amounts.loc[s_children].sum(axis=0)
-        else:
-            sim_amounts.loc["S"] = base_sub.loc["S"] * (1.0 + s_all_pct / 100.0)
-
         if tvc_children:
             sim_amounts.loc["TVC"] = sim_amounts.loc[tvc_children].sum(axis=0)
         sim_amounts.loc["T"] = sim_amounts.loc["S"] - sim_amounts.loc["TVC"]
-
         if oe_children:
             sim_amounts.loc["OE"] = sim_amounts.loc[oe_children].sum(axis=0)
         sim_amounts.loc["NP"] = sim_amounts.loc["T"] - sim_amounts.loc["OE"]
 
-        # Pievienojam kopsavilkuma kolonnas: Bāzes KOPĀ, Simulētais KOPĀ, Starpība (Δ EUR) un Simulētais VIDĒJAIS
-        n_m = len(selected_months)
         base_sum = base_sub.sum(axis=1)
         sim_sum = sim_amounts[selected_months].sum(axis=1)
         diff_sum = sim_sum - base_sum
@@ -609,7 +463,6 @@ if "result" in S:
         sim_amounts["Δ Izmaiņa (€)"] = diff_sum
         sim_amounts["Simulācija AVG"] = sim_amounts[selected_months].mean(axis=1)
 
-        # Izveidojam main_df ar % pret S (bet kolonnā 'Δ Izmaiņa (€)' % rāda pašas rindas izmaiņu % pret bāzi!)
         sim_main = {}
         for c in sim_amounts.columns:
             sim_main[c] = sim_amounts[c]
@@ -620,7 +473,6 @@ if "result" in S:
                 sim_main[f"%|{c}"] = sim_amounts[c] / s_col if s_col else np.nan
         sim_main_df = pd.DataFrame(sim_main, index=sim_amounts.index)
 
-        # Pārrēķinām KPI tabulu simulācijai
         def sim_kpi_for(col_name: str, col_vals: pd.Series) -> dict[str, float]:
             S_, T_, OE_ = col_vals["S"], col_vals["T"], col_vals["OE"]
             aw = col_vals.get(GROUPS["OE_ADMIN_WAGES"][0], 0.0)
@@ -637,29 +489,17 @@ if "result" in S:
         sim_kpi_df = pd.DataFrame({c: sim_kpi_for(c, sim_amounts[c]) for c in sim_amounts.columns})
         sim_kpi_df["Δ Izmaiņa (€)"] = sim_kpi_df["Simulācija KOPĀ"] - sim_kpi_df["Bāze KOPĀ"]
 
-        # Ātrie kopsavilkuma rādītāji virs tabulas
         st.markdown("---")
-        st.markdown(f"#### 3. Simulācijas rezultāts izvēlētajam periodam ({n_m} mēn. kopā)")
         m1, m2, m3, m4 = st.columns(4)
-        ds_val = diff_sum["S"]
-        dt_val = diff_sum["T"]
-        doe_val = diff_sum["OE"]
-        dnp_val = diff_sum["NP"]
+        ds_val, dt_val, doe_val, dnp_val = diff_sum["S"], diff_sum["T"], diff_sum["OE"], diff_sum["NP"]
 
-        m1.metric("Simulētais S (Kopā)", f"{fmt_num(sim_sum['S'])} €", delta=f"{ds_val:+,.0f} € ({ds_val/base_sum['S']*100:+.0f}%)".replace(",", " ") if base_sum["S"] else "")
-        m2.metric("Simulētais T (Caurlaidība)", f"{fmt_num(sim_sum['T'])} €", delta=f"{dt_val:+,.0f} € ({dt_val/base_sum['T']*100:+.0f}%)".replace(",", " ") if base_sum["T"] else "")
-        m3.metric("Simulētais OE (Uzturēšana)", f"{fmt_num(sim_sum['OE'])} €", delta=f"{doe_val:+,.0f} € ({doe_val/base_sum['OE']*100:+.0f}%)".replace(",", " ") if base_sum["OE"] else "", delta_color="inverse")
-        m4.metric("Simulētā Neto Peļņa (NP)", f"{fmt_num(sim_sum['NP'])} €", delta=f"{dnp_val:+,.0f} € (Bāze: {fmt_num(base_sum['NP'])} €)".replace(",", " "))
+        m1.metric("Simulētais S", f"{fmt_num(sim_sum['S'])} €", delta=f"{ds_val:+,.0f} €".replace(",", " "))
+        m2.metric("Simulētais T", f"{fmt_num(sim_sum['T'])} €", delta=f"{dt_val:+,.0f} €".replace(",", " "))
+        m3.metric("Simulētais OE", f"{fmt_num(sim_sum['OE'])} €", delta=f"{doe_val:+,.0f} €".replace(",", " "), delta_color="inverse")
+        m4.metric("Simulētā Neto Peļņa (NP)", f"{fmt_num(sim_sum['NP'])} €", delta=f"{dnp_val:+,.0f} €".replace(",", " "))
 
         st.subheader("📊 Simulētā Finanšu un Produktivitātes tabula")
-        st.caption("Kolonnā **'Δ Izmaiņa (€)'** procentu aile rāda konkrētās rindas izmaiņu `%` pret bāzes periodu.")
-        st.markdown(
-            render_unified_toc_tables_html(
-                sim_amounts, sim_main_df, sim_kpi_df, res.row_kinds,
-                title_kpi="📈 Simulētie Produktivitātes un atdeves rādītāji"
-            ),
-            unsafe_allow_html=True
-        )
+        st.markdown(render_unified_toc_tables_html(sim_amounts, sim_main_df, sim_kpi_df, res.row_kinds, title_kpi="📈 Simulētie Produktivitātes un atdeves rādītāji"), unsafe_allow_html=True)
 
 if st.button("🔄 Sākt no jauna"):
     st.session_state.clear()
