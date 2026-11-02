@@ -1,14 +1,19 @@
 """
-app.py — TOC-FIN Vadības lēmumu un finanšu diagnostikas sistēma (v8)
-- Nekādas automātiskas (hardcoded) pārrakstīšanas: aģents pats situatīvi izvērtē katru PZA posteni
-- Jautājumu blokā pilna izvēle: S, TVC, OE (ar apakšgrupām) vai Izslēgtie
-- Pārskatāma kontu tabula, kur var brīvi mainīt gan Lielo grupu, gan Apakšgrupu (bez id, Sadaļa, Drošība, Jautājums)
+app.py — TOC-FIN Vadības lēmumu un finanšu diagnostikas sistēma (v9)
+Uzlabojumi:
+- Kontu tabula automātiski sakārtota secībā: S -> TVC -> OE Algas -> OE Pārējais -> Izslēgtie
+- Kontu tabula pilnā augstumā (bez vertikālās skrollēšanas)
+- Finanšu pārskata un KPI tabulas pilnā izmērā bez horizontālās vai vertikālās skrollēšanas
+- Kreisā kolonna iekrāsota rindas krāsā; Galvenās grupas Bold, apakšgrupas bez Bold
+- Procentu ailēs virsraksts tikai '%', šauras kolonnas, veseli skaitļi bez komata (piem. 33%)
+- Biezākas līnijas starp mēnešu blokiem (mēnesis + %) un starp galvenajām TOC grupām
 """
 import hashlib
 import io
 from pathlib import Path
 
 import anthropic
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -58,6 +63,10 @@ def fmt_num(x) -> str:
     return "" if pd.isna(x) else f"{x:,.0f}".replace(",", " ")
 
 
+def fmt_pct_int(x) -> str:
+    return "" if pd.isna(x) else f"{x * 100:.0f}%"
+
+
 def get_main_cat(group_key: str) -> str:
     code = GROUPS.get(group_key, ("", "OE"))[1]
     return {
@@ -66,6 +75,125 @@ def get_main_cat(group_key: str) -> str:
         "OE": "🟤 OE (Uzturēšanas izdevumi)",
         "EXCL": "⚪ Izslēgtie (Virtuālā nauda)"
     }.get(code, "🟤 OE (Uzturēšanas izdevumi)")
+
+
+# Stingra kārtošanas secība: S -> TVC -> OE Algas -> OE Pārējais -> Izslēgtie
+GROUP_SORT_ORDER = {
+    "S": 1,
+    "TVC_MATERIALS": 2,
+    "TVC_DELIVERY": 3,
+    "OE_ADMIN_WAGES": 4,
+    "OE_WORKER_WAGES": 5,
+    "OE_MARKETING": 6,
+    "OE_PLATFORMS": 7,
+    "OE_PREMISES": 8,
+    "OE_OFFICE_IT": 9,
+    "OE_FIN_TAX": 10,
+    "OE_OTHER": 11,
+    "EXCLUDED": 12,
+}
+
+
+def render_toc_main_html(res) -> str:
+    """Ģenerē pilna platuma HTML tabulu bez skrollēšanas, ar iekrāsotu kreiso aili un biezajām līnijām."""
+    periods = list(res.amounts.columns)
+    row_names = list(res.amounts.index)
+    kinds = [res.row_kinds.get(rn, "OE_CHILD") for rn in row_names]
+
+    html = ["""
+    <style>
+    .toc-table-wrap { width: 100%; overflow-x: visible; margin-bottom: 18px; }
+    table.toc-fin { width: 100%; border-collapse: collapse; font-family: 'Calibri', sans-serif; font-size: 12px; table-layout: auto; }
+    table.toc-fin th { background-color: #EAECEE; color: #111111; font-weight: 700; text-align: center; padding: 5px 3px; border-top: 2px solid #404040; border-bottom: 2px solid #404040; white-space: nowrap; }
+    table.toc-fin td { padding: 4px 4px; white-space: nowrap; }
+    table.toc-fin td.lbl-main { text-align: left; font-weight: 700; padding-left: 6px; border-left: 2px solid #404040; border-right: 2px solid #404040; }
+    table.toc-fin td.lbl-sub { text-align: left; font-weight: 400; padding-left: 16px; border-left: 2px solid #404040; border-right: 2px solid #404040; }
+    table.toc-fin td.val-col { text-align: right; border-left: 1px solid #BFBFBF; }
+    table.toc-fin td.pct-col { text-align: right; width: 34px; font-size: 11px; padding-right: 4px; border-left: 1px dotted #D0D3D4; border-right: 2px solid #595959; }
+    table.toc-fin th.th-val { border-left: 1px solid #BFBFBF; }
+    table.toc-fin th.th-pct { width: 34px; font-size: 11px; border-left: 1px dotted #BFBFBF; border-right: 2px solid #595959; }
+    table.toc-fin th.th-lbl { text-align: left; padding-left: 6px; border-left: 2px solid #404040; border-right: 2px solid #404040; }
+    </style>
+    <div class="toc-table-wrap"><table class="toc-fin">
+    <thead><tr>
+    <th class="th-lbl">Rādītājs / Kontugrupa</th>
+    """]
+
+    for p in periods:
+        html.append(f'<th class="th-val">{p}</th><th class="th-pct">%</th>')
+    html.append("</tr></thead><tbody>")
+
+    for i, rname in enumerate(row_names):
+        kind = kinds[i]
+        next_kind = kinds[i + 1] if i + 1 < len(kinds) else None
+        fill_hex, is_bold, text_hex = FILLS.get(kind, FILLS["OE_CHILD"])
+
+        # Noteicam, vai zem šīs rindas vajag biezo horizontālo līniju (grupas beigas)
+        thick_bottom = False
+        if kind == "S":
+            thick_bottom = True
+        elif kind in ("TVC", "TVC_CHILD") and next_kind not in ("TVC", "TVC_CHILD"):
+            thick_bottom = True
+        elif kind == "T":
+            thick_bottom = True
+        elif kind in ("OE", "OE_CHILD") and next_kind not in ("OE", "OE_CHILD"):
+            thick_bottom = True
+        elif kind == "NP":
+            thick_bottom = True
+        elif i == len(row_names) - 1:
+            thick_bottom = True
+
+        # Vai virs šīs rindas ir apakšgrupu atdalījums no galvenās rindas
+        border_top = "1px solid #BFBFBF"
+        border_bottom = "2.5px solid #404040" if thick_bottom else "1px solid #BFBFBF"
+        font_w = "700" if is_bold else "400"
+        lbl_cls = "lbl-main" if is_bold else "lbl-sub"
+
+        row_style = f"background-color: #{fill_hex}; color: #{text_hex}; font-weight: {font_w}; border-top: {border_top}; border-bottom: {border_bottom};"
+        html.append(f'<tr style="{row_style}">')
+        html.append(f'<td class="{lbl_cls}">{rname}</td>')
+
+        for p in periods:
+            val_str = fmt_num(res.main.loc[rname, p])
+            pct_str = fmt_pct_int(res.main.loc[rname, f"%|{p}"])
+            html.append(f'<td class="val-col">{val_str}</td><td class="pct-col">{pct_str}</td>')
+        html.append("</tr>")
+
+    html.append("</tbody></table></div>")
+    return "".join(html)
+
+
+def render_toc_kpi_html(res) -> str:
+    """Ģenerē pilna platuma KPI tabulu bez skrollēšanas."""
+    kp = res.kpi
+    cols = list(kp.columns)
+
+    html = ["""
+    <div class="toc-table-wrap"><table class="toc-fin">
+    <thead><tr>
+    <th class="th-lbl">Produktivitātes rādītājs</th>
+    """]
+    for c in cols:
+        html.append(f'<th style="border-right: 2px solid #595959;">{c}</th>')
+    html.append("</tr></thead><tbody>")
+
+    for i, idx_name in enumerate(kp.index):
+        b_bot = "2px solid #404040" if i == len(kp.index) - 1 else "1px solid #BFBFBF"
+        html.append(f'<tr style="background-color: #F2F4F4; color: #000000; border-bottom: {b_bot};">')
+        html.append(f'<td class="lbl-main" style="font-weight: 600;">{idx_name}</td>')
+        for c in cols:
+            v = kp.loc[idx_name, c]
+            if pd.isna(v):
+                s = ""
+            elif idx_name.startswith("T%"):
+                s = f"{v * 100:.0f}%"
+            else:
+                s = f"{v:.2f}"
+            html.append(f'<td style="text-align: right; padding: 4px 6px; border-right: 2px solid #595959; font-weight: 600;">{s}</td>')
+        html.append("</tr>")
+
+    html.append("</tbody></table></div>")
+    return "".join(html)
 
 
 # Zināšanu bāzes ielāde
@@ -125,7 +253,6 @@ if "cls_df" not in S:
                 rows = []
                 for lf in an.leaves:
                     i = by_id[lf.id]
-                    # Ja konta nosaukums atkārtojas dažādās PZA sadaļās, pievienojam sadaļu iekavās, lai lietotājs redz kontekstu
                     display_name = f"{lf.label} ({lf.path})" if lf.path and lf.label.lower().startswith(("personāla", "sociālās", "telpu", "pārējās")) else lf.label
                     rows.append(dict(
                         id=lf.id,
@@ -143,7 +270,7 @@ if "cls_df" not in S:
 
 cls_df: pd.DataFrame = S.cls_df
 
-# Interaktīva neskaidro kontu precizēšana (ar visām opcijām: S, TVC, OE, Izslēgtie)
+# Interaktīva neskaidro kontu precizēšana
 ambiguous_rows = cls_df[cls_df["Jautājums"].astype(str).str.strip() != ""]
 
 if len(ambiguous_rows) > 0 and not S.get("clarifications_done", False):
@@ -154,7 +281,7 @@ if len(ambiguous_rows) > 0 and not S.get("clarifications_done", False):
     for idx, r in ambiguous_rows.iterrows():
         st.markdown(f"**📌 {r['Konts']}**")
         st.write(f"👉 **Aģenta jautājums:** {r['Jautājums']}")
-        st.info("💡 **TOC-FIN orientieris:** **S** = reāli ienākošā nauda | **TVC** = mainās 1:1 ar katru pārdoto vienību | **OE** = perioda uzturēšanas izdevums (vai izmaksu kompensācija) | **Izslēgt** = virtuāls grāmatvedības ieraksts (amortizācija).")
+        st.info("💡 **TOC-FIN orientieris:** **S** = reāli ienākošā nauda | **TVC** = mainās 1:1 ar katru pārdoto vienību | **OE** = perioda uzturēšanas izdevums | **Izslēgt** = virtuāls grāmatvedības ieraksts (amortizācija).")
 
         grp = str(r["Grupa"])
         default_idx = 0 if grp == "S" else (1 if "TVC" in grp else (3 if grp == "EXCLUDED" else 2))
@@ -190,9 +317,14 @@ if len(ambiguous_rows) > 0 and not S.get("clarifications_done", False):
         st.rerun()
     st.stop()
 
-# --- SKAIDRS UN PĀRSKATĀMS KONTU SADALĪJUMS AR 2 LĪMEŅU REDIĢĒŠANU ---
+# --- SKAIDRS UN SAKĀRTOTS KONTU SADALĪJUMS PILNĀ AUGSTUMĀ ---
 st.subheader("📋 Kontu sadalījums pa grupām un apakšgrupām")
-st.caption("Pārskatiet, kā aģents ir sadalījis kontus. Jūs varat brīvi mainīt gan **Lielo grupu** (S, TVC, OE, Izslēgtie), gan **Apakšgrupu (rindu atskaitē)** tieši šajā tabulā:")
+st.caption("Konti ir automātiski sakārtoti secībā: **S → TVC → OE Algas → OE Pārējais → Izslēgtie**. Jūs varat brīvi mainīt gan Lielo grupu, gan Apakšgrupu:")
+
+# Sakārtojam cls_df pēc stingrās TOC secības
+cls_df["_sort"] = cls_df["Grupa"].map(lambda g: GROUP_SORT_ORDER.get(g, 99))
+cls_df = cls_df.sort_values(by=["_sort", "Konts"], kind="mergesort").drop(columns=["_sort"]).reset_index(drop=True)
+S.cls_df = cls_df
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("🟡 S (Ieņēmumi)", f"{(cls_df['Grupa'] == 'S').sum()} konti")
@@ -206,10 +338,14 @@ view_df = pd.DataFrame({
     "Apakšgrupa (Rinda atskaitē)": cls_df["Grupa"].map(SUBGROUP_LABELS),
 })
 
+# Pilns augstums, lai nekas nav jāskrollē
+full_editor_height = (len(view_df) + 1) * 36 + 12
+
 edited_view = st.data_editor(
     view_df,
     hide_index=True,
     use_container_width=True,
+    height=full_editor_height,
     key="clean_cls_editor",
     disabled=["Konts"],
     column_config={
@@ -219,19 +355,16 @@ edited_view = st.data_editor(
             options=list(MAIN_GROUP_TO_DEFAULT_SUB.keys()),
             required=True,
             width="medium",
-            help="Izvēlieties galveno TOC grupu."
         ),
         "Apakšgrupa (Rinda atskaitē)": st.column_config.SelectboxColumn(
             "Apakšgrupa / Rinda atskaitē (OE sadalījums u.c.)",
             options=list(SUBGROUP_LABELS.values()),
             required=True,
             width="large",
-            help="Izvēlieties konkrēto apakšgrupu, kurā konts tiks summēts gala tabulā."
         ),
     }
 )
 
-# Loģika: ja lietotājs nomaina Lielo grupu vai Apakšgrupu, sinhronizējam abus
 updated_groups = []
 changed = False
 for idx in range(len(cls_df)):
@@ -243,12 +376,10 @@ for idx in range(len(cls_df)):
     new_sub = edited_view.iloc[idx]["Apakšgrupa (Rinda atskaitē)"]
 
     if new_sub != old_sub:
-        # Lietotājs nomainīja apakšgrupu -> atjauninām grupas kodu
         g_code = LABEL_TO_KEY[new_sub]
         updated_groups.append(g_code)
         changed = True
     elif new_main != old_main:
-        # Lietotājs nomainīja Lielo grupu -> uzliekam šīs Lielās grupas noklusēto apakšgrupu
         g_code = MAIN_GROUP_TO_DEFAULT_SUB[new_main]
         updated_groups.append(g_code)
         changed = True
@@ -292,24 +423,10 @@ if "result" in S:
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         st.subheader("Finanšu pārskata tabula (T* skats)")
-        disp = pd.DataFrame(index=res.main.index)
-        for p in res.amounts.columns:
-            disp[p] = res.main[p].map(fmt_num)
-            disp[f"% {p}"] = res.main[f"%|{p}"].map(lambda x: "" if pd.isna(x) else f"{x:.1%}")
-
-        def style_row(row):
-            fill, bold, color = FILLS.get(res.row_kinds.get(row.name, "OE_CHILD"), FILLS["OE_CHILD"])
-            return [f"background-color: #{fill}; color: #{color}; font-weight: {'bold' if bold else 'normal'};"] * len(row)
-
-        st.dataframe(disp.style.apply(style_row, axis=1), use_container_width=True)
+        st.markdown(render_toc_main_html(res), unsafe_allow_html=True)
 
         st.subheader("📈 Produktivitātes un atdeves rādītāji")
-        kp = res.kpi.copy()
-        kp_disp = kp.copy().astype(object)
-        for idx in kp.index:
-            kp_disp.loc[idx] = kp.loc[idx].map(
-                lambda x, i=idx: "" if pd.isna(x) else (f"{x:.1%}" if i.startswith("T%") else f"{x:.2f}"))
-        st.dataframe(kp_disp, use_container_width=True)
+        st.markdown(render_toc_kpi_html(res), unsafe_allow_html=True)
 
         # --- VADĪBAS TRAUKSMES PANELIS (DECISION GUARDRAILS) ---
         st.markdown("---")
@@ -330,7 +447,7 @@ if "result" in S:
             low_t_months = t_pct_series[t_pct_series < (mean_t_pct - 0.07)].index.tolist()
             if low_t_months:
                 alerts_found = True
-                st.warning(f"🟡 **Caurlaidības / Krājumu brīdinājums:** Periodos **{', '.join(low_t_months)}** caurlaidības marža ($T\\%$) nokritās vairāk nekā par 7 procentpunktiem zem vidējā ({mean_t_pct:.1%}). Pārbaudiet, vai šajā mēnesī netika iepirkta liela materiālu partija noliktavai (iesaldējot naudu $I$) vai piešķirtas pārmērīgas cenu atlaides.")
+                st.warning(f"🟡 **Caurlaidības / Krājumu brīdinājums:** Periodos **{', '.join(low_t_months)}** caurlaidības marža ($T\\%$) nokritās vairāk nekā par 7 procentpunktiem zem vidējā ({mean_t_pct:.0%}). Pārbaudiet, vai šajā mēnesī netika iepirkta liela materiālu partija noliktavai (iesaldējot naudu $I$) vai piešķirtas pārmērīgas cenu atlaides.")
 
             oe_series = res.amounts.loc["OE", month_cols]
             mean_oe = oe_series.mean()
@@ -409,24 +526,21 @@ if "result" in S:
         base_np = float(res.amounts.loc["NP", ref_col])
         base_t_pct = (base_t / base_s) if base_s else 0.5
 
-        st.info(f"📌 **Salīdzinājuma bāze ({ref_col}):** Apgrozījums $S = {fmt_num(base_s)}$ € | Caurlaidība $T = {fmt_num(base_t)}$ € ({base_t_pct:.1%}) | Darbības izmaksas $OE = {fmt_num(base_oe)}$ € | Neto peļņa $NP = {fmt_num(base_np)}$ €")
+        st.info(f"📌 **Salīdzinājuma bāze ({ref_col}):** Apgrozījums $S = {fmt_num(base_s)}$ € | Caurlaidība $T = {fmt_num(base_t)}$ € ({base_t_pct:.0%}) | Darbības izmaksas $OE = {fmt_num(base_oe)}$ € | Neto peļņa $NP = {fmt_num(base_np)}$ €")
 
         col_s1, col_s2, col_s3 = st.columns(3)
         with col_s1:
             st.markdown("#### 1. Ietekme uz Caurlaidību ($\Delta T$)")
             delta_s = st.number_input("Papildu pārdošanas ieņēmumi (ΔS, EUR mēnesī)", value=20000, step=1000)
             default_dtvc = int(round(delta_s * (1.0 - base_t_pct)))
-            delta_tvc = st.number_input("Papildu tiešās materiālu/piegādes izmaksas (ΔTVC, EUR)", value=default_dtvc, step=500,
-                                        help="Tikai izejvielas un tiešās izmaksas šim konkrētajam pasūtījumam.")
+            delta_tvc = st.number_input("Papildu tiešās materiālu/piegādes izmaksas (ΔTVC, EUR)", value=default_dtvc, step=500)
             delta_t = delta_s - delta_tvc
             st.metric("Papildu Caurlaidība (ΔT = ΔS - ΔTVC)", f"{fmt_num(delta_t)} €")
 
         with col_s2:
             st.markdown("#### 2. Ietekme uz Kapacitāti ($\Delta OE$ un $\Delta I$)")
-            delta_oe = st.number_input("Papildu uzturēšanas izmaksas (ΔOE, EUR mēnesī)", value=2000, step=500,
-                                       help="Tikai reāli klāt nākošie tēriņi (piem., papildu darbinieka alga, virsstundas, kampaņa). Ja izmanto brīvo jaudu, ΔOE = 0.")
-            delta_i = st.number_input("Nepieciešamā papildu investīcija / iesaldētā nauda (ΔI, EUR)", value=0, step=1000,
-                                      help="Jaunas iekārtas iegāde vai papildu iesaldētie apgrozāmie līdzekļi krājumos.")
+            delta_oe = st.number_input("Papildu uzturēšanas izmaksas (ΔOE, EUR mēnesī)", value=2000, step=500)
+            delta_i = st.number_input("Nepieciešamā papildu investīcija / iesaldētā nauda (ΔI, EUR)", value=0, step=1000)
             ccr_impact = st.selectbox("Ietekme uz uzņēmuma ierobežojumu (CCR / vājāko posmu):", [
                 "Nepārslogo CCR (tiek izmantota brīvā kapacitāte)",
                 "Noslogo CCR, bet neizspiež citus pasūtījumus",
@@ -448,7 +562,7 @@ if "result" in S:
             if delta_i > 0:
                 annual_roi = (delta_np * 12) / delta_i
                 payback_months = delta_i / delta_np if delta_np > 0 else float("inf")
-                st.metric("Investīcijas Gada Atdeve (ROI)", f"{annual_roi:.1%}",
+                st.metric("Investīcijas Gada Atdeve (ROI)", f"{annual_roi:.0%}",
                           delta=f"Atmaksāšanās: {payback_months:.1f} mēn." if delta_np > 0 else "Neatmaksājas")
 
         st.markdown("---")
