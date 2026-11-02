@@ -1,5 +1,5 @@
 """
-toc_engine.py — TOC-FIN klasifikācija un aprēķini (Reālā naudas plūsma vs Virtuālā nauda)
+toc_engine.py — TOC-FIN klasifikācija un aprēķini ar situatīvu aģenta izpratni
 """
 from __future__ import annotations
 
@@ -20,9 +20,9 @@ FONT_NAME = "Calibri"
 FONT_SIZE = 10
 KPI_AVG_MODE = "mean_of_months"
 
-# Grupu definīcijas: kods -> (Cilvēcīgais apakšgrupas nosaukums tabulā, Lielā grupa)
+# Grupu definīcijas: kods -> (Cilvēcīgais apakšgrupas nosaukums atskaitē, Lielā grupa)
 GROUPS: dict[str, tuple[str, str]] = {
-    "S": ("Neto apgrozījums un citi ieņēmumi (S)", "S"),
+    "S": ("Neto apgrozījums un ieņēmumi (S)", "S"),
     "TVC_MATERIALS": ("Izejvielas un materiāli", "TVC"),
     "TVC_DELIVERY": ("Preču piegādes izdevumi", "TVC"),
     "OE_ADMIN_WAGES": ("Administrācijas algas (+ sociālās iemaksas)", "OE"),
@@ -33,18 +33,17 @@ GROUPS: dict[str, tuple[str, str]] = {
     "OE_OFFICE_IT": ("Biroja, IT un sakaru izmaksas", "OE"),
     "OE_FIN_TAX": ("Procentu maksājumi un nodokļi (UIN)", "OE"),
     "OE_OTHER": ("Citi saimnieciskie uzturēšanas izdevumi", "OE"),
-    "EXCLUDED": ("Virtuālā nauda (Amortizācija / Krājumu pārvērtēšana)", "EXCL"),
+    "EXCLUDED": ("Izslēgtie (Amortizācija / Virtuālā nauda)", "EXCL"),
 }
 
-# Vārdnīcas ērtai attēlošanai lietotāja saskarnē
 SUBGROUP_LABELS: dict[str, str] = {k: v[0] for k, v in GROUPS.items()}
 LABEL_TO_KEY: dict[str, str] = {v[0]: k for k, v in GROUPS.items()}
 
-MAIN_GROUP_LABELS = {
-    "S": "🟡 S — Ieņēmumi un Pārdošana",
-    "TVC": "🟠 TVC — Patiesi mainīgās izmaksas",
-    "OE": "🟤 OE — Darbības un uzturēšanas izdevumi",
-    "EXCL": "⚪ Izslēgtie (Tikai virtuālā nauda / amortizācija)",
+MAIN_GROUP_TO_DEFAULT_SUB: dict[str, str] = {
+    "🟡 S (Ieņēmumi)": "S",
+    "🟠 TVC (Mainīgās izmaksas)": "TVC_MATERIALS",
+    "🟤 OE (Uzturēšanas izdevumi)": "OE_OTHER",
+    "⚪ Izslēgtie (Virtuālā nauda)": "EXCLUDED",
 }
 
 TVC_KEYS = [k for k, v in GROUPS.items() if v[1] == "TVC"]
@@ -55,38 +54,29 @@ KNOWLEDGE_TEXT = ""
 for fname in ["toc_knowledge.txt", "toc_knowledge.md", "knowledge.txt"]:
     p = Path(fname)
     if p.exists():
-        KNOWLEDGE_TEXT = f"\n\nPAPILDU VADLĪNIJAS NO TOC LITERATŪRAS:\n{p.read_text(encoding='utf-8')}\n"
+        KNOWLEDGE_TEXT = f"\n\nTOC-FIN ZINĀŠANU BĀZE UN VADLĪNIJAS:\n{p.read_text(encoding='utf-8')}\n"
         break
 
-CLASSIFY_SYSTEM = f"""Tu esi TOC-FIN (Throughput Accounting) vadības lēmumu sistēmas eksperts. Tev jāpiešķir katrai PZA lapai (kontam) TOC grupa.
-Skaitļus tu neredzi un nerēķini — tikai klasificē pēc nosaukuma un ceļa.
+CLASSIFY_SYSTEM = f"""Tu esi TOC-FIN (Throughput Accounting) vadības un finanšu eksperts.
+Tavs uzdevums ir kritiski un pēc būtības izvērtēt katru PZA kontu (pēc tā nosaukuma un atrašanās sadaļas) un piešķirt tam atbilstošo TOC grupu.
 {KNOWLEDGE_TEXT}
-KRITISKIE KLASIFIKĀCIJAS NOTEIKUMI (REĀLĀ NAUDA PRET VIRTUĀLO NAUDU):
-1. S (Visi ienākošie naudas līdzekļi, is_income=true):
-   - Neto apgrozījums, preču un pakalpojumu pārdošana -> grupa 'S', is_income=true.
-   - Saņemts granta finansējums, valsts atbalsts, Pārējie saimnieciskās darbības ieņēmumi -> OBLIGĀTI grupa 'S' un is_income=true! (Neliec tos pie OE!).
-2. TVC (Patiesi mainīgās izmaksas, is_income=false):
-   - TIKAI izdevumi, kas mainās 1:1 ar katru pārdoto vienību: izejvielas/materiāli (TVC_MATERIALS) un tiešā preču piegāde klientam (TVC_DELIVERY).
-3. OE (Visi reālie uzturēšanas un darbības naudas izdevumi, is_income=false):
-   - Algas OBLIGĀTI jāsadala pēc sadaļas (ceļa):
-     * Ražošanas/pašizmaksas sadaļas personāla algas un VSAOI -> OE_WORKER_WAGES (confidence='high', NEJAUTĀ par to lietotājam!).
-     * Administrācijas/pārdošanas sadaļas algas un VSAOI -> OE_ADMIN_WAGES (confidence='high', NEJAUTĀ par to lietotājam!).
-   - Mārketings un reklāma -> OE_MARKETING.
-   - Pārdošanas platformas, mājas lapa, US TAX, pārējās pārdošanas izmaksas -> OE_PLATFORMS.
-   - Ražošanas telpu noma, uzturēšana, pārējās ražošanas izmaksas -> OE_PREMISES.
-   - Birojs, IT infrastruktūra, sakari, bankas, telpu noma admin -> OE_OFFICE_IT.
-   - Procentu maksājumi un Uzņēmumu ienākuma nodoklis (UIN) -> OBLIGĀTI OE_FIN_TAX (tā ir reāla nauda, kas aiziet no uzņēmuma, NELIEC pie EXCLUDED!).
-   - Pārējie saimnieciskie izdevumi, transports, ziedojumi, valūtas zaudējumi, darbinieku apdrošināšana, ilgtspēja -> OE_OTHER.
-4. EXCLUDED (Tikai un vienīgi VIRTUĀLĀ nauda, is_income=false):
-   - Pamatlīdzekļu un nemateriālo aktīvu nolietojums / amortizācija.
-   - Krājumu pārvērtēšana vai gatavās produkcijas/WIP krājumu atlikumu izmaiņas.
-   - Nākamo periodu vai debitoru virtuālie uzkrājumi.
-5. KAD JAUTĀT LIETOTĀJAM (confidence='low'):
-   - Uzdod jautājumu TIKAI tad, ja postenis patiešām var būt gan TVC (1:1 ar produktu), gan OE (fiksēts). Par algām, grantiem, procentiem un UIN jautājumus NEUZDOD (confidence='high')."""
+VADLĪNIJAS SITUATĪVAI IZVĒRTĒŠANAI:
+1. Izproti atšķirību starp reālo naudu un virtuālo naudu:
+   - Tikai virtuālie grāmatvedības ieraksti (nolietojums/amortizācija, krājumu pārvērtēšana, uzkrājumi) ir EXCLUDED.
+   - Reālie naudas izdevumi, piemēram, procentu maksājumi un uzņēmumu ienākuma nodoklis (UIN), ir reāla nauda, kas aizplūst no uzņēmuma, tāpēc tos liec pie OE (OE_FIN_TAX).
+2. Izproti ieņēmumu dabu (S):
+   - Neto apgrozījums, kā arī saņemts granta finansējums un pārējie ieņēmumi ir nauda, kas ienāk sistēmā -> liec tos pie 'S' (ar is_income=true).
+   - Ja kādā konkrētā situācijā pārējo ieņēmumu vai granta daba varētu būt diskutabla (piem., vai lietotājs to vēlas redzēt kā S vai kā OE izmaksu kompensāciju), izvēlies 'S', bet vari uzdot jautājumu (confidence='low'), lai lietotājs pats izvēlas.
+3. Izproti algas pēc konteksta (Sadaļas/Ceļa):
+   - Ja 'Personāla izmaksas' un 'Sociālās iemaksas' atrodas zem ražošanas pašizmaksas sadaļas -> OE_WORKER_WAGES.
+   - Ja tās atrodas zem administrācijas vai pārdošanas sadaļas -> OE_ADMIN_WAGES.
+   - Ja sadaļa ir skaidri redzama, nejautā lietotājam liekus jautājumus par algām.
+4. Kritiski izvērtē robežgadījumus starp TVC un OE:
+   - Uzdod jautājumu (confidence='low') tikai tad, ja pēc konta nosaukuma nav viennozīmīgi skaidrs, vai izmaksa mainās 1:1 ar katru pārdoto vienību (TVC), ir perioda uzturēšanas izdevums (OE), ieņēmums (S) vai satur virtuālu amortizāciju (EXCLUDED)."""
 
 CLASSIFY_TOOL = {
     "name": "classify_accounts",
-    "description": "Assign a TOC group to every account. Every id must appear exactly once.",
+    "description": "Assign a TOC group to every account based on situational TOC logic. Every id must appear exactly once.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -100,7 +90,7 @@ CLASSIFY_TOOL = {
                         "is_income": {"type": "boolean"},
                         "confidence": {"enum": ["high", "medium", "low"]},
                         "question": {"type": ["string", "null"],
-                                     "description": "Short question in Latvian if genuinely ambiguous between S, TVC, OE, else null."},
+                                     "description": "Concise question in Latvian if the item requires management judgment, else null."},
                     },
                     "required": ["id", "group", "is_income", "confidence"],
                 },
@@ -136,7 +126,7 @@ def validate_classification(items: list[dict], leaves: list[Leaf]) -> list[str]:
 
 
 def classify_with_claude(client, model: str, leaves: list[Leaf], max_tries: int = 3) -> list[dict]:
-    msgs = [{"role": "user", "content": "Klasificē šīs PZA lapas:\n" + leaves_for_llm(leaves)}]
+    msgs = [{"role": "user", "content": "Izvērtē un klasificē šīs PZA lapas:\n" + leaves_for_llm(leaves)}]
     items: list[dict] = []
     for _ in range(max_tries):
         resp = client.messages.create(
