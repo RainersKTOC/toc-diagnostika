@@ -1,5 +1,5 @@
 """
-app.py — TOC-FIN Vadības lēmumu un finanšu diagnostikas sistēma (v11.0)
+app.py — TOC-FIN Vadības lēmumu un finanšu diagnostikas sistēma (v11.1)
 Project ID: amprqueamdcxpjufigvm
 """
 from __future__ import annotations
@@ -117,11 +117,6 @@ def get_radio_index_for_group(group_key: str) -> int:
 
 
 def resolve_radio_choice(choice: str, original_group: str, konts_label: str) -> tuple[str, bool]:
-    """
-    Ja lietotājs apstiprina to pašu lielo kategoriju, ko aģents jau ieteica,
-    saglabājam aģenta precīzo apakšgrupu. Ja maina uz citu lielo kategoriju —
-    piešķiram atbilstošo noklusējuma apakšgrupu.
-    """
     orig_grp = normalize_group_key(original_group)
     orig_code = get_main_code(orig_grp)
     lbl_low = str(konts_label or "").lower()
@@ -170,10 +165,6 @@ def sort_cls_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_display_labels(leaves) -> dict[str, str]:
-    """
-    Ja PZA failā ir vairāki konti ar vienādu nosaukumu (piem., algas ražošanā un administrācijā),
-    pievieno iekavās ceļu/sadaļu, lai lietotājs un tabula tos skaidri atšķirtu.
-    """
     counts: dict[str, int] = {}
     for lf in leaves:
         lbl = str(lf.label).strip()
@@ -197,12 +188,14 @@ def render_unified_toc_tables_html(
     kpi_df: pd.DataFrame,
     row_kinds: dict[str, str],
     title_kpi: str = "📈 Produktivitātes un atdeves rādītāji",
+    grey_cols: set[str] | None = None,
 ) -> str:
     periods = list(amounts_df.columns)
     row_names = list(amounts_df.index)
     kinds = [row_kinds.get(rn, "OE_CHILD") for rn in row_names]
+    grey_cols = grey_cols or set()
 
-    lbl_width_pct = 23.0
+    lbl_width_pct = 26.0 if len(periods) <= 4 else 23.0
     rem_pct = 100.0 - lbl_width_pct
     per_period_pct = rem_pct / max(len(periods), 1)
     val_w = per_period_pct * 0.68
@@ -213,11 +206,11 @@ def render_unified_toc_tables_html(
     .toc-table-wrap {{ width: 100%; overflow-x: visible; margin-bottom: 14px; }}
     table.toc-unified {{ width: 100%; border-collapse: collapse; font-family: 'Calibri', sans-serif; font-size: 12px; table-layout: fixed; }}
     table.toc-unified th {{ background-color: #EAECEE; color: #111111; font-weight: 700; text-align: center; padding: 5px 2px; border-top: 2px solid #404040; border-bottom: 2px solid #404040; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-    table.toc-unified td {{ padding: 4px 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+    table.toc-unified td {{ padding: 4px 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
     table.toc-unified td.lbl-main {{ text-align: left; font-weight: 700; padding-left: 6px; border-left: 2px solid #404040; border-right: 2px solid #404040; }}
     table.toc-unified td.lbl-sub {{ text-align: left; font-weight: 400; padding-left: 16px; border-left: 2px solid #404040; border-right: 2px solid #404040; }}
     table.toc-unified td.val-col {{ text-align: right; border-left: 1px solid #BFBFBF; }}
-    table.toc-unified td.pct-col {{ text-align: right; font-size: 11px; padding-right: 3px; border-left: 1px dotted #D0D3D4; border-right: 2px solid #595959; }}
+    table.toc-unified td.pct-col {{ text-align: right; font-size: 11px; padding-right: 4px; border-left: 1px dotted #D0D3D4; border-right: 2px solid #595959; }}
     table.toc-unified th.th-val {{ border-left: 1px solid #BFBFBF; }}
     table.toc-unified th.th-pct {{ font-size: 11px; border-left: 1px dotted #BFBFBF; border-right: 2px solid #595959; }}
     table.toc-unified th.th-lbl {{ text-align: left; padding-left: 6px; border-left: 2px solid #404040; border-right: 2px solid #404040; }}
@@ -232,7 +225,8 @@ def render_unified_toc_tables_html(
     html.append("</colgroup><thead><tr>")
     html.append('<th class="th-lbl">Rādītājs / Kontugrupa</th>')
     for p in periods:
-        html.append(f'<th class="th-val">{p}</th><th class="th-pct">%</th>')
+        th_bg = "background-color: #D5D8DC; color: #333333;" if p in grey_cols else ""
+        html.append(f'<th class="th-val" style="{th_bg}">{p}</th><th class="th-pct" style="{th_bg}">%</th>')
     html.append("</tr></thead><tbody>")
 
     for i, rname in enumerate(row_names):
@@ -260,7 +254,14 @@ def render_unified_toc_tables_html(
         for p in periods:
             val_str = fmt_num(main_df.loc[rname, p])
             pct_str = fmt_pct_int(main_df.loc[rname, f"%|{p}"])
-            html.append(f'<td class="val-col">{val_str}</td><td class="pct-col">{pct_str}</td>')
+            if p in grey_cols:
+                # Pelēks fons Bāzes kolonnai (tumšāk pelēks galvenajām rindām, gaišāk pelēks apakšgrupām)
+                g_bg = "#D5D8DC" if is_bold else "#EAEDED"
+                g_txt = "#2C3E50" if is_bold else "#4D5656"
+                cell_style = f"background-color: {g_bg}; color: {g_txt};"
+            else:
+                cell_style = ""
+            html.append(f'<td class="val-col" style="{cell_style}">{val_str}</td><td class="pct-col" style="{cell_style}">{pct_str}</td>')
         html.append("</tr>")
 
     total_cols = 1 + 2 * len(periods)
@@ -269,8 +270,9 @@ def render_unified_toc_tables_html(
     html.append("<tr>")
     html.append('<th class="th-lbl" style="background-color: #EAECEE; border-top: 2px solid #404040; border-bottom: 2px solid #404040;">Produktivitātes rādītājs</th>')
     for p in periods:
+        th_bg = "#D5D8DC" if p in grey_cols else "#EAECEE"
         html.append(
-            f'<th colspan="2" style="background-color: #EAECEE; border-top: 2px solid #404040; '
+            f'<th colspan="2" style="background-color: {th_bg}; border-top: 2px solid #404040; '
             f'border-bottom: 2px solid #404040; border-left: 1px solid #BFBFBF; border-right: 2px solid #595959;">{p}</th>'
         )
     html.append("</tr>")
@@ -287,9 +289,10 @@ def render_unified_toc_tables_html(
                 s = f"{v * 100:.0f}%"
             else:
                 s = f"{v:.2f}"
+            kpi_cell_bg = "background-color: #E5E7E9; color: #4D5656;" if p in grey_cols else ""
             html.append(
                 f'<td colspan="2" style="text-align: right; padding: 4px 6px; '
-                f'border-left: 1px solid #BFBFBF; border-right: 2px solid #595959; font-weight: 600;">{s}</td>'
+                f'border-left: 1px solid #BFBFBF; border-right: 2px solid #595959; font-weight: 600; {kpi_cell_bg}">{s}</td>'
             )
         html.append("</tr>")
 
@@ -459,7 +462,7 @@ if len(ambiguous_rows) > 0 and not S.get("clarifications_done", False):
         st.rerun()
     st.stop()
 
-# --- 2.B KONTU SADALĪJUMA TABULA (BEZ RINDU PĀRRAKSTĪŠANAS BUG) ---
+# --- 2.B KONTU SADALĪJUMA TABULA (STABILA, BEZ PĀRRAKSTĪŠANAS) ---
 hdr_col1, hdr_col2 = st.columns([3, 1])
 with hdr_col1:
     st.subheader("📋 Kontu sadalījums pa grupām un apakšgrupām")
@@ -475,7 +478,6 @@ c2.metric("🟠 TVC (Mainīgās)", f"{cls_df['Grupa'].str.startswith('TVC').sum(
 c3.metric("🟤 OE (Uzturēšana)", f"{cls_df['Grupa'].str.startswith('OE_').sum()} konti")
 c4.metric("⚪ Izslēgtie (Virtuālie)", f"{(cls_df['Grupa'] == 'EXCLUDED').sum()} konti")
 
-# Veidojam redaktora skatu ar stabilu rindu secību
 view_df = pd.DataFrame(
     {
         "Konts": cls_df["Displeja_konts"].tolist(),
@@ -511,7 +513,6 @@ edited_view = st.data_editor(
     },
 )
 
-# Pārbaudām izmaiņas pa tiešo pēc stabila rindas indeksa (bez pārkārtošanas!)
 updated_groups: list[str] = []
 changed = False
 
@@ -524,12 +525,10 @@ for pos_idx in range(len(cls_df)):
     new_sub = edited_view.iloc[pos_idx]["Apakšgrupa (Rinda atskaitē)"]
 
     if new_sub != old_sub and new_sub in LABEL_TO_KEY:
-        # Lietotājs nomainīja apakšgrupu -> Lielā grupa automātiski pielāgojas tai
         new_grp = LABEL_TO_KEY[new_sub]
         updated_groups.append(new_grp)
         changed = True
     elif new_main != old_main and new_main in MAIN_GROUP_TO_DEFAULT_SUB:
-        # Lietotājs nomainīja Lielo grupu -> Apakšgrupa automātiski pārslēdzas uz šīs grupas noklusējumu
         new_grp = MAIN_GROUP_TO_DEFAULT_SUB[new_main]
         updated_groups.append(new_grp)
         changed = True
@@ -540,7 +539,6 @@ if changed:
     cls_df["Grupa"] = updated_groups
     cls_df["Ieņēmums"] = cls_df["Grupa"].str.startswith("S_")
     S.cls_df = cls_df
-    # Palielinām editor_v, lai st.data_editor pārzīmē abas kolonnas sinhroni ar jauno stāvokli
     S.editor_v = S.get("editor_v", 0) + 1
     st.rerun()
 
@@ -608,7 +606,6 @@ if "result" in S:
             unsafe_allow_html=True,
         )
 
-        # Kontroles salīdzinājums ar grāmatvedības rezultātu (ja pieejams)
         if getattr(res, "reconciliation", None) is not None and not res.reconciliation.empty:
             with st.expander("🔍 Kontrole: Salīdzinājums ar grāmatvedības PZA rezultātu un izslēgtajām pozīcijām"):
                 st.dataframe(res.reconciliation.style.format(fmt_num), use_container_width=True)
@@ -734,40 +731,45 @@ if "result" in S:
                     f"{oc_name} (%)", value=def_v, step=1.0, format="%.1f", key=f"sim_{oc_name}"
                 )
 
-        sim_amounts = res.amounts[selected_months].copy().astype(float)
+        # Aprēķinām bāzes kopsummu par izvēlētajiem mēnešiem un simulēto rezultātu (Bāze + %)
         base_sub = res.amounts[selected_months].copy().astype(float)
+        base_sum = base_sub.sum(axis=1)
+        sim_sum = base_sum.copy()
 
         for rname, pct_val in pct_changes.items():
-            if rname in sim_amounts.index:
-                sim_amounts.loc[rname] = base_sub.loc[rname] * (1.0 + pct_val / 100.0)
+            if rname in sim_sum.index:
+                sim_sum.loc[rname] = base_sum.loc[rname] * (1.0 + pct_val / 100.0)
 
         if s_children:
-            sim_amounts.loc["S"] = sim_amounts.loc[s_children].sum(axis=0)
+            sim_sum.loc["S"] = sim_sum.loc[s_children].sum()
         if tvc_children:
-            sim_amounts.loc["TVC"] = sim_amounts.loc[tvc_children].sum(axis=0)
-        sim_amounts.loc["T"] = sim_amounts.loc["S"] - sim_amounts.loc["TVC"]
+            sim_sum.loc["TVC"] = sim_sum.loc[tvc_children].sum()
+        sim_sum.loc["T"] = sim_sum.loc["S"] - sim_sum.loc["TVC"]
         if oe_children:
-            sim_amounts.loc["OE"] = sim_amounts.loc[oe_children].sum(axis=0)
-        sim_amounts.loc["NP"] = sim_amounts.loc["T"] - sim_amounts.loc["OE"]
+            sim_sum.loc["OE"] = sim_sum.loc[oe_children].sum()
+        sim_sum.loc["NP"] = sim_sum.loc["T"] - sim_sum.loc["OE"]
 
-        base_sum = base_sub.sum(axis=1)
-        sim_sum = sim_amounts[selected_months].sum(axis=1)
         diff_sum = sim_sum - base_sum
 
-        sim_amounts["Bāze KOPĀ"] = base_sum
-        sim_amounts["Simulācija KOPĀ"] = sim_sum
-        sim_amounts["Δ Izmaiņa (€)"] = diff_sum
-        sim_amounts["Simulācija AVG"] = sim_amounts[selected_months].mean(axis=1)
+        # Tabulā iekļaujam TIKAI 3 kopsavilkuma kolonnas (bez atsevišķiem mēnešiem un bez AVG)
+        summary_amounts = pd.DataFrame(
+            {
+                "Bāze KOPĀ": base_sum,
+                "Simulācija KOPĀ": sim_sum,
+                "Δ Izmaiņa (€)": diff_sum,
+            },
+            index=res.amounts.index,
+        )
 
         sim_main = {}
-        for c in sim_amounts.columns:
-            sim_main[c] = sim_amounts[c]
+        for c in summary_amounts.columns:
+            sim_main[c] = summary_amounts[c]
             if c == "Δ Izmaiņa (€)":
                 sim_main[f"%|{c}"] = np.where(base_sum != 0, diff_sum / np.abs(base_sum), np.nan)
             else:
-                s_col = sim_amounts.loc["S", c]
-                sim_main[f"%|{c}"] = sim_amounts[c] / s_col if s_col else np.nan
-        sim_main_df = pd.DataFrame(sim_main, index=sim_amounts.index)
+                s_col = summary_amounts.loc["S", c]
+                sim_main[f"%|{c}"] = summary_amounts[c] / s_col if s_col else np.nan
+        sim_main_df = pd.DataFrame(sim_main, index=summary_amounts.index)
 
         def sim_kpi_for(col_vals: pd.Series) -> dict[str, float]:
             S_, T_, OE_ = col_vals["S"], col_vals["T"], col_vals["OE"]
@@ -782,7 +784,12 @@ if "result" in S:
                 "Eiro Sales / Eiro strādnieku algas": div(S_, ww),
             }
 
-        sim_kpi_df = pd.DataFrame({c: sim_kpi_for(sim_amounts[c]) for c in sim_amounts.columns})
+        sim_kpi_df = pd.DataFrame(
+            {
+                "Bāze KOPĀ": sim_kpi_for(summary_amounts["Bāze KOPĀ"]),
+                "Simulācija KOPĀ": sim_kpi_for(summary_amounts["Simulācija KOPĀ"]),
+            }
+        )
         sim_kpi_df["Δ Izmaiņa (€)"] = sim_kpi_df["Simulācija KOPĀ"] - sim_kpi_df["Bāze KOPĀ"]
 
         st.markdown("---")
@@ -799,14 +806,15 @@ if "result" in S:
         )
         m4.metric("Simulētā Neto Peļņa (NP)", f"{fmt_num(sim_sum['NP'])} €", delta=f"{dnp_val:+,.0f} €".replace(",", " "))
 
-        st.subheader("📊 Simulētā Finanšu un Produktivitātes tabula")
+        st.subheader(f"📊 Simulētā Finanšu un Produktivitātes tabula ({len(selected_months)} mēn. kopsavilkums)")
         st.markdown(
             render_unified_toc_tables_html(
-                sim_amounts,
+                summary_amounts,
                 sim_main_df,
                 sim_kpi_df,
                 res.row_kinds,
                 title_kpi="📈 Simulētie Produktivitātes un atdeves rādītāji",
+                grey_cols={"Bāze KOPĀ"},
             ),
             unsafe_allow_html=True,
         )
