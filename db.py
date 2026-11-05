@@ -1,10 +1,9 @@
 """
-db.py — Supabase datubāzes integrācija:
-- Vairāku uzņēmumu profili (kontu klasifikācijas atmiņa)
-- Saglabāto finanšu tabulu / atskaišu arhīvs (vēsture)
+db.py — Supabase datubāzes integrācija ar uzņēmumu autentifikāciju un datu izolāciju
 Project ID: amprqueamdcxpjufigvm
 """
 from __future__ import annotations
+import hashlib
 import json
 import os
 from io import StringIO
@@ -12,8 +11,6 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client, Client
 
-# Tavi publiskie projekta savienojuma dati kā drošs rezerves variants (fallback),
-# ja Streamlit Cloud neielasa .streamlit/secrets.toml failu:
 DEFAULT_SUPABASE_URL = "https://amprqueamdcxpjufigvm.supabase.co"
 DEFAULT_SUPABASE_KEY = "sb_publishable_f2rdvTMla_SXrU7bKAo4Jw_fkGCJWEN"
 
@@ -38,7 +35,6 @@ def _get_credentials() -> tuple[str, str]:
 
 @st.cache_resource
 def get_supabase() -> tuple[Client | None, str | None]:
-    """Atgriež (Supabase Client, kļūdas_ziņojums)."""
     url, key = _get_credentials()
     if not url or not key:
         return None, "Nav norādīts Supabase URL vai Key."
@@ -47,6 +43,10 @@ def get_supabase() -> tuple[Client | None, str | None]:
         return client, None
     except Exception as e:
         return None, str(e)
+
+
+def _hash_pw(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
 def _norm_part(text: str) -> str:
@@ -58,8 +58,8 @@ def _norm_key(path: str, label: str) -> str:
 
 
 class SupabaseProfileStore:
-    def __init__(self, profile_name: str = "Mans Uzņēmums"):
-        self.user_id = str(profile_name).strip() or "Mans Uzņēmums"
+    def __init__(self, company_name: str = ""):
+        self.user_id = str(company_name).strip()
         self.client, self.init_error = get_supabase()
         self.last_error: str | None = self.init_error
 
@@ -67,47 +67,67 @@ class SupabaseProfileStore:
     def is_connected(self) -> bool:
         return self.client is not None
 
-    # ------------------------------------------------------------------ PROFILU SARAKSTS
-    def list_profiles(self) -> list[str]:
-        """Atgriež visus datubāzē izveidotos uzņēmumu profilus."""
-        base = ["Mans Uzņēmums"]
+    # ------------------------------------------------------------------ AUTENTIFIKĀCIJA UN UZŅĒMUMI
+    def authenticate(self, company_name: str, password: str) -> tuple[bool, str]:
+        """Pārbauda uzņēmuma vārdu un paroli."""
         if not self.client:
-            return base
-        found: set[str] = set()
-        try:
-            r1 = self.client.table("account_mappings").select("user_id").execute()
-            for row in r1.data or []:
-                u = str(row.get("user_id", "")).strip()
-                if u and u != "default_user":
-                    found.add(u)
-                elif u == "default_user":
-                    found.add("Mans Uzņēmums")
-        except Exception:
-            pass
+            return False, "Nav datubāzes savienojuma."
+        c_name = company_name.strip()
+        if not c_name or not password:
+            return False, "Ievadiet uzņēmuma nosaukumu un paroli."
 
+        pw_hash = _hash_pw(password)
         try:
-            r2 = self.client.table("saved_reports").select("profile_name").execute()
-            for row in r2.data or []:
-                p = str(row.get("profile_name", "")).strip()
-                if p:
-                    found.add(p)
-        except Exception:
-            pass
+            res = self.client.table("company_profiles").select("*").eq("company_name", c_name).limit(1).execute()
+            rows = res.data or []
+            if not rows:
+                return False, "Šāds uzņēmums neeksistē. Lūdzu, izveidojiet jaunu profilu."
+            
+            if rows[0]["password_hash"] == pw_hash:
+                self.user_id = c_name
+                return True, "Veiksmīga ielagošanās!"
+            else:
+                return False, "Nepareiza parole!"
+        except Exception as e:
+            return False, f"Kļūda autorizācijā: {e}"
 
-        all_profiles = sorted(found | set(base))
-        return all_profiles
+    def register_company(self, company_name: str, password: str) -> tuple[bool, str]:
+        """Reģistrē jaunu uzņēmumu datubāzē."""
+        if not self.client:
+            return False, "Nav datubāzes savienojuma."
+        c_name = company_name.strip()
+        if not c_name or not password:
+            return False, "Ievadiet uzņēmuma nosaukumu un paroli."
+        if len(password) < 4:
+            return False, "Parolei jābūt vismaz 4 simbolus garai."
+
+        pw_hash = _hash_pw(password)
+        try:
+            # Pārbaudām, vai jau eksistē
+            chk = self.client.table("company_profiles").select("company_name").eq("company_name", c_name).execute()
+            if chk.data:
+                return False, "Šāds uzņēmuma nosaukums jau ir aizņemts. Izvēlieties citu vai ielogojieties."
+
+            self.client.table("company_profiles").insert({
+                "company_name": c_name,
+                "password_hash": pw_hash
+            }).execute()
+
+            self.user_id = c_name
+            return True, "Profils veiksmīgi izveidots!"
+        except Exception as e:
+            return False, f"Kļūda reģistrācijā: {e}"
 
     def count_saved(self) -> int:
-        if not self.client:
+        if not self.client or not self.user_id:
             return 0
         try:
             res = (
                 self.client.table("account_mappings")
                 .select("id", count="exact")
-                .in_("user_id", [self.user_id, "default_user"] if self.user_id == "Mans Uzņēmums" else [self.user_id])
+                .eq("user_id", self.user_id)
                 .execute()
             )
-            self.last_error = None
             return int(res.count if res.count is not None else len(res.data or []))
         except Exception as e:
             self.last_error = str(e)
@@ -115,15 +135,14 @@ class SupabaseProfileStore:
 
     # ------------------------------------------------------------------ KONTU KLASIFIKĀCIJAS ATMIŅA
     def lookup(self, leaves) -> tuple[dict[str, dict], list]:
-        if not self.client:
+        if not self.client or not self.user_id:
             return {}, list(leaves)
 
-        target_users = [self.user_id, "default_user"] if self.user_id == "Mans Uzņēmums" else [self.user_id]
         try:
             res = (
                 self.client.table("account_mappings")
                 .select("path_label, account_label, toc_group, is_income")
-                .in_("user_id", target_users)
+                .eq("user_id", self.user_id)
                 .execute()
             )
             rows = res.data or []
@@ -152,15 +171,13 @@ class SupabaseProfileStore:
                 else:
                     unknown.append(lf)
 
-            self.last_error = None
             return known, unknown
         except Exception as e:
             self.last_error = str(e)
             return {}, list(leaves)
 
     def save(self, leaves, mapping: dict[str, dict]) -> tuple[bool, int]:
-        if not self.client:
-            self.last_error = "Nav aktīva Supabase savienojuma."
+        if not self.client or not self.user_id:
             return False, 0
 
         dedup: dict[tuple[str, str, str], dict] = {}
@@ -186,13 +203,12 @@ class SupabaseProfileStore:
                 rows_to_upsert,
                 on_conflict="user_id,path_label,account_label",
             ).execute()
-            self.last_error = None
             return True, len(rows_to_upsert)
         except Exception as e:
             self.last_error = str(e)
             return False, 0
 
-    # ------------------------------------------------------------------ FINANŠU TABULU VĒSTURE (ARHĪVS)
+    # ------------------------------------------------------------------ FINANŠU TABULU VĒSTURE (IZOLĒTA)
     def save_report(
         self,
         report_name: str,
@@ -200,9 +216,7 @@ class SupabaseProfileStore:
         res_obj,
         commentary: str = "",
     ) -> tuple[bool, int | None]:
-        """Saglabā aprēķināto TOC-FIN finanšu tabulu Supabase datubāzē."""
-        if not self.client:
-            self.last_error = "Nav aktīva Supabase savienojuma."
+        if not self.client or not self.user_id:
             return False, None
 
         try:
@@ -225,7 +239,6 @@ class SupabaseProfileStore:
                 "commentary": commentary or "",
             }
             ins = self.client.table("saved_reports").insert(payload).execute()
-            self.last_error = None
             new_id = ins.data[0]["id"] if ins.data else None
             return True, new_id
         except Exception as e:
@@ -241,27 +254,25 @@ class SupabaseProfileStore:
         except Exception:
             return False
 
-    def list_reports(self, all_profiles: bool = False) -> list[dict]:
-        """Atgriež saglabāto finanšu tabulu sarakstu."""
-        if not self.client:
+    def list_reports(self) -> list[dict]:
+        """Atgriež TIKAI šī uzņēmuma saglabātās atskaites."""
+        if not self.client or not self.user_id:
             return []
         try:
-            q = (
+            res = (
                 self.client.table("saved_reports")
                 .select("id, profile_name, report_name, file_name, periods_label, created_at")
+                .eq("profile_name", self.user_id)
                 .order("created_at", desc=True)
                 .limit(50)
+                .execute()
             )
-            if not all_profiles:
-                q = q.eq("profile_name", self.user_id)
-            res = q.execute()
             return res.data or []
         except Exception as e:
             self.last_error = str(e)
             return []
 
     def load_report(self, report_id: int) -> dict | None:
-        """Ielādē pilnu saglabāto finanšu tabulu no Supabase pēc ID."""
         if not self.client:
             return None
         try:
@@ -279,7 +290,7 @@ class SupabaseProfileStore:
             )
             return {
                 "id": row["id"],
-                "profile_name": row.get("profile_name", "Mans Uzņēmums"),
+                "profile_name": row.get("profile_name", ""),
                 "report_name": row.get("report_name", ""),
                 "file_name": row.get("file_name", ""),
                 "periods_label": row.get("periods_label", ""),
