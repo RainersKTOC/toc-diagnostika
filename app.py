@@ -1,8 +1,11 @@
 """
-app.py — TOC-FIN Vadības lēmumu un finanšu diagnostikas sistēma (v11.1)
+app.py — TOC-FIN Vadības lēmumu un finanšu diagnostikas sistēma (v12.0)
+Ar uzņēmumu profiliem un saglabāto finanšu tabulu vēsturi Supabase
 Project ID: amprqueamdcxpjufigvm
 """
 from __future__ import annotations
+from dataclasses import dataclass
+from datetime import datetime
 import hashlib
 import io
 from pathlib import Path
@@ -29,13 +32,24 @@ from toc_ingest import (
     extract_lines,
     load_grids,
     pick_sheet,
-    reconcile,
     request_structure,
 )
 
 MODEL = "claude-sonnet-4-6"
 
 st.set_page_config(page_title="TOC-FIN Vadības Sistēma", layout="wide", page_icon="📊")
+
+
+@dataclass
+class LoadedReportResult:
+    """Struktūra, kas ļauj atvērt saglabātās tabulas no Supabase tieši tāpat kā tikko aprēķinātās."""
+    amounts: pd.DataFrame
+    main: pd.DataFrame
+    kpi: pd.DataFrame
+    row_kinds: dict[str, str]
+    reconciliation: pd.DataFrame
+    by_group: dict
+
 
 # --- IEVADS UN APRAKSTS ---
 st.title("📊 TOC-FIN: Finanšu diagnostika un vadības lēmumu sistēma")
@@ -255,7 +269,6 @@ def render_unified_toc_tables_html(
             val_str = fmt_num(main_df.loc[rname, p])
             pct_str = fmt_pct_int(main_df.loc[rname, f"%|{p}"])
             if p in grey_cols:
-                # Pelēks fons Bāzes kolonnai (tumšāk pelēks galvenajām rindām, gaišāk pelēks apakšgrupām)
                 g_bg = "#D5D8DC" if is_bold else "#EAEDED"
                 g_txt = "#2C3E50" if is_bold else "#4D5656"
                 cell_style = f"background-color: {g_bg}; color: {g_txt};"
@@ -307,273 +320,117 @@ for fname in ["toc_knowledge.txt", "toc_knowledge.md", "knowledge.txt"]:
         knowledge_file = Path(fname).read_text(encoding="utf-8")
         break
 
-# Supabase profils un sānjoslas statuss
-profile = SupabaseProfileStore(user_id="default_user")
+S = st.session_state
+
+# ------------------------------------------------------------------ SĀNJOSLA: PROFILI UN VECĀS TABULAS (VĒSTURE)
+temp_store = SupabaseProfileStore(S.get("active_profile", "Mans Uzņēmums"))
+existing_profiles = temp_store.list_profiles()
+if "custom_profiles" not in S:
+    S.custom_profiles = []
+for cp in S.custom_profiles:
+    if cp not in existing_profiles:
+        existing_profiles.append(cp)
+
 with st.sidebar:
+    st.subheader("👤 Uzņēmuma profils")
+    current_prof = S.get("active_profile", existing_profiles[0])
+    prof_idx = existing_profiles.index(current_prof) if current_prof in existing_profiles else 0
+
+    selected_prof = st.selectbox(
+        "Izvēlieties uzņēmumu / profilu:",
+        options=existing_profiles,
+        index=prof_idx,
+        help="Katram profilam tiek saglabāts savs kontu klasifikācijas šablons un savas finanšu tabulas.",
+    )
+    if selected_prof != S.get("active_profile"):
+        S.active_profile = selected_prof
+        S.pop("cls_df", None)
+        st.rerun()
+    S.active_profile = selected_prof
+
+    with st.expander("➕ Izveidot jaunu profilu"):
+        new_prof_name = st.text_input("Jauna uzņēmuma nosaukums:", placeholder="piem., SIA Ražotājs")
+        if st.button("Pievienot profilu", use_container_width=True):
+            clean_np = new_prof_name.strip()
+            if clean_np:
+                if clean_np not in S.custom_profiles:
+                    S.custom_profiles.append(clean_np)
+                S.active_profile = clean_np
+                S.pop("cls_df", None)
+                st.rerun()
+
+    profile = SupabaseProfileStore(profile_name=S.active_profile)
+
+    st.markdown("---")
     st.subheader("🗄️ Datubāzes statuss")
     if profile.is_connected:
         saved_cnt = profile.count_saved()
         if profile.last_error:
-            st.warning(f"Supabase pieslēgts, bet tabula nav gatava: {profile.last_error}")
+            st.warning(f"Nepieciešams palaist SQL skriptu Supabase:\n`{profile.last_error}`")
         else:
-            st.success(f"Supabase aktīvs ({saved_cnt} saglabāti konti)")
+            st.success(f"Supabase aktīvs\nProfils: **{S.active_profile}** ({saved_cnt} konti)")
     else:
-        st.warning("Supabase nav pieslēgts (pārbaudiet secrets.toml)")
+        st.error(f"Supabase kļūda: {profile.init_error}")
 
-    if st.button("🔄 Sākt pilnīgi no jauna", use_container_width=True):
-        st.session_state.clear()
-        st.rerun()
+    # --- VECĀS / SAGLABĀTĀS FINANŠU TABULAS ---
+    st.markdown("---")
+    st.subheader("📂 Saglabātās finanšu tabulas")
+    show_all_prof = st.checkbox("Rādīt visu profilu tabulas", value=True)
+    saved_reports = profile.list_reports(all_profiles=show_all_prof)
 
-# ------------------------------------------------------------------ 1. AUGŠUPIELĀDE
-uploaded = st.file_uploader("Augšupielādējiet PZA failu (CSV vai Excel formātā)", type=["csv", "xlsx", "xlsm", "xls"])
+    if not saved_reports:
+        st.caption("Vēl nav saglabātu finanšu tabulu. Kad veiksiet aprēķinu, tabula automātiski saglabāsies šeit.")
+    else:
+        report_Labels = {}
+        for rep in saved_reports:
+            dt_str = str(rep.get("created_at", ""))[:16].replace("T", " ")
+            p_tag = f"[{rep.get('profile_name')}] " if show_all_prof else ""
+            lbl = f"{p_tag}{rep.get('report_name')} ({dt_str})"
+            report_Labels[lbl] = rep["id"]
 
-if uploaded is None:
-    st.info("Lai sāktu diagnostiku un lēmumu modelēšanu, augšupielādējiet PZA failu.")
-    st.stop()
+        chosen_rep_lbl = st.selectbox("Izvēlieties saglabāto atskaiti:", options=list(report_Labels.keys()))
+        chosen_rep_id = report_Labels[chosen_rep_lbl]
 
-data = uploaded.getvalue()
-fid = hashlib.md5(data).hexdigest()
-if st.session_state.get("fid") != fid:
-    st.session_state.clear()
-    st.session_state.fid = fid
-    st.session_state.grids = load_grids(uploaded.name, data)
-
-S = st.session_state
-grids: dict[str, pd.DataFrame] = S.grids
-
-if "structure" not in S:
-    with st.spinner("Nolasa faila struktūru un attīra datus..."):
-        try:
-            sheet = pick_sheet(get_client(), MODEL, grids)
-            S.structure = request_structure(get_client(), MODEL, sheet, grids[sheet])
-        except Exception as e:
-            st.error(f"Neizdevās automātiski nolasīt struktūru: {e}")
-            st.stop()
-
-stc: Structure = S.structure
-try:
-    ex = extract_lines(grids[stc.sheet], stc)
-    S.analysis = analyze(ex, stc)
-except Exception as e:
-    st.error(f"Kļūda datu ielasīšanā: {e}")
-    st.stop()
-
-an = S.analysis
-display_labels = build_display_labels(an.leaves)
-
-# ------------------------------------------------------------------ 2. KONTU KLASIFIKĀCIJA UN SUPABASE PROFILS
-st.header("1. Kontu ekonomiskā klasifikācija")
-
-if "cls_df" not in S:
-    if st.button("🔍 Sākt kontu TOC-FIN klasifikāciju", type="primary"):
-        with st.spinner("Analizē kontus un salīdzina ar saglabāto Supabase profilu..."):
-            try:
-                known, unknown = profile.lookup(an.leaves)
-                items = classify_with_claude(get_client(), MODEL, unknown) if unknown else []
-                by_id = {i["id"]: i for i in items}
-                rows = []
-                for lf in an.leaves:
-                    disp_lbl = display_labels.get(lf.id, lf.label)
-                    if lf.id in known:
-                        m = known[lf.id]
-                        grp = normalize_group_key(m["group"])
-                        rows.append(
-                            dict(
-                                id=lf.id,
-                                Konts=lf.label,
-                                Displeja_konts=disp_lbl,
-                                Grupa=grp,
-                                Ieņēmums=bool(grp.startswith("S_") or m.get("is_income", False)),
-                                Jautājums="",
-                                Avots="🗄️ Supabase profils",
-                            )
-                        )
+        col_open, col_del = st.columns([3, 1])
+        with col_open:
+            if st.button("📖 Atvērt tabulu", type="primary", use_container_width=True):
+                loaded = profile.load_report(chosen_rep_id)
+                if loaded:
+                    S.result = LoadedReportResult(
+                        amounts=loaded["amounts"],
+                        main=loaded["main"],
+                        kpi=loaded["kpi"],
+                        row_kinds=loaded["row_kinds"],
+                        reconciliation=loaded["reconciliation"],
+                        by_group={},
+                    )
+                    S.loaded_report_meta = loaded
+                    S.current_report_id = loaded["id"]
+                    if loaded.get("commentary"):
+                        S.commentary = loaded["commentary"]
                     else:
-                        i = by_id.get(lf.id, {"group": "OE_OTHER", "is_income": False, "question": ""})
-                        grp = normalize_group_key(i.get("group", "OE_OTHER"))
-                        rows.append(
-                            dict(
-                                id=lf.id,
-                                Konts=lf.label,
-                                Displeja_konts=disp_lbl,
-                                Grupa=grp,
-                                Ieņēmums=bool(grp.startswith("S_") or i.get("is_income", False)),
-                                Jautājums=str(i.get("question") or "").strip(),
-                                Avots="🤖 AI klasifikācija",
-                            )
-                        )
-                S.cls_df = sort_cls_df(pd.DataFrame(rows))
-                S.editor_v = 0
-                S.known_count = len(known)
-                S.unknown_count = len(unknown)
-                st.rerun()
-            except Exception as e:
-                st.error(f"Kļūda klasifikācijā: {e}")
-    if "cls_df" not in S:
-        st.stop()
+                        S.pop("commentary", None)
+                    S.chat = []
+                    st.rerun()
+        with col_del:
+            if st.button("🗑️", help="Dzēst šo saglabāto tabulu", use_container_width=True):
+                if profile.delete_report(chosen_rep_id):
+                    st.rerun()
 
-cls_df: pd.DataFrame = S.cls_df.copy()
-cls_df["Grupa"] = cls_df["Grupa"].map(normalize_group_key)
-if "Displeja_konts" not in cls_df.columns:
-    cls_df["Displeja_konts"] = cls_df["id"].map(lambda x: display_labels.get(x, ""))
-
-if S.get("known_count", 0) > 0 or S.get("unknown_count", 0) > 0:
-    st.caption(
-        f"📌 No Supabase profila atpazīti **{S.get('known_count', 0)}** konti | "
-        f"Ar AI no jauna klasificēti **{S.get('unknown_count', 0)}** konti."
-    )
-
-# --- 2.A NESKAIDRO POZĪCIJU JAUTĀJUMI (AR PAREIZU AĢENTA NOKLUSĒJUMU) ---
-ambiguous_rows = cls_df[cls_df["Jautājums"].astype(str).str.strip() != ""]
-
-if len(ambiguous_rows) > 0 and not S.get("clarifications_done", False):
-    st.subheader("❓ Nepieciešams vadības lēmums par dažām pozīcijām")
-    st.info("Katram kontam jau ir iezīmēts aģenta visticamākais ieteikums. Mainiet tikai tad, ja pēc būtības pozīcija atbilst citai grupai.")
-
-    clarifications: dict[str, tuple[str, bool]] = {}
-    for _, r in ambiguous_rows.iterrows():
-        row_id = r["id"]
-        disp_name = r["Displeja_konts"]
-        agent_grp = normalize_group_key(r["Grupa"])
-        agent_sub_label = SUBGROUP_LABELS.get(agent_grp, agent_grp)
-        default_idx = get_radio_index_for_group(agent_grp)
-
-        st.markdown(f"**📌 {disp_name}** *(Aģenta sākotnējā hipotēze: `{agent_sub_label}`)*")
-        st.write(f"👉 **Aģenta jautājums:** {r['Jautājums']}")
-
-        choice = st.radio(
-            f"Kā klasificēt '{disp_name}'?",
-            options=RADIO_OPTIONS,
-            index=default_idx,
-            key=f"radio_{row_id}",
-        )
-        clarifications[row_id] = resolve_radio_choice(choice, agent_grp, r["Konts"])
-        st.markdown("---")
-
-    if st.button("✅ Apstiprināt atbildes un pāriet uz kontu tabulu", type="primary"):
-        for row_id, (new_group, is_inc) in clarifications.items():
-            mask = cls_df["id"] == row_id
-            cls_df.loc[mask, "Grupa"] = new_group
-            cls_df.loc[mask, "Ieņēmums"] = is_inc
-            cls_df.loc[mask, "Jautājums"] = ""
-        S.cls_df = sort_cls_df(cls_df)
-        S.clarifications_done = True
-        S.editor_v = S.get("editor_v", 0) + 1
-        st.rerun()
-    st.stop()
-
-# --- 2.B KONTU SADALĪJUMA TABULA (STABILA, BEZ PĀRRAKSTĪŠANAS) ---
-hdr_col1, hdr_col2 = st.columns([3, 1])
-with hdr_col1:
-    st.subheader("📋 Kontu sadalījums pa grupām un apakšgrupām")
-with hdr_col2:
-    if st.button("🔃 Sakārtot tabulu pa grupām", use_container_width=True):
-        S.cls_df = sort_cls_df(cls_df)
-        S.editor_v = S.get("editor_v", 0) + 1
+    st.markdown("---")
+    if st.button("🔄 Sākt pilnīgi no jauna", use_container_width=True):
+        keep_prof = S.get("active_profile", "Mans Uzņēmums")
+        keep_custom = S.get("custom_profiles", [])
+        st.session_state.clear()
+        st.session_state.active_profile = keep_prof
+        st.session_state.custom_profiles = keep_custom
         st.rerun()
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("🟡 S (Ieņēmumi)", f"{cls_df['Grupa'].str.startswith('S_').sum()} konti")
-c2.metric("🟠 TVC (Mainīgās)", f"{cls_df['Grupa'].str.startswith('TVC').sum()} konti")
-c3.metric("🟤 OE (Uzturēšana)", f"{cls_df['Grupa'].str.startswith('OE_').sum()} konti")
-c4.metric("⚪ Izslēgtie (Virtuālie)", f"{(cls_df['Grupa'] == 'EXCLUDED').sum()} konti")
 
-view_df = pd.DataFrame(
-    {
-        "Konts": cls_df["Displeja_konts"].tolist(),
-        "Lielā grupa": [get_main_cat(g) for g in cls_df["Grupa"]],
-        "Apakšgrupa (Rinda atskaitē)": [SUBGROUP_LABELS[normalize_group_key(g)] for g in cls_df["Grupa"]],
-    }
-)
-
-full_editor_height = (len(view_df) + 1) * 36 + 14
-editor_key = f"clean_cls_editor_v_{S.get('editor_v', 0)}"
-
-edited_view = st.data_editor(
-    view_df,
-    hide_index=True,
-    use_container_width=True,
-    height=full_editor_height,
-    key=editor_key,
-    disabled=["Konts"],
-    column_config={
-        "Konts": st.column_config.TextColumn("Konta nosaukums", width="large"),
-        "Lielā grupa": st.column_config.SelectboxColumn(
-            "Lielā grupa",
-            options=list(MAIN_GROUP_TO_DEFAULT_SUB.keys()),
-            required=True,
-            width="medium",
-        ),
-        "Apakšgrupa (Rinda atskaitē)": st.column_config.SelectboxColumn(
-            "Apakšgrupa / Rinda atskaitē",
-            options=list(SUBGROUP_LABELS.values()),
-            required=True,
-            width="large",
-        ),
-    },
-)
-
-updated_groups: list[str] = []
-changed = False
-
-for pos_idx in range(len(cls_df)):
-    old_grp = normalize_group_key(cls_df.iloc[pos_idx]["Grupa"])
-    old_main = get_main_cat(old_grp)
-    old_sub = SUBGROUP_LABELS[old_grp]
-
-    new_main = edited_view.iloc[pos_idx]["Lielā grupa"]
-    new_sub = edited_view.iloc[pos_idx]["Apakšgrupa (Rinda atskaitē)"]
-
-    if new_sub != old_sub and new_sub in LABEL_TO_KEY:
-        new_grp = LABEL_TO_KEY[new_sub]
-        updated_groups.append(new_grp)
-        changed = True
-    elif new_main != old_main and new_main in MAIN_GROUP_TO_DEFAULT_SUB:
-        new_grp = MAIN_GROUP_TO_DEFAULT_SUB[new_main]
-        updated_groups.append(new_grp)
-        changed = True
-    else:
-        updated_groups.append(old_grp)
-
-if changed:
-    cls_df["Grupa"] = updated_groups
-    cls_df["Ieņēmums"] = cls_df["Grupa"].str.startswith("S_")
-    S.cls_df = cls_df
-    S.editor_v = S.get("editor_v", 0) + 1
-    st.rerun()
-
-# ------------------------------------------------------------------ 3. GALA APRĒĶINS UN SAGLABĀŠANA SUPABASE
-st.header("2. TOC-FIN Diagnostika un Lēmumu Atbalsts")
-if st.button("🚀 Apstiprināt klasifikāciju un veikt TOC-FIN aprēķinu", type="primary"):
-    cls_sorted = sort_cls_df(cls_df)
-    S.cls_df = cls_sorted
-    S.editor_v = S.get("editor_v", 0) + 1
-
-    mapping = {
-        r["id"]: {
-            "group": normalize_group_key(r["Grupa"]),
-            "is_income": bool(str(r["Grupa"]).startswith("S_") or r["Ieņēmums"]),
-        }
-        for _, r in cls_sorted.iterrows()
-    }
-    pos = next((l.pos for l in an.ex.lines if l.row == stc.result_row), None)
-    reported = an.ex.lines[pos].vals if pos is not None else None
-
-    res = compute_toc(an.leaves, mapping, an.ex.period_cols, reported)
-    S.result = res
-
-    if profile.is_connected:
-        ok, cnt = profile.save(an.leaves, mapping)
-        if ok:
-            st.toast(f"✅ Supabase profilā saglabāti {cnt} kontu kartējumi!", icon="🗄️")
-        else:
-            st.warning(f"Neizdevās saglabāt Supabase datubāzē: {profile.last_error}")
-
-    S.pop("commentary", None)
-    S.chat = []
-
-if "result" in S:
-    res = S.result
+# ------------------------------------------------------------------ FUNKCIJA REZULTĀTU UN SIMULĀCIJAS ATTĒLOŠANAI
+def render_results_and_simulation(res, report_title: str = ""):
+    if report_title:
+        st.info(f"📂 **Atvērta atskaite:** {report_title}")
 
     main_tab1, main_tab2 = st.tabs(
         [
@@ -583,22 +440,35 @@ if "result" in S:
     )
 
     with main_tab1:
-        xl_f, xl_v = io.BytesIO(), io.BytesIO()
-        build_excel(res, xl_f, formulas=True)
-        build_excel(res, xl_v, formulas=False)
-        d1, d2 = st.columns(2)
-        d1.download_button(
-            "📥 Lejupielādēt Excel ar formulām (.xlsx)",
-            xl_f.getvalue(),
-            "TOC_Finansu_Diagnostika.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-        d2.download_button(
-            "📥 Lejupielādēt Excel ar vērtībām (.xlsx)",
-            xl_v.getvalue(),
-            "TOC_Finansu_Diagnostika_vertibas.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        # Excel eksports (ja ir pilns objekts ar kontu detalizāciju, izmantojam build_excel; ja no arhīva — tiešais Excel)
+        try:
+            xl_f, xl_v = io.BytesIO(), io.BytesIO()
+            build_excel(res, xl_f, formulas=True)
+            build_excel(res, xl_v, formulas=False)
+            d1, d2 = st.columns(2)
+            d1.download_button(
+                "📥 Lejupielādēt Excel ar formulām (.xlsx)",
+                xl_f.getvalue(),
+                "TOC_Finansu_Diagnostika.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            d2.download_button(
+                "📥 Lejupielādēt Excel ar vērtībām (.xlsx)",
+                xl_v.getvalue(),
+                "TOC_Finansu_Diagnostika_vertibas.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        except Exception:
+            xl_buf = io.BytesIO()
+            with pd.ExcelWriter(xl_buf, engine="openpyxl") as writer:
+                res.amounts.to_excel(writer, sheet_name="TOC_Summas")
+                res.kpi.to_excel(writer, sheet_name="KPI")
+            st.download_button(
+                "📥 Lejupielādēt saglabāto tabulu Excel (.xlsx)",
+                xl_buf.getvalue(),
+                "TOC_Saglabata_Atskaite.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
         st.subheader("Finanšu pārskata tabula (T* skats)")
         st.markdown(
@@ -622,7 +492,7 @@ if "result" in S:
             "Raksti latviešu valodā, strukturēti, asi un uz lēmumiem vērsti."
         )
 
-        if "commentary" not in S:
+        if "commentary" not in S or not S.commentary:
             if st.button("📝 Ģenerēt vadības analīzi un rīcības plānu", type="primary"):
                 with st.spinner("Sagatavo TOC-FIN vadības kopsavilkumu..."):
                     r = get_client().messages.create(
@@ -637,6 +507,8 @@ if "result" in S:
                         ],
                     )
                     S.commentary = "".join(b.text for b in r.content if getattr(b, "type", "") == "text")
+                    if S.get("current_report_id"):
+                        profile.update_report_commentary(S.current_report_id, S.commentary)
                     st.rerun()
         else:
             st.markdown(S.commentary)
@@ -731,7 +603,6 @@ if "result" in S:
                     f"{oc_name} (%)", value=def_v, step=1.0, format="%.1f", key=f"sim_{oc_name}"
                 )
 
-        # Aprēķinām bāzes kopsummu par izvēlētajiem mēnešiem un simulēto rezultātu (Bāze + %)
         base_sub = res.amounts[selected_months].copy().astype(float)
         base_sum = base_sub.sum(axis=1)
         sim_sum = base_sum.copy()
@@ -751,7 +622,6 @@ if "result" in S:
 
         diff_sum = sim_sum - base_sum
 
-        # Tabulā iekļaujam TIKAI 3 kopsavilkuma kolonnas (bez atsevišķiem mēnešiem un bez AVG)
         summary_amounts = pd.DataFrame(
             {
                 "Bāze KOPĀ": base_sum,
@@ -818,3 +688,282 @@ if "result" in S:
             ),
             unsafe_allow_html=True,
         )
+
+
+# ------------------------------------------------------------------ 1. AUGŠUPIELĀDE VAI ARHĪVA SKATS
+uploaded = st.file_uploader("Augšupielādējiet jaunu PZA failu (CSV vai Excel formātā)", type=["csv", "xlsx", "xlsm", "xls"])
+
+if uploaded is None:
+    if "result" in S and S.get("loaded_report_meta"):
+        meta = S.loaded_report_meta
+        title_str = f"{meta.get('profile_name')} — {meta.get('report_name')} ({meta.get('periods_label')})"
+        render_results_and_simulation(S.result, report_title=title_str)
+    else:
+        st.info(
+            "👆 Augšupielādējiet jaunu PZA failu augstāk **VAI** kreisajā sānjoslā sadaļā "
+            "**'📂 Saglabātās finanšu tabulas'** izvēlieties un atveriet kādu no iepriekš saglabātajām atskaitēm."
+        )
+    st.stop()
+
+data = uploaded.getvalue()
+fid = hashlib.md5(data).hexdigest()
+if S.get("fid") != fid:
+    keep_prof = S.get("active_profile", "Mans Uzņēmums")
+    keep_custom = S.get("custom_profiles", [])
+    st.session_state.clear()
+    S.active_profile = keep_prof
+    S.custom_profiles = keep_custom
+    S.fid = fid
+    S.grids = load_grids(uploaded.name, data)
+
+grids: dict[str, pd.DataFrame] = S.grids
+
+if "structure" not in S:
+    with st.spinner("Nolasa faila struktūru un attīra datus..."):
+        try:
+            sheet = pick_sheet(get_client(), MODEL, grids)
+            S.structure = request_structure(get_client(), MODEL, sheet, grids[sheet])
+        except Exception as e:
+            st.error(f"Neizdevās automātiski nolasīt struktūru: {e}")
+            st.stop()
+
+stc: Structure = S.structure
+try:
+    ex = extract_lines(grids[stc.sheet], stc)
+    S.analysis = analyze(ex, stc)
+except Exception as e:
+    st.error(f"Kļūda datu ielasīšanā: {e}")
+    st.stop()
+
+an = S.analysis
+display_labels = build_display_labels(an.leaves)
+
+# ------------------------------------------------------------------ 2. KONTU KLASIFIKĀCIJA UN SUPABASE PROFILS
+st.header(f"1. Kontu ekonomiskā klasifikācija (Profils: {S.active_profile})")
+
+if "cls_df" not in S:
+    if st.button("🔍 Sākt kontu TOC-FIN klasifikāciju", type="primary"):
+        with st.spinner(f"Salīdzina ar profilu '{S.active_profile}' un klasificē jaunos kontus..."):
+            try:
+                known, unknown = profile.lookup(an.leaves)
+                items = classify_with_claude(get_client(), MODEL, unknown) if unknown else []
+                by_id = {i["id"]: i for i in items}
+                rows = []
+                for lf in an.leaves:
+                    disp_lbl = display_labels.get(lf.id, lf.label)
+                    if lf.id in known:
+                        m = known[lf.id]
+                        grp = normalize_group_key(m["group"])
+                        rows.append(
+                            dict(
+                                id=lf.id,
+                                Konts=lf.label,
+                                Displeja_konts=disp_lbl,
+                                Grupa=grp,
+                                Ieņēmums=bool(grp.startswith("S_") or m.get("is_income", False)),
+                                Jautājums="",
+                                Avots="🗄️ Supabase profils",
+                            )
+                        )
+                    else:
+                        i = by_id.get(lf.id, {"group": "OE_OTHER", "is_income": False, "question": ""})
+                        grp = normalize_group_key(i.get("group", "OE_OTHER"))
+                        rows.append(
+                            dict(
+                                id=lf.id,
+                                Konts=lf.label,
+                                Displeja_konts=disp_lbl,
+                                Grupa=grp,
+                                Ieņēmums=bool(grp.startswith("S_") or i.get("is_income", False)),
+                                Jautājums=str(i.get("question") or "").strip(),
+                                Avots="🤖 AI klasifikācija",
+                            )
+                        )
+                S.cls_df = sort_cls_df(pd.DataFrame(rows))
+                S.editor_v = 0
+                S.known_count = len(known)
+                S.unknown_count = len(unknown)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Kļūda klasifikācijā: {e}")
+    if "cls_df" not in S:
+        st.stop()
+
+cls_df: pd.DataFrame = S.cls_df.copy()
+cls_df["Grupa"] = cls_df["Grupa"].map(normalize_group_key)
+if "Displeja_konts" not in cls_df.columns:
+    cls_df["Displeja_konts"] = cls_df["id"].map(lambda x: display_labels.get(x, ""))
+
+if S.get("known_count", 0) > 0 or S.get("unknown_count", 0) > 0:
+    st.caption(
+        f"📌 No profila **{S.active_profile}** atpazīti **{S.get('known_count', 0)}** konti | "
+        f"Ar AI no jauna klasificēti **{S.get('unknown_count', 0)}** konti."
+    )
+
+# --- 2.A NESKAIDRO POZĪCIJU JAUTĀJUMI ---
+ambiguous_rows = cls_df[cls_df["Jautājums"].astype(str).str.strip() != ""]
+
+if len(ambiguous_rows) > 0 and not S.get("clarifications_done", False):
+    st.subheader("❓ Nepieciešams vadības lēmums par dažām pozīcijām")
+    st.info("Katram kontam jau ir iezīmēts aģenta visticamākais ieteikums. Mainiet tikai tad, ja pēc būtības pozīcija atbilst citai grupai.")
+
+    clarifications: dict[str, tuple[str, bool]] = {}
+    for _, r in ambiguous_rows.iterrows():
+        row_id = r["id"]
+        disp_name = r["Displeja_konts"]
+        agent_grp = normalize_group_key(r["Grupa"])
+        agent_sub_label = SUBGROUP_LABELS.get(agent_grp, agent_grp)
+        default_idx = get_radio_index_for_group(agent_grp)
+
+        st.markdown(f"**📌 {disp_name}** *(Aģenta sākotnējā hipotēze: `{agent_sub_label}`)*")
+        st.write(f"👉 **Aģenta jautājums:** {r['Jautājums']}")
+
+        choice = st.radio(
+            f"Kā klasificēt '{disp_name}'?",
+            options=RADIO_OPTIONS,
+            index=default_idx,
+            key=f"radio_{row_id}",
+        )
+        clarifications[row_id] = resolve_radio_choice(choice, agent_grp, r["Konts"])
+        st.markdown("---")
+
+    if st.button("✅ Apstiprināt atbildes un pāriet uz kontu tabulu", type="primary"):
+        for row_id, (new_group, is_inc) in clarifications.items():
+            mask = cls_df["id"] == row_id
+            cls_df.loc[mask, "Grupa"] = new_group
+            cls_df.loc[mask, "Ieņēmums"] = is_inc
+            cls_df.loc[mask, "Jautājums"] = ""
+        S.cls_df = sort_cls_df(cls_df)
+        S.clarifications_done = True
+        S.editor_v = S.get("editor_v", 0) + 1
+        st.rerun()
+    st.stop()
+
+# --- 2.B KONTU SADALĪJUMA TABULA ---
+hdr_col1, hdr_col2 = st.columns([3, 1])
+with hdr_col1:
+    st.subheader("📋 Kontu sadalījums pa grupām un apakšgrupām")
+with hdr_col2:
+    if st.button("🔃 Sakārtot tabulu pa grupām", use_container_width=True):
+        S.cls_df = sort_cls_df(cls_df)
+        S.editor_v = S.get("editor_v", 0) + 1
+        st.rerun()
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("🟡 S (Ieņēmumi)", f"{cls_df['Grupa'].str.startswith('S_').sum()} konti")
+c1_tvc = cls_df["Grupa"].str.startswith("TVC").sum()
+c2.metric("🟠 TVC (Mainīgās)", f"{c1_tvc} konti")
+c3.metric("🟤 OE (Uzturēšana)", f"{cls_df['Grupa'].str.startswith('OE_').sum()} konti")
+c4.metric("⚪ Izslēgtie (Virtuālie)", f"{(cls_df['Grupa'] == 'EXCLUDED').sum()} konti")
+
+view_df = pd.DataFrame(
+    {
+        "Konts": cls_df["Displeja_konts"].tolist(),
+        "Lielā grupa": [get_main_cat(g) for g in cls_df["Grupa"]],
+        "Apakšgrupa (Rinda atskaitē)": [SUBGROUP_LABELS[normalize_group_key(g)] for g in cls_df["Grupa"]],
+    }
+)
+
+full_editor_height = (len(view_df) + 1) * 36 + 14
+editor_key = f"clean_cls_editor_v_{S.get('editor_v', 0)}"
+
+edited_view = st.data_editor(
+    view_df,
+    hide_index=True,
+    use_container_width=True,
+    height=full_editor_height,
+    key=editor_key,
+    disabled=["Konts"],
+    column_config={
+        "Konts": st.column_config.TextColumn("Konta nosaukums", width="large"),
+        "Lielā grupa": st.column_config.SelectboxColumn(
+            "Lielā grupa",
+            options=list(MAIN_GROUP_TO_DEFAULT_SUB.keys()),
+            required=True,
+            width="medium",
+        ),
+        "Apakšgrupa (Rinda atskaitē)": st.column_config.SelectboxColumn(
+            "Apakšgrupa / Rinda atskaitē",
+            options=list(SUBGROUP_LABELS.values()),
+            required=True,
+            width="large",
+        ),
+    },
+)
+
+updated_groups: list[str] = []
+changed = False
+
+for pos_idx in range(len(cls_df)):
+    old_grp = normalize_group_key(cls_df.iloc[pos_idx]["Grupa"])
+    old_main = get_main_cat(old_grp)
+    old_sub = SUBGROUP_LABELS[old_grp]
+
+    new_main = edited_view.iloc[pos_idx]["Lielā grupa"]
+    new_sub = edited_view.iloc[pos_idx]["Apakšgrupa (Rinda atskaitē)"]
+
+    if new_sub != old_sub and new_sub in LABEL_TO_KEY:
+        new_grp = LABEL_TO_KEY[new_sub]
+        updated_groups.append(new_grp)
+        changed = True
+    elif new_main != old_main and new_main in MAIN_GROUP_TO_DEFAULT_SUB:
+        new_grp = MAIN_GROUP_TO_DEFAULT_SUB[new_main]
+        updated_groups.append(new_grp)
+        changed = True
+    else:
+        updated_groups.append(old_grp)
+
+if changed:
+    cls_df["Grupa"] = updated_groups
+    cls_df["Ieņēmums"] = cls_df["Grupa"].str.startswith("S_")
+    S.cls_df = cls_df
+    S.editor_v = S.get("editor_v", 0) + 1
+    st.rerun()
+
+# ------------------------------------------------------------------ 3. GALA APRĒĶINS UN AUTOMĀTISKA SAGLABĀŠANA VĒSTURĒ
+st.header("2. TOC-FIN Diagnostika un Lēmumu Atbalsts")
+
+rep_col1, rep_col2 = st.columns([2, 1])
+with rep_col1:
+    default_rep_name = f"{Path(uploaded.name).stem} ({datetime.now().strftime('%d.%m.%Y')})"
+    report_custom_name = st.text_input("Atskaites nosaukums saglabāšanai vēsturē:", value=default_rep_name)
+
+if st.button("🚀 Apstiprināt klasifikāciju, veikt aprēķinu un saglabāt tabulu", type="primary"):
+    cls_sorted = sort_cls_df(cls_df)
+    S.cls_df = cls_sorted
+    S.editor_v = S.get("editor_v", 0) + 1
+
+    mapping = {
+        r["id"]: {
+            "group": normalize_group_key(r["Grupa"]),
+            "is_income": bool(str(r["Grupa"]).startswith("S_") or r["Ieņēmums"]),
+        }
+        for _, r in cls_sorted.iterrows()
+    }
+    pos = next((l.pos for l in an.ex.lines if l.row == stc.result_row), None)
+    reported = an.ex.lines[pos].vals if pos is not None else None
+
+    res = compute_toc(an.leaves, mapping, an.ex.period_cols, reported)
+    S.result = res
+    S.pop("loaded_report_meta", None)
+
+    if profile.is_connected:
+        ok_map, cnt_map = profile.save(an.leaves, mapping)
+        ok_rep, rep_id = profile.save_report(
+            report_name=report_custom_name.strip() or default_rep_name,
+            file_name=uploaded.name,
+            res_obj=res,
+            commentary="",
+        )
+        S.current_report_id = rep_id
+        if ok_map and ok_rep:
+            st.toast(f"✅ Saglabāti {cnt_map} konti profilā '{S.active_profile}' un finanšu tabula pievienota arhīvam!", icon="🗄️")
+        elif not ok_rep:
+            st.warning(f"Konti saglabāti, bet neizdevās saglabāt atskaites tabulu (vai palaidāt jauno SQL?): {profile.last_error}")
+
+    S.pop("commentary", None)
+    S.chat = []
+    st.rerun()
+
+if "result" in S:
+    render_results_and_simulation(S.result)
