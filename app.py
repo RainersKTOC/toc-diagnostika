@@ -1,5 +1,5 @@
 """
-app.py — TOC-FIN Finanšu diagnostikas un vadības lēmumu sistēma (v20.0)
+app.py — TOC-FIN Finanšu diagnostikas un vadības lēmumu sistēma (v21.0)
 Project ID: amprqueamdcxpjufigvm
 """
 from __future__ import annotations
@@ -12,6 +12,7 @@ import os
 import re
 from pathlib import Path
 
+import altair as alt
 import anthropic
 import numpy as np
 import pandas as pd
@@ -190,7 +191,6 @@ def parse_period_month_year(col_name: str) -> tuple[int | None, int | None]:
 
 
 def strip_excluded_rows(res):
-    """Izņem 'Izslēgtie' (EXCL / EXCLUDED) rindas no tabulām, lai tās nekad neparādās finanšu pārskatā."""
     excl_label = GROUPS.get("EXCLUDED", ("Izslēgtie (Amortizācija / Virtuālā nauda)", "EXCL"))[0]
     drop_rows = [
         r for r in res.amounts.index
@@ -206,8 +206,65 @@ def strip_excluded_rows(res):
     return res
 
 
+def filter_result_by_months(res, selected_months: list[str], all_months: list[str]):
+    """
+    Izfiltrē Finanšu pārskata tabulu pēc izvēlētajiem mēnešiem un dinamiski pārrēķina
+    YTD, AVG YTD un KPI kolonnas šim izvēlētajam periodam.
+    """
+    if not selected_months or len(selected_months) == len(all_months):
+        return res
+
+    sub_amounts = res.amounts[selected_months].copy().astype(float)
+    # Nosakām gada prefiksu YTD/AVG kolonnām
+    years_found = []
+    for m_col in selected_months:
+        _, yr = parse_period_month_year(m_col)
+        if yr and yr not in years_found:
+            years_found.append(yr)
+    yr_prefix = f"{years_found[-1]} " if len(years_found) == 1 else ""
+    ytd_col = f"{yr_prefix}YTD".strip()
+    avg_col = f"{yr_prefix}AVG YTD".strip()
+
+    sub_amounts[ytd_col] = sub_amounts[selected_months].sum(axis=1)
+    sub_amounts[avg_col] = sub_amounts[selected_months].mean(axis=1)
+
+    sub_main_dict = {}
+    for c in sub_amounts.columns:
+        sub_main_dict[c] = sub_amounts[c]
+        s_val = sub_amounts.loc["S", c] if "S" in sub_amounts.index else 0.0
+        sub_main_dict[f"%|{c}"] = np.where(s_val != 0, sub_amounts[c] / s_val, np.nan)
+    sub_main = pd.DataFrame(sub_main_dict, index=sub_amounts.index)
+
+    def _calc_kpi_col(col_s: pd.Series) -> dict[str, float]:
+        S_ = col_s.get("S", 0.0)
+        T_ = col_s.get("T", 0.0)
+        OE_ = col_s.get("OE", 0.0)
+        aw = col_s.get(GROUPS["OE_ADMIN_WAGES"][0], 0.0)
+        ww = col_s.get(GROUPS["OE_WORKER_WAGES"][0], 0.0)
+        div = lambda a, b: a / b if b else np.nan
+        return {
+            "PR = T/OE": div(T_, OE_),
+            "T% = T/S": div(T_, S_),
+            "Eiro Sales / Eiro algas kopā": div(S_, aw + ww),
+            "Eiro Sales / Eiro administrācijas algas": div(S_, aw),
+            "Eiro Sales / Eiro strādnieku algas": div(S_, ww),
+        }
+
+    kpi_cols_dict = {c: _calc_kpi_col(sub_amounts[c]) for c in sub_amounts.columns}
+    sub_kpi = pd.DataFrame(kpi_cols_dict)
+
+    return LoadedReportResult(
+        amounts=sub_amounts,
+        main=sub_main,
+        kpi=sub_kpi,
+        row_kinds=dict(res.row_kinds),
+        reconciliation=getattr(res, "reconciliation", pd.DataFrame()),
+        by_group=getattr(res, "by_group", {}),
+    )
+
+
 def compute_cumulative_toc_df(amounts_df: pd.DataFrame, fy_start_month: int = 1) -> tuple[pd.DataFrame, list[str], set[str]]:
-    target_rows = [r for r in ["S", "TVC", "T", "NP"] if r in amounts_df.index]
+    target_rows = [r for r in ["S", "TVC", "T", "OE", "NP"] if r in amounts_df.index]
     period_cols = [
         c for c in amounts_df.columns
         if not ("YTD" in str(c).upper() or "AVG" in str(c).upper() or "KOPĀ" in str(c).upper() or "IZMAIŅA" in str(c).upper())
@@ -234,14 +291,96 @@ def compute_cumulative_toc_df(amounts_df: pd.DataFrame, fy_start_month: int = 1)
         cum_data[col] = running.copy()
 
     cum_df = pd.DataFrame(cum_data, index=target_rows)
+    # Tabulā rādām S, TVC, T, NP
+    table_rows = [r for r in ["S", "TVC", "T", "NP"] if r in cum_df.index]
+    cum_table_df = cum_df.loc[table_rows].copy()
     row_labels = {
         "S": "S (uzkrājošais)",
         "TVC": "TVC (uzkrājošais)",
         "T": "T (uzkrājošais)",
         "NP": "NP (uzkrājošais)",
     }
-    cum_df.index = [row_labels.get(r, r) for r in cum_df.index]
-    return cum_df, period_cols, fy_boundary_cols
+    cum_table_df.index = [row_labels.get(r, r) for r in cum_table_df.index]
+    return cum_table_df, period_cols, fy_boundary_cols
+
+
+def render_toc_lines_chart(amounts_df: pd.DataFrame, fy_start_month: int = 1) -> None:
+    """Vizualizē S, TVC, T, OE un NP līknes pa mēnešiem precīzās TOC grupu krāsās."""
+    period_cols = [
+        c for c in amounts_df.columns
+        if not ("YTD" in str(c).upper() or "AVG" in str(c).upper() or "KOPĀ" in str(c).upper() or "IZMAIŅA" in str(c).upper())
+    ]
+    if not period_cols:
+        return
+
+    st.markdown('<div class="toc-sec-heading">Galveno rādītāju dinamika (S, TVC, T, OE, NP)</div>', unsafe_allow_html=True)
+    chart_mode = st.radio(
+        "Grafika skats",
+        options=["Ikmēneša rādītāji", "Uzkrājošie rādītāji"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="toc_chart_mode_radio",
+    )
+
+    series_order = ["S", "TVC", "T", "Uzturēšanas izmaksas (OE)", "NP"]
+    # Krāsas atbilstoši TOC grupām (S dzeltens, TVC brūns/oranžs, T zils, OE gaiši oranžs, NP zaļš)
+    color_scale = alt.Scale(
+        domain=series_order,
+        range=["#FFF200", "#C55A11", "#00B0F0", "#F4B183", "#70AD47"],
+    )
+
+    raw_rows = [r for r in ["S", "TVC", "T", "OE", "NP"] if r in amounts_df.index]
+    if chart_mode == "Ikmēneša rādītāji":
+        plot_df = amounts_df.loc[raw_rows, period_cols].copy().astype(float)
+    else:
+        plot_df = pd.DataFrame(index=raw_rows, columns=period_cols, dtype=float)
+        running = pd.Series(0.0, index=raw_rows)
+        for idx, col in enumerate(period_cols):
+            m_num, _ = parse_period_month_year(str(col))
+            if idx == 0 or (m_num is not None and m_num == fy_start_month):
+                running = amounts_df.loc[raw_rows, col].fillna(0.0).astype(float).copy()
+            else:
+                running = running + amounts_df.loc[raw_rows, col].fillna(0.0).astype(float)
+            plot_df[col] = running
+
+    rename_map = {"OE": "Uzturēšanas izmaksas (OE)"}
+    plot_df.index = [rename_map.get(r, r) for r in plot_df.index]
+
+    records = []
+    for r_name in plot_df.index:
+        for idx_p, p_col in enumerate(period_cols):
+            val = float(plot_df.loc[r_name, p_col])
+            records.append(
+                {
+                    "Periods": str(p_col),
+                    "Secība": idx_p,
+                    "Rādītājs": r_name,
+                    "Summa (€)": round(val, 0),
+                }
+            )
+    long_df = pd.DataFrame(records)
+
+    base = alt.Chart(long_df).encode(
+        x=alt.X("Periods:N", sort=period_cols, title="Periods", axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("Summa (€):Q", title="Summa (€)", axis=alt.Axis(format=",.0f")),
+        color=alt.Color(
+            "Rādītājs:N",
+            scale=color_scale,
+            legend=alt.Legend(title="Rādītājs", orient="top"),
+        ),
+        tooltip=[
+            alt.Tooltip("Periods:N", title="Periods"),
+            alt.Tooltip("Rādītājs:N", title="Rādītājs"),
+            alt.Tooltip("Summa (€):Q", title="Summa (€)", format=",.0f"),
+        ],
+    )
+
+    lines = base.mark_line(strokeWidth=3)
+    points = base.mark_circle(size=75)
+    zero_rule = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(strokeDash=[4, 4], color="#888888").encode(y="y:Q")
+
+    chart = (zero_rule + lines + points).properties(height=380).interactive()
+    st.altair_chart(chart, use_container_width=True)
 
 
 MAIN_GROUP_OPTIONS = [
@@ -451,19 +590,19 @@ def compute_toc_with_dynamic_subgroups(leaves, mapping: dict[str, dict], period_
 
 def _kpi_cond_color(idx_name: str, val: float, row_vals: list[float]) -> str:
     """
-    Nosacījumu formatējums (Zaļš / Oranžs / Sarkans) produktivitātes rādītājiem:
-    - PR = T/OE: < 1.00 = Sarkans (#FADBD8), 1.00..1.15 = Oranžs (#FDEBD0), >= 1.15 = Zaļš (#D4EFDF)
+    Nosacījumu formatējums (Zaļš / Oranžs / Sarkans) produktivitātes rādītājiem (ieskaitot YTD un AVG YTD):
+    - PR = T/OE: < 1.00 = Sarkans (#FADBD8), 1.00..1.14 = Dzeltens/Oranžs (#FCF3CF), >= 1.15 = Zaļš (#D4EFDF)
     - Pārējām rindām: salīdzina ar mēnešu sadalījumu (33% un 67% kvantiles).
     """
     if pd.isna(val):
         return "#F8F9F9"
     if idx_name.startswith("PR"):
         if val >= 1.15:
-            return "#D4EFDF"  # Maigi zaļš
+            return "#D4EFDF"
         elif val >= 1.00:
-            return "#FCF3CF"  # Maigi dzeltens / oranžs
+            return "#FCF3CF"
         else:
-            return "#FADBD8"  # Maigi sarkans
+            return "#FADBD8"
 
     clean = [float(x) for x in row_vals if not pd.isna(x)]
     if len(clean) < 2:
@@ -490,7 +629,6 @@ def render_unified_toc_tables_html(
     show_cumulative: bool = True,
     kpi_conditional_format: bool = True,
 ) -> str:
-    # Pārliecināmies, ka Izslēgtie konti nekad neparādās tabulā
     valid_rows = [
         r for r in amounts_df.index
         if row_kinds.get(r) not in ("EXCL", "EXCLUDED") and not str(r).lower().startswith("izslēgt")
@@ -513,10 +651,10 @@ def render_unified_toc_tables_html(
         font-size: 16px;
         font-weight: 700;
         margin: 18px 0 8px 0;
-        padding: 4px 10px;
+        padding: 5px 12px;
         background-color: #2C3E50;
         color: #FFFFFF !important;
-        border-radius: 4px;
+        border-radius: 5px;
         display: inline-block;
     }
     table.toc-unified { width: 100%; border-collapse: collapse; font-family: 'Calibri', 'Segoe UI', sans-serif; font-size: 12px; table-layout: auto; }
@@ -577,7 +715,6 @@ def render_unified_toc_tables_html(
     html.append("</tbody></table></div>")
 
     # --- 2. ATSEVIŠĶA TABULA: PRODUKTIVITĀTES UN ATDEVES RĀDĪTĀJI ---
-    # Šī tabula ir atdalīta, tāpēc tai ir tieši tik kolonnu, cik ir kpi_df (bez tukšām šūnām malā!)
     kpi_periods = [p for p in periods if p in kpi_df.columns]
     month_only_kpi_cols = [
         p for p in kpi_periods
@@ -598,7 +735,6 @@ def render_unified_toc_tables_html(
     for i, idx_name in enumerate(kpi_df.index):
         b_bot = "2.5px solid #404040" if i == len(kpi_df.index) - 1 else "1px solid #BFBFBF"
         html.append(f'<tr style="background-color: #FFFFFF; color: #000000; border-top: 1px solid #BFBFBF; border-bottom: {b_bot};">')
-        # Tikai rādītāja nosaukums ir bold (font-weight: 700), bet skaitļi ir parastā šriftā (font-weight: 400)
         html.append(f'<td class="lbl-main" style="background-color: #F2F4F4; font-weight: 700; color: #000000;" title="{idx_name}">{idx_name}</td>')
 
         row_month_vals = [kpi_df.loc[idx_name, mp] for mp in month_only_kpi_cols] if month_only_kpi_cols else list(kpi_df.loc[idx_name].values)
@@ -612,9 +748,10 @@ def render_unified_toc_tables_html(
             else:
                 s = f"{v:.2f}"
 
+            # Tagad arī YTD un AVG YTD kolonnas tiek iekrāsotas ar conditional formatting!
             if p in grey_cols:
                 bg_cell = "#E5E7E9"
-            elif kpi_conditional_format and (p in month_only_kpi_cols or "SIMULĀCIJA" in str(p).upper()):
+            elif kpi_conditional_format:
                 bg_cell = _kpi_cond_color(idx_name, v, row_month_vals)
             else:
                 bg_cell = "#FFFFFF"
@@ -645,7 +782,6 @@ def render_unified_toc_tables_html(
 
         s_row_label = cum_df.index[0] if len(cum_df.index) > 0 else None
 
-        # Krāsas TIKAI nosaukuma šūnai pirmajā kolonnā (S dzeltens, TVC oranžs, T zils, NP zaļš)
         cum_label_fills = {
             "S (uzkrājošais)": FILLS["S"][0],
             "TVC (uzkrājošais)": FILLS["TVC"][0],
@@ -656,17 +792,16 @@ def render_unified_toc_tables_html(
         for idx_c, c_name in enumerate(cum_df.index):
             b_bot = "2.5px solid #404040" if idx_c == len(cum_df.index) - 1 else "1px solid #BFBFBF"
             lbl_bg_hex = cum_label_fills.get(c_name, "F2F4F4")
+            is_np_cum = c_name.startswith("NP")
 
             html.append(
                 f'<tr style="background-color: #FFFFFF; color: #000000; font-weight: 400; '
                 f'border-top: 1px solid #BFBFBF; border-bottom: {b_bot};">'
             )
-            # Pirmā kolonna (nosaukums) ir bold un ar savu krāsu (S dzeltens utt.)
             html.append(
                 f'<td class="lbl-main" style="background-color: #{lbl_bg_hex}; font-weight: 700; color: #000000;" title="{c_name}">{c_name}</td>'
             )
 
-            # Visi skaitļi un procenti ir parastā šriftā (font-weight: 400) uz tīra balta/gaiša fona
             for p in periods:
                 if p in cum_df.columns:
                     val_c = cum_df.loc[c_name, p]
@@ -674,21 +809,38 @@ def render_unified_toc_tables_html(
                     pct_c = (val_c / s_c) if (s_c and not pd.isna(s_c) and s_c != 0) else np.nan
                     val_s = fmt_num(val_c)
                     pct_s = fmt_pct_int(pct_c)
+
+                    # Conditional formatting NP (uzkrājošais) rindai:
+                    # Ja attiecīgajā mēnesī NP gāja ar mīnusu (vai pats uzkrājošais NP < 0) -> sarkans (#FADBD8), ja pozitīvi -> zaļš (#D4EFDF)
+                    if is_np_cum and kpi_conditional_format:
+                        month_np_val = float(amounts_df.loc["NP", p]) if "NP" in amounts_df.index and p in amounts_df.columns else val_c
+                        np_bg = "#D4EFDF" if (month_np_val >= 0 and val_c >= 0) else "#FADBD8"
+                    else:
+                        np_bg = "#FFFFFF"
+
                     html.append(
-                        f'<td class="val-col" style="background-color: #FFFFFF; color: #000000; font-weight: 400;">{val_s}</td>'
-                        f'<td class="pct-col" style="background-color: #FFFFFF; color: #000000; font-weight: 400;">{pct_s}</td>'
+                        f'<td class="val-col" style="background-color: {np_bg}; color: #000000; font-weight: 400;">{val_s}</td>'
+                        f'<td class="pct-col" style="background-color: {np_bg}; color: #000000; font-weight: 400;">{pct_s}</td>'
                     )
                 else:
                     last_p = cum_periods[-1] if cum_periods else None
                     if last_p and "YTD" in str(p).upper() and "AVG" not in str(p).upper():
                         v_ytd = cum_df.loc[c_name, last_p]
+                        if is_np_cum and kpi_conditional_format:
+                            ytd_bg = "#D4EFDF" if v_ytd >= 0 else "#FADBD8"
+                        else:
+                            ytd_bg = "#F8F9F9"
                         html.append(
-                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: #F8F9F9; color: #000000; border-left: 1px solid #BFBFBF; border-right: 2px solid #595959; font-weight: 400;">{fmt_num(v_ytd)}</td>'
+                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: {ytd_bg}; color: #000000; border-left: 1px solid #BFBFBF; border-right: 2px solid #595959; font-weight: 400;">{fmt_num(v_ytd)}</td>'
                         )
                     elif last_p and "AVG" in str(p).upper() and len(cum_periods) > 0:
                         v_avg = cum_df.loc[c_name, last_p] / len(cum_periods)
+                        if is_np_cum and kpi_conditional_format:
+                            avg_bg = "#D4EFDF" if v_avg >= 0 else "#FADBD8"
+                        else:
+                            avg_bg = "#F8F9F9"
                         html.append(
-                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: #F8F9F9; color: #000000; border-left: 1px solid #BFBFBF; border-right: 2px solid #595959; font-weight: 400;">{fmt_num(v_avg)}</td>'
+                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: {avg_bg}; color: #000000; border-left: 1px solid #BFBFBF; border-right: 2px solid #595959; font-weight: 400;">{fmt_num(v_avg)}</td>'
                         )
                     else:
                         html.append('<td colspan="2" style="background-color: #FFFFFF; border-left: 1px solid #BFBFBF; border-right: 2px solid #595959;"></td>')
@@ -731,7 +883,6 @@ st.markdown(
         margin-top: 4px !important;
         margin-bottom: 4px !important;
     }
-    /* Krāsainie simulācijas bloku virsraksti */
     .sim-col-header-s {
         background-color: #FFF200; color: #000000 !important; font-weight: 700;
         padding: 8px 12px; border-radius: 6px; margin-bottom: 10px; border-left: 5px solid #B7950B;
@@ -1221,13 +1372,12 @@ if S.get("view_mode") == "edit_accounts":
             st.rerun()
 
     with st.expander("Pievienot jaunu apakšgrupu (sadalīt izmaksas sīkāk)", expanded=False):
-        ns1, ns2, ns3 = st.columns([2, 1.5, 1])
+        ns1, ns2, ns3 = st.columns([2, 1.5, 1], vertical_alignment="bottom")
         with ns1:
             custom_sub_lbl = st.text_input("Jaunās apakšgrupas nosaukums", placeholder="piem., Pārējās administrācijas izmaksas", key="ed_new_sub_lbl")
         with ns2:
             custom_sub_main = st.selectbox("Lielā grupa", options=["Uzturēšanas izmaksas (OE)", "TVC (Mainīgās izmaksas)", "S (Ieņēmumi)"], key="ed_new_sub_main")
         with ns3:
-            st.write("")
             if st.button("Pievienot apakšgrupu", use_container_width=True, key="ed_btn_add_sub"):
                 if custom_sub_lbl.strip():
                     m_c = "S" if custom_sub_main.startswith("S") else ("TVC" if custom_sub_main.startswith("TVC") else "OE")
@@ -1369,14 +1519,66 @@ def render_results_and_simulation(res, report_title: str = ""):
     if report_title:
         st.caption(f"Atvērta atskaite: **{report_title}**")
 
+    all_months = [c for c in res.amounts.columns if not ("YTD" in c or "AVG" in c)]
+    if not all_months:
+        all_months = list(res.amounts.columns)
+
+    # Nosakām pieejamos gadus filtrēšanai, ja uzņēmumam ir vairāki gadi
+    months_by_year: dict[int, list[str]] = {}
+    for m_col in all_months:
+        _, yr = parse_period_month_year(m_col)
+        if yr:
+            months_by_year.setdefault(yr, []).append(m_col)
+
     main_tab1, main_tab2 = st.tabs(["1. Finanšu diagnostika", "2. Scenāriju simulācija"])
 
     with main_tab1:
-        top_btn1, top_btn2, top_btn3, top_btn4 = st.columns([1.3, 1.3, 1.2, 0.9])
+        # Perioda un mēnešu filtrs Finanšu pārskata tabulai
+        fin_preset_opts = [f"Visi mēneši ({len(all_months)} mēn.)"]
+        for yr in sorted(months_by_year.keys()):
+            fin_preset_opts.append(f"{yr}. gads ({len(months_by_year[yr])} mēn.)")
+        if len(all_months) > 12:
+            fin_preset_opts.append("Pēdējie 12 mēneši")
+        if len(all_months) >= 6:
+            fin_preset_opts.append("Pirmie 6 mēneši")
+            fin_preset_opts.append("Pēdējie 6 mēneši")
+        fin_preset_opts.append("Manuāla izvēle")
+
+        fp1, fp2 = st.columns([1.2, 2.8], vertical_alignment="bottom")
+        with fp1:
+            fin_preset = st.selectbox("Periods pārskatam", options=fin_preset_opts, key="fin_period_preset")
+
+        fin_default_months = all_months
+        for yr in sorted(months_by_year.keys()):
+            if fin_preset.startswith(f"{yr}. gads"):
+                fin_default_months = months_by_year[yr]
+                break
+        if fin_preset == "Pēdējie 12 mēneši":
+            fin_default_months = all_months[-12:]
+        elif fin_preset == "Pirmie 6 mēneši":
+            fin_default_months = all_months[:6]
+        elif fin_preset == "Pēdējie 6 mēneši":
+            fin_default_months = all_months[-6:]
+
+        with fp2:
+            fin_selected_months = st.multiselect(
+                "Mēneši pārskata tabulā",
+                options=all_months,
+                default=fin_default_months,
+                key=f"fin_months_sel_{fin_preset}",
+            )
+
+        if not fin_selected_months:
+            st.warning("Izvēlieties vismaz vienu mēnesi finanšu pārskata tabulai.")
+            st.stop()
+
+        view_res = filter_result_by_months(res, fin_selected_months, all_months)
+
+        top_btn1, top_btn2, top_btn3, top_btn4 = st.columns([1.3, 1.3, 1.2, 0.9], vertical_alignment="center")
         try:
             xl_f, xl_v = io.BytesIO(), io.BytesIO()
-            build_excel(res, xl_f, formulas=True)
-            build_excel(res, xl_v, formulas=False)
+            build_excel(view_res, xl_f, formulas=True)
+            build_excel(view_res, xl_v, formulas=False)
             top_btn1.download_button(
                 "Lejupielādēt Excel (formulām)",
                 xl_f.getvalue(),
@@ -1394,8 +1596,8 @@ def render_results_and_simulation(res, report_title: str = ""):
         except Exception:
             xl_buf = io.BytesIO()
             with pd.ExcelWriter(xl_buf, engine="openpyxl") as writer:
-                res.amounts.to_excel(writer, sheet_name="TOC_Summas")
-                res.kpi.to_excel(writer, sheet_name="KPI")
+                view_res.amounts.to_excel(writer, sheet_name="TOC_Summas")
+                view_res.kpi.to_excel(writer, sheet_name="KPI")
             top_btn1.download_button(
                 "Lejupielādēt Excel",
                 xl_buf.getvalue(),
@@ -1404,7 +1606,7 @@ def render_results_and_simulation(res, report_title: str = ""):
                 use_container_width=True,
             )
         with top_btn3:
-            use_kpi_colors = st.checkbox("KPI krāsu indikācija (Zaļš/Oranžs/Sarkans)", value=True)
+            use_kpi_colors = st.checkbox("Krāsu indikācija (Zaļš/Oranžs/Sarkans)", value=True)
         with top_btn4:
             if st.button("Rediģēt kontus", use_container_width=True):
                 S.view_mode = "edit_accounts"
@@ -1413,10 +1615,10 @@ def render_results_and_simulation(res, report_title: str = ""):
         st.subheader("Finanšu pārskata tabula")
         st.markdown(
             render_unified_toc_tables_html(
-                res.amounts,
-                res.main,
-                res.kpi,
-                res.row_kinds,
+                view_res.amounts,
+                view_res.main,
+                view_res.kpi,
+                view_res.row_kinds,
                 fy_start_month=S.get("fy_start_month", 1),
                 show_cumulative=True,
                 kpi_conditional_format=use_kpi_colors,
@@ -1424,17 +1626,20 @@ def render_results_and_simulation(res, report_title: str = ""):
             unsafe_allow_html=True,
         )
 
+        # Līniju grafiks zem Uzkrājošajiem rādītājiem ar S, TVC, T, OE un NP līknēm grupu krāsās
+        render_toc_lines_chart(view_res.amounts, fy_start_month=S.get("fy_start_month", 1))
+
         if getattr(res, "reconciliation", None) is not None and not res.reconciliation.empty:
             with st.expander("Kontrole: Salīdzinājums ar PZA"):
                 st.dataframe(res.reconciliation.style.format(fmt_num), use_container_width=True)
 
         st.markdown("---")
         st.subheader("Vadības kopsavilkums un secinājumi")
-        cum_df_md, _, _ = compute_cumulative_toc_df(res.amounts, fy_start_month=S.get("fy_start_month", 1))
+        cum_df_md, _, _ = compute_cumulative_toc_df(view_res.amounts, fy_start_month=S.get("fy_start_month", 1))
         tables_md = (
-            res.amounts.round(0).to_markdown()
+            view_res.amounts.round(0).to_markdown()
             + "\n\n"
-            + res.kpi.round(3).to_markdown()
+            + view_res.kpi.round(3).to_markdown()
             + "\n\nUzkrājošie rādītāji:\n"
             + cum_df_md.round(0).to_markdown()
         )
@@ -1467,35 +1672,37 @@ def render_results_and_simulation(res, report_title: str = ""):
     # ------------------------------------------------------------------ 2. SCENĀRIJU SIMULĀCIJA UN JAUNS PRODUKTS / PROJEKTS
     with main_tab2:
         st.subheader("Scenāriju simulācija")
-        all_months = [c for c in res.amounts.columns if not ("YTD" in c or "AVG" in c)]
-        if not all_months:
-            all_months = list(res.amounts.columns)
 
         s_children = [r for r in res.amounts.index if res.row_kinds.get(r) == "S_CHILD"]
         tvc_children = [r for r in res.amounts.index if res.row_kinds.get(r) == "TVC_CHILD"]
         oe_children = [r for r in res.amounts.index if res.row_kinds.get(r) == "OE_CHILD"]
 
-        p_col1, p_col2, p_col3 = st.columns([1.2, 2, 1])
+        sim_preset_opts = [f"Visi mēneši ({len(all_months)} mēn.)"]
+        for yr in sorted(months_by_year.keys()):
+            sim_preset_opts.append(f"{yr}. gads ({len(months_by_year[yr])} mēn.)")
+        if len(all_months) >= 6:
+            sim_preset_opts.append("Pirmie 6 mēneši")
+            sim_preset_opts.append("Pēdējie 6 mēneši")
+        sim_preset_opts.append("Manuāla izvēle")
+
+        # Vienā līmenī (vertical_alignment="bottom") Periods, Mēneši un poga "Notīrīt visas izmaiņas (uz 0)"
+        p_col1, p_col2, p_col3 = st.columns([1.2, 2.2, 1], vertical_alignment="bottom")
         with p_col1:
-            preset = st.selectbox(
-                "Periods",
-                options=[
-                    f"Visi mēneši ({len(all_months)} mēn.)",
-                    "Pirmie 6 mēneši" if len(all_months) >= 6 else "Pirmie 3",
-                    "Manuāla izvēle",
-                ],
-            )
-        if "6" in preset and len(all_months) >= 6:
+            preset = st.selectbox("Periods", options=sim_preset_opts, key="sim_preset_sel")
+
+        default_sel = all_months
+        for yr in sorted(months_by_year.keys()):
+            if preset.startswith(f"{yr}. gads"):
+                default_sel = months_by_year[yr]
+                break
+        if preset == "Pirmie 6 mēneši":
             default_sel = all_months[:6]
-        elif "3" in preset and len(all_months) >= 3:
-            default_sel = all_months[:3]
-        else:
-            default_sel = all_months
+        elif preset == "Pēdējie 6 mēneši":
+            default_sel = all_months[-6:]
 
         with p_col2:
-            selected_months = st.multiselect("Mēneši", options=all_months, default=default_sel)
+            selected_months = st.multiselect("Mēneši", options=all_months, default=default_sel, key=f"sim_m_{preset}")
         with p_col3:
-            st.write("")
             if st.button("Notīrīt visas izmaiņas (uz 0)", use_container_width=True):
                 for r_nm in s_children + tvc_children + oe_children:
                     S[f"sim_pct_{r_nm}"] = 0.0
@@ -1513,8 +1720,9 @@ def render_results_and_simulation(res, report_title: str = ""):
         base_sub = res.amounts[selected_months].copy().astype(float)
         base_sum = base_sub.sum(axis=1)
 
+        # Situācijas apraksts un Balss ieraksts precīzi vienā līmenī
         with st.expander("Aprakstīt vai ierunāt situāciju (AI automātiski saliks simulācijas skaitļus)", expanded=False):
-            d_col1, d_col2 = st.columns([2.2, 1])
+            d_col1, d_col2 = st.columns([2.2, 1], vertical_alignment="top")
             with d_col1:
                 sim_text_prompt = st.text_area(
                     "Situācijas apraksts",
@@ -1522,11 +1730,10 @@ def render_results_and_simulation(res, report_title: str = ""):
                     height=85,
                 )
             with d_col2:
-                st.caption("Balss ieraksts (pārlūka mikrofons)")
                 if hasattr(st, "audio_input"):
-                    st.audio_input("Ierunāt situāciju", label_visibility="collapsed")
+                    st.audio_input("Balss ieraksts (pārlūka mikrofons)")
                 else:
-                    st.caption("Izmantojiet ierīces diktofona taustiņu teksta laukā.")
+                    st.text_input("Balss ieraksts (pārlūka mikrofons)", value="Izmantojiet diktofonu", disabled=True)
 
             if st.button("Piemērot situāciju simulācijai", type="primary"):
                 if sim_text_prompt.strip():
@@ -1755,12 +1962,11 @@ def render_results_and_simulation(res, report_title: str = ""):
 
         # --- SIMULĀCIJAS SAGLABĀŠANA ---
         st.markdown("---")
-        sv_c1, sv_c2 = st.columns([2, 1])
+        sv_c1, sv_c2 = st.columns([2, 1], vertical_alignment="bottom")
         with sv_c1:
             sim_save_name = st.text_input(
-                "Simulācijas nosaukums",
+                "Simulācijas nosaukums saglabāšanai",
                 value=f"Simulācija ({datetime.now().strftime('%d.%m.%Y %H:%M')})",
-                label_visibility="collapsed",
             )
         with sv_c2:
             if st.button("Saglabāt simulāciju", type="primary", use_container_width=True):
@@ -1894,7 +2100,7 @@ with st.expander("PZA rindu korekcija"):
 
 st.header("1. Kontu klasifikācija")
 
-col_ig1, col_ig2 = st.columns([3, 1])
+col_ig1, col_ig2 = st.columns([3, 1], vertical_alignment="center")
 with col_ig1:
     ignore_memory = st.checkbox("Ignorēt iepriekšējo profilu atmiņu un klasificēt kontus pilnīgi no jauna (AI)", value=False)
 with col_ig2:
@@ -1998,7 +2204,7 @@ if len(ambiguous_rows) > 0 and not S.get("clarifications_done", False):
 show_accounts_block = not st.checkbox("Paslēpt kontu sadalījumu (rādīt tikai pārskata tabulu)", value=bool("result" in S))
 
 if show_accounts_block:
-    hdr_col1, hdr_col2 = st.columns([4, 1])
+    hdr_col1, hdr_col2 = st.columns([4, 1], vertical_alignment="bottom")
     with hdr_col1:
         st.subheader("Kontu sadalījums")
     with hdr_col2:
@@ -2008,13 +2214,12 @@ if show_accounts_block:
             st.rerun()
 
     with st.expander("Pievienot jaunu apakšgrupu (sadalīt izmaksas sīkāk)", expanded=False):
-        ac1, ac2, ac3 = st.columns([2, 1.5, 1])
+        ac1, ac2, ac3 = st.columns([2, 1.5, 1], vertical_alignment="bottom")
         with ac1:
             new_sub_title = st.text_input("Jaunās apakšgrupas nosaukums", placeholder="piem., Pārējās administrācijas izmaksas")
         with ac2:
             new_sub_parent = st.selectbox("Lielā grupa", options=["Uzturēšanas izmaksas (OE)", "TVC (Mainīgās izmaksas)", "S (Ieņēmumi)"])
         with ac3:
-            st.write("")
             if st.button("Pievienot", use_container_width=True):
                 if new_sub_title.strip():
                     m_code = "S" if new_sub_parent.startswith("S") else ("TVC" if new_sub_parent.startswith("TVC") else "OE")
@@ -2091,7 +2296,7 @@ if show_accounts_block:
 st.header("2. Aprēķins un analīze")
 
 default_rep_name = f"{Path(uploaded.name).stem} ({datetime.now().strftime('%d.%m.%Y')})"
-col_rn, col_btn = st.columns([2, 1])
+col_rn, col_btn = st.columns([2, 1], vertical_alignment="bottom")
 with col_rn:
     report_custom_name = st.text_input("Atskaites nosaukums", value=default_rep_name, label_visibility="collapsed")
 with col_btn:
