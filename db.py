@@ -1,5 +1,8 @@
 """
-db.py — Supabase datubāzes integrācija ar uzņēmumu autentifikāciju un datu izolāciju
+db.py — Supabase datubāzes integrācija (v4.0):
+- Administratora (Master) klientu pārvaldība, paroles, limiti un lietojuma uzskaite
+- Klientu datu stingra izolācija
+- Tieša saglabāto kontu rediģēšana un atskaišu arhīvs
 Project ID: amprqueamdcxpjufigvm
 """
 from __future__ import annotations
@@ -31,6 +34,16 @@ def _get_credentials() -> tuple[str, str]:
         key = str(os.environ.get("SUPABASE_KEY", "")).strip() or DEFAULT_SUPABASE_KEY
 
     return url.strip().strip('"').strip("'"), key.strip().strip('"').strip("'")
+
+
+def get_admin_password() -> str:
+    try:
+        pw = str(st.secrets.get("ADMIN_PASSWORD", "")).strip()
+        if pw:
+            return pw
+    except Exception:
+        pass
+    return os.environ.get("ADMIN_PASSWORD", "TocAdmin2026!")
 
 
 @st.cache_resource
@@ -67,57 +80,196 @@ class SupabaseProfileStore:
     def is_connected(self) -> bool:
         return self.client is not None
 
-    # ------------------------------------------------------------------ AUTENTIFIKĀCIJA UN UZŅĒMUMI
-    def authenticate(self, company_name: str, password: str) -> tuple[bool, str]:
-        """Pārbauda uzņēmuma vārdu un paroli."""
+    # ------------------------------------------------------------------ AUTENTIFIKĀCIJA UN ADMIN PĀRVALDĪBA
+    def authenticate(self, username: str, password: str) -> tuple[bool, str, bool]:
+        """
+        Atgriež (veiksmīgi, ziņojums, ir_admins).
+        Ja username == 'admin', pārbauda administratora paroli.
+        """
+        u_clean = str(username or "").strip()
+        if not u_clean or not password:
+            return False, "Ievadiet lietotājvārdu un paroli.", False
+
+        if u_clean.lower() == "admin":
+            if password == get_admin_password():
+                return True, "Administratora piekļuve apstiprināta.", True
+            return False, "Nepareiza administratora parole.", False
+
         if not self.client:
-            return False, "Nav datubāzes savienojuma."
-        c_name = company_name.strip()
-        if not c_name or not password:
-            return False, "Ievadiet uzņēmuma nosaukumu un paroli."
+            return False, "Nav datubāzes savienojuma.", False
 
         pw_hash = _hash_pw(password)
         try:
-            res = self.client.table("company_profiles").select("*").eq("company_name", c_name).limit(1).execute()
+            res = (
+                self.client.table("company_profiles")
+                .select("*")
+                .eq("company_name", u_clean)
+                .limit(1)
+                .execute()
+            )
             rows = res.data or []
             if not rows:
-                return False, "Šāds uzņēmums neeksistē. Lūdzu, izveidojiet jaunu profilu."
-            
-            if rows[0]["password_hash"] == pw_hash:
-                self.user_id = c_name
-                return True, "Veiksmīga ielagošanās!"
-            else:
-                return False, "Nepareiza parole!"
-        except Exception as e:
-            return False, f"Kļūda autorizācijā: {e}"
+                return False, "Lietotājs nav atrasts. Sazinieties ar sistēmas administratoru.", False
 
-    def register_company(self, company_name: str, password: str) -> tuple[bool, str]:
-        """Reģistrē jaunu uzņēmumu datubāzē."""
+            row = rows[0]
+            if row.get("is_active") is False:
+                return False, "Šis profils ir deaktivizēts. Sazinieties ar administratoru.", False
+
+            if row["password_hash"] == pw_hash:
+                self.user_id = row["company_name"]
+                return True, "Veiksmīga ielogošanās.", False
+            return False, "Nepareiza parole.", False
+        except Exception as e:
+            return False, f"Kļūda autorizācijā: {e}", False
+
+    def check_quota(self) -> tuple[bool, str]:
+        """Pārbauda, vai klientam nav izsmelts mēneša aprēķinu limits."""
+        if not self.client or not self.user_id:
+            return True, ""
+        try:
+            res = (
+                self.client.table("company_profiles")
+                .select("is_active, monthly_limit, usage_count")
+                .eq("company_name", self.user_id)
+                .limit(1)
+                .execute()
+            )
+            if not res.data:
+                return True, ""
+            r = res.data[0]
+            if r.get("is_active") is False:
+                return False, "Konts ir deaktivizēts."
+            lim = int(r.get("monthly_limit") or 50)
+            used = int(r.get("usage_count") or 0)
+            if used >= lim:
+                return False, f"Sasniegts profila aprēķinu limits ({used}/{lim}). Sazinieties ar administratoru."
+            return True, f"{used}/{lim}"
+        except Exception:
+            return True, ""
+
+    def increment_usage(self) -> None:
+        if not self.client or not self.user_id:
+            return
+        try:
+            res = (
+                self.client.table("company_profiles")
+                .select("id, usage_count")
+                .eq("company_name", self.user_id)
+                .limit(1)
+                .execute()
+            )
+            if res.data:
+                cur = int(res.data[0].get("usage_count") or 0)
+                self.client.table("company_profiles").update({"usage_count": cur + 1}).eq("id", res.data[0]["id"]).execute()
+        except Exception:
+            pass
+
+    def list_all_companies_admin(self) -> list[dict]:
+        """Administratora saraksts ar visiem klientu profiliem, kontu skaitu un atskaišu skaitu."""
+        if not self.client:
+            return []
+        try:
+            res = self.client.table("company_profiles").select("*").order("created_at", desc=True).execute()
+            companies = res.data or []
+
+            # Saskaitām kontus un atskaites katram
+            acc_res = self.client.table("account_mappings").select("user_id").execute()
+            rep_res = self.client.table("saved_reports").select("profile_name").execute()
+
+            acc_counts: dict[str, int] = {}
+            for r in acc_res.data or []:
+                u = r.get("user_id", "")
+                acc_counts[u] = acc_counts.get(u, 0) + 1
+
+            rep_counts: dict[str, int] = {}
+            for r in rep_res.data or []:
+                p = r.get("profile_name", "")
+                rep_counts[p] = rep_counts.get(p, 0) + 1
+
+            out = []
+            for c in companies:
+                cname = c["company_name"]
+                out.append(
+                    {
+                        "id": c["id"],
+                        "company_name": cname,
+                        "is_active": bool(c.get("is_active", True)),
+                        "monthly_limit": int(c.get("monthly_limit") or 50),
+                        "usage_count": int(c.get("usage_count") or 0),
+                        "notes": str(c.get("notes") or ""),
+                        "accounts_count": acc_counts.get(cname, 0),
+                        "reports_count": rep_counts.get(cname, 0),
+                        "created_at": str(c.get("created_at", ""))[:10],
+                    }
+                )
+            return out
+        except Exception as e:
+            self.last_error = str(e)
+            return []
+
+    def create_or_update_company_admin(
+        self,
+        company_name: str,
+        password: str = "",
+        monthly_limit: int = 50,
+        is_active: bool = True,
+        notes: str = "",
+        reset_usage: bool = False,
+    ) -> tuple[bool, str]:
+        """Ļauj administratoram izveidot jaunu klientu vai atjaunināt paroli / limitus esošam."""
         if not self.client:
             return False, "Nav datubāzes savienojuma."
         c_name = company_name.strip()
-        if not c_name or not password:
-            return False, "Ievadiet uzņēmuma nosaukumu un paroli."
-        if len(password) < 4:
-            return False, "Parolei jābūt vismaz 4 simbolus garai."
+        if not c_name:
+            return False, "Norādiet uzņēmuma nosaukumu."
+        if c_name.lower() == "admin":
+            return False, "Rezervēts lietotājvārds."
 
-        pw_hash = _hash_pw(password)
         try:
-            # Pārbaudām, vai jau eksistē
-            chk = self.client.table("company_profiles").select("company_name").eq("company_name", c_name).execute()
+            chk = self.client.table("company_profiles").select("*").eq("company_name", c_name).execute()
             if chk.data:
-                return False, "Šāds uzņēmuma nosaukums jau ir aizņemts. Izvēlieties citu vai ielogojieties."
-
-            self.client.table("company_profiles").insert({
-                "company_name": c_name,
-                "password_hash": pw_hash
-            }).execute()
-
-            self.user_id = c_name
-            return True, "Profils veiksmīgi izveidots!"
+                upd: dict = {
+                    "monthly_limit": int(monthly_limit),
+                    "is_active": bool(is_active),
+                    "notes": notes,
+                }
+                if password.strip():
+                    if len(password.strip()) < 4:
+                        return False, "Parolei jābūt vismaz 4 simbolus garai."
+                    upd["password_hash"] = _hash_pw(password.strip())
+                if reset_usage:
+                    upd["usage_count"] = 0
+                self.client.table("company_profiles").update(upd).eq("company_name", c_name).execute()
+                return True, f"Klienta '{c_name}' iestatījumi atjaunināti."
+            else:
+                if len(password.strip()) < 4:
+                    return False, "Jaunam profilam jānorāda parole (min. 4 simboli)."
+                payload = {
+                    "company_name": c_name,
+                    "password_hash": _hash_pw(password.strip()),
+                    "monthly_limit": int(monthly_limit),
+                    "is_active": bool(is_active),
+                    "usage_count": 0,
+                    "notes": notes,
+                }
+                self.client.table("company_profiles").insert(payload).execute()
+                return True, f"Klients '{c_name}' veiksmīgi izveidots."
         except Exception as e:
-            return False, f"Kļūda reģistrācijā: {e}"
+            return False, f"Datubāzes kļūda: {e}"
 
+    def delete_company_admin(self, company_name: str) -> bool:
+        if not self.client or not company_name:
+            return False
+        try:
+            self.client.table("account_mappings").delete().eq("user_id", company_name).execute()
+            self.client.table("saved_reports").delete().eq("profile_name", company_name).execute()
+            self.client.table("company_profiles").delete().eq("company_name", company_name).execute()
+            return True
+        except Exception as e:
+            self.last_error = str(e)
+            return False
+
+    # ------------------------------------------------------------------ KONTU ATMIŅA UN REDIĢĒŠANA
     def count_saved(self) -> int:
         if not self.client or not self.user_id:
             return 0
@@ -133,7 +285,50 @@ class SupabaseProfileStore:
             self.last_error = str(e)
             return 0
 
-    # ------------------------------------------------------------------ KONTU KLASIFIKĀCIJAS ATMIŅA
+    def list_saved_mappings(self) -> list[dict]:
+        """Atgriež visus profila saglabātos kontus tiešai rediģēšanai."""
+        if not self.client or not self.user_id:
+            return []
+        try:
+            res = (
+                self.client.table("account_mappings")
+                .select("id, path_label, account_label, toc_group, is_income")
+                .eq("user_id", self.user_id)
+                .order("account_label")
+                .execute()
+            )
+            return res.data or []
+        except Exception as e:
+            self.last_error = str(e)
+            return []
+
+    def update_saved_mappings_direct(self, rows: list[dict]) -> bool:
+        """Saglabā rediģētos kontu kartējumus tieši Supabase tabulā."""
+        if not self.client or not self.user_id:
+            return False
+        try:
+            for r in rows:
+                row_id = r.get("id")
+                grp = str(r.get("toc_group", "OE_OTHER"))
+                is_inc = grp.startswith("S_")
+                if row_id:
+                    self.client.table("account_mappings").update(
+                        {"toc_group": grp, "is_income": is_inc}
+                    ).eq("id", row_id).eq("user_id", self.user_id).execute()
+            return True
+        except Exception as e:
+            self.last_error = str(e)
+            return False
+
+    def delete_saved_mapping(self, mapping_id: int) -> bool:
+        if not self.client or not self.user_id:
+            return False
+        try:
+            self.client.table("account_mappings").delete().eq("id", mapping_id).eq("user_id", self.user_id).execute()
+            return True
+        except Exception:
+            return False
+
     def lookup(self, leaves) -> tuple[dict[str, dict], list]:
         if not self.client or not self.user_id:
             return {}, list(leaves)
@@ -208,7 +403,7 @@ class SupabaseProfileStore:
             self.last_error = str(e)
             return False, 0
 
-    # ------------------------------------------------------------------ FINANŠU TABULU VĒSTURE (IZOLĒTA)
+    # ------------------------------------------------------------------ FINANŠU TABULU VĒSTURE
     def save_report(
         self,
         report_name: str,
@@ -255,7 +450,6 @@ class SupabaseProfileStore:
             return False
 
     def list_reports(self) -> list[dict]:
-        """Atgriež TIKAI šī uzņēmuma saglabātās atskaites."""
         if not self.client or not self.user_id:
             return []
         try:
