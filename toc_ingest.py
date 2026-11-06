@@ -12,9 +12,19 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-GENERIC_TOTAL = re.compile(r"^\W*(kopā|kopsumma|kopējais|kopējās|total|subtotal|summa)\W*$", re.I)
+GENERIC_TOTAL = re.compile(r"^\W*(kopā|kopsumma|kopējais|kopējās|total|subtotal|summa)\W*:?\W*$", re.I)
 ACCOUNT_CODE = re.compile(r"^\s*(\d{4,6})\s+")
 HAS_LETTER = re.compile(r"[A-Za-zĀ-žА-я]")
+
+# Rindas, kas pēc definīcijas vienmēr ir PZA starpsummas, virsraksti vai peļņas rādītāji (nekad nav atsevišķi konti)
+SUMMARY_OR_PROFIT_LINE = re.compile(
+    r"^\s*("
+    r"kopā:?|kopsumma:?|total:?|subtotal:?|"
+    r"bruto\s+peļņa.*|peļņa\s+vai\s+zaudējumi.*|pārskata\s+gada\s+peļņa.*|"
+    r"pza\s+posteņu\s+atšifrējumi.*|postenis"
+    r")\s*$",
+    re.I,
+)
 
 
 def decode_bytes(data: bytes) -> str:
@@ -160,7 +170,7 @@ STRUCTURE_SYSTEM = """You inspect accounting exports (Latvian or English, any ac
 You receive a cell-by-cell preview: `r<row> | c<col>:<value> ...` (0-based indices, empty cells omitted).
 Rules:
 - Report indices only. Never output or compute amounts.
-- period_cols: ACTUAL amounts only (skip budget 'BU', prior year 'PY', variances, % columns, and empty future months that only have 0 in total rows). Monthly files: one entry per month column that has actual data. If the file has a YTD/cumulative actual column, add it with kind 'ytd'. A single full-year column -> kind 'year'.
+- period_cols: ACTUAL amounts only (skip budget 'BU', prior year 'PY', variances, % columns, and empty future month columns that only have 0s). Monthly files: one entry per month column that has actual data. If the file has a YTD/cumulative actual column, add it with kind 'ytd'. A single full-year column -> kind 'year'.
 - first_row/last_row delimit the P&L body. In files where a summary P&L is followed by a detailed breakdown (decoding of line items), last_row is the END of the breakdown.
 - result_row is the final profit/loss line (e.g. 'Pārskata gada peļņa vai zaudējumi', 'Net Result').
 - If the statement is by function (only COGS / selling / admin totals, no breakdown by cost type), say pl_layout='by_function'.
@@ -262,10 +272,15 @@ def extract_lines(grid: pd.DataFrame, st: Structure) -> Extracted:
         nums = [parse_number(grid.iat[r, p["col"]], dec) for p in st.period_cols]
         raw.append((r, label, code, nums))
 
+    # Paturam tikai tās periodu kolonnas, kurās ir vismaz 2 nenulles vērtības (lai izmestu tukšos nākotnes mēnešus ar 0 formulās)
     keep = []
     for j, p in enumerate(st.period_cols):
-        if any((x[3][j] or 0) != 0 for x in raw):
+        nonzero_cnt = sum(1 for x in raw if (x[3][j] or 0) != 0)
+        if nonzero_cnt >= 2 or (len(st.period_cols) == 1 and nonzero_cnt >= 1):
             keep.append(j)
+    if not keep:
+        keep = [j for j in range(len(st.period_cols)) if any((x[3][j] or 0) != 0 for x in raw)]
+
     dropped = [st.period_cols[j] for j in range(len(st.period_cols)) if j not in keep]
     kept_cols = [st.period_cols[j] for j in keep]
 
@@ -276,6 +291,7 @@ def extract_lines(grid: pd.DataFrame, st: Structure) -> Extracted:
     lines: list[Line] = []
     for r, label, code, nums in raw:
         sel = [nums[j] for j in keep]
+        # Rinda skaitās ar vērtībām tikai tad, ja tajā ir kāds skaitlis UN tā nav mēnešu galvenes rinda
         has = any(v is not None for v in sel)
         if not label and not has:
             continue
@@ -350,6 +366,10 @@ def _combos(m: int) -> np.ndarray:
     return _COMBO_CACHE[m]
 
 
+def _norm_label(s: str) -> str:
+    return re.sub(r"\s+", " ", str(s or "").strip().lower()).rstrip(":")
+
+
 def analyze(ex: Extracted, st: Structure) -> Analysis:
     lines = ex.lines
     tol = ex.tol
@@ -389,49 +409,6 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
                 out.append(x)
         return out
 
-    mirrors: dict[int, tuple[int, int]] = {}
-    leaf_cand = [i for i in active if i not in totals]
-    for L in leaf_cand:
-        if not np.any(np.abs(V[L]) > tol):
-            continue
-        anc = set(ancestors(L))
-        best = None
-        for T in totals:
-            if T in anc or T == L:
-                continue
-            for f in (1, -1):
-                if np.all(np.abs(V[L] - f * V[T]) <= tol):
-                    size = len(descendants_leaves(T))
-                    if best is None or size > best[2]:
-                        best = (T, f, size)
-        if best and best[2] >= 2:
-            mirrors[L] = (best[0], best[1])
-
-    roots = [i for i in active if i not in parent and i not in mirrors]
-    derived: set[int] = set()
-    nonzero_roots: list[int] = []
-    for R in roots:
-        if not np.any(np.abs(V[R]) > tol):
-            continue
-        win = nonzero_roots[-10:]
-        if win:
-            C = _combos(len(win))
-            M = V[win]
-            res = np.abs(C @ M - V[R]).max(axis=1) <= tol
-            res &= (np.abs(C).sum(axis=1) >= 1)
-            if res.any():
-                derived.add(R)
-        nonzero_roots.append(R)
-
-    for d in list(derived):
-        stack_ = [d]
-        while stack_:
-            x = stack_.pop()
-            for c in totals.get(x, []):
-                derived.add(c)
-                stack_.append(c)
-
-    zero_rows = [i for i in leaf_cand if not np.any(np.abs(V[i]) > tol) and i not in mirrors]
     header_pos = {ln.pos for ln in lines if not ln.has_values and ln.label and not ln.label.startswith("(rinda")}
 
     def section_name(t: int) -> str:
@@ -446,6 +423,86 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
             run.append(p)
             p -= 1
         return lines[run[-1]].label.strip() if run else lab
+
+    mirrors: dict[int, tuple[int, int]] = {}
+    leaf_cand = [i for i in active if i not in totals]
+    for L in leaf_cand:
+        if not np.any(np.abs(V[L]) > tol):
+            continue
+        anc = set(ancestors(L))
+        best = None
+        L_norm = _norm_label(lines[L].label)
+        for T in totals:
+            if T in anc or T == L:
+                continue
+            T_sec_norm = _norm_label(section_name(T))
+            for f in (1, -1):
+                # 1) Eksakta sakritība visos mēnešos VAI 2) sakrīt sadaļas vārds un sakrīt >=80% mēnešu
+                diffs = np.abs(V[L] - f * V[T])
+                exact_match = bool(np.all(diffs <= tol))
+                name_and_most_match = bool(
+                    L_norm
+                    and L_norm == T_sec_norm
+                    and len(diffs) >= 3
+                    and np.sum(diffs <= max(tol * 2, 5.0)) >= len(diffs) - 1
+                )
+                if exact_match or name_and_most_match:
+                    size = len(descendants_leaves(T))
+                    if best is None or size > best[2]:
+                        best = (T, f, size)
+        if best and best[2] >= 2:
+            mirrors[L] = (best[0], best[1])
+
+    # Papildu drošība: ja failā ir virsraksts ar tādu pašu nosaukumu kā kopsavilkuma rindai (piem., "Administrācijas izmaksas"),
+    # tad augšējā kopsavilkuma rinda ir mirror/dublikāts un nekad nav konts
+    header_norms = {_norm_label(lines[h].label): h for h in header_pos if _norm_label(lines[h].label)}
+    for L in leaf_cand:
+        if L in mirrors:
+            continue
+        ln_norm = _norm_label(lines[L].label)
+        if ln_norm in header_norms and header_norms[ln_norm] > L:
+            # Atrodam tuvāko Kopā rindu zem šī virsraksta
+            h_idx = header_norms[ln_norm]
+            for T in totals:
+                if T > h_idx and _norm_label(section_name(T)) == ln_norm:
+                    mirrors[L] = (T, -1)
+                    break
+
+    roots = [i for i in active if i not in parent and i not in mirrors]
+    derived: set[int] = set()
+    nonzero_roots: list[int] = []
+    for R in roots:
+        if not np.any(np.abs(V[R]) > tol):
+            continue
+        # Ja rindas nosaukums ir nepārprotama Kopā / Peļņas rinda, atzīmējam kā derived
+        if SUMMARY_OR_PROFIT_LINE.match(lines[R].label.strip()) or GENERIC_TOTAL.match(lines[R].label.strip()):
+            derived.add(R)
+            nonzero_roots.append(R)
+            continue
+        win = nonzero_roots[-10:]
+        if win:
+            C = _combos(len(win))
+            M = V[win]
+            res = np.abs(C @ M - V[R]).max(axis=1) <= tol
+            res &= (np.abs(C).sum(axis=1) >= 1)
+            if res.any():
+                derived.add(R)
+        nonzero_roots.append(R)
+
+    if st.result_row is not None:
+        for ln in lines:
+            if ln.row == st.result_row:
+                derived.add(ln.pos)
+
+    for d in list(derived):
+        stack_ = [d]
+        while stack_:
+            x = stack_.pop()
+            for c in totals.get(x, []):
+                derived.add(c)
+                stack_.append(c)
+
+    zero_rows = [i for i in leaf_cand if not np.any(np.abs(V[i]) > tol) and i not in mirrors]
 
     chain_cache: dict[int, bool] = {}
 
@@ -464,6 +521,12 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
     for i in leaf_cand:
         if i in skip:
             continue
+        ln = lines[i]
+        # Nekad neiekļaujam rindas ar nosaukumu "Kopā:", "Bruto peļņa..." utt. kā kontus
+        if GENERIC_TOTAL.match(ln.label.strip()) or SUMMARY_OR_PROFIT_LINE.match(ln.label.strip()):
+            derived.add(i)
+            continue
+
         anc = [a for a in ancestors(i)]
         names = []
         for a in anc:
@@ -474,8 +537,16 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
                 names.append(nm)
             if len(names) == 2:
                 break
+        # Ja kontam nav atrasts Kopā vecāks, paņemam tuvāko virsrakstu virs tā
+        if not names:
+            p_idx = i - 1
+            while p_idx >= 0:
+                if p_idx in header_pos and not SUMMARY_OR_PROFIT_LINE.match(lines[p_idx].label.strip()):
+                    names.append(lines[p_idx].label.strip())
+                    break
+                p_idx -= 1
+
         path = " › ".join(reversed(names)) if names else ""
-        ln = lines[i]
         if i in mult_of:
             mult: int | None = mult_of[i]
         elif st.sign_convention in ("costs_positive", "mixed"):
@@ -487,31 +558,22 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
     if mirrors:
         notes.append(f"{len(mirrors)} kopsavilkuma rindas ir atpazītas kā dublikāti un netiek skaitītas.")
     if derived:
-        notes.append(f"{len(derived)} rindas atpazītas kā atvasinātas (peļņas rindas) un netiek skaitītas.")
+        notes.append(f"{len(derived)} rindas atpazītas kā atvasinātas (peļņas/kopsummu rindas) un netiek skaitītas.")
     return Analysis(ex, direction, totals, leaves, mirrors, derived, zero_rows, notes)
 
 
 def leaf_amounts(leaves: list[Leaf], income_ids: set[str] | None) -> tuple[np.ndarray, bool]:
-    """
-    Zelta likums:
-    - Ja konts ir ieņēmums (lf.id in income_ids), tam PZA vienādojumā ir pozitīva zīme (+).
-    - Ja konts NAV ieņēmums (visi TVC un Uzturēšanas izdevumi / OE), tam PZA vienādojumā ir negatīva zīme (-),
-      lai compute_toc rezultātā izdevumu rinda vienmēr ir pozitīvs izdevumu skaitlis (piem. +91 389), nevis mīnuss!
-    """
     if not leaves:
         return np.zeros((0, 1)), True
     rows, complete = [], True
     for lf in leaves:
         if income_ids is not None:
             is_inc = lf.id in income_ids
-            # Pārbaudām kāda ir konta dominējošā zīme failā
             non_zero = lf.vals[np.abs(lf.vals) > 1e-6]
             median_sign = np.median(non_zero) if len(non_zero) > 0 else 1.0
             if is_inc:
-                # Ieņēmumiem rezultātā jābūt pozitīviem (+)
                 m = 1 if median_sign >= 0 else -1
             else:
-                # Izdevumiem (TVC, OE) PZA summā jābūt negatīviem (-), lai compute_toc tos rādītu kā pozitīvas izmaksas
                 m = -1 if median_sign >= 0 else 1
         elif lf.mult is not None:
             m = lf.mult
