@@ -1,5 +1,5 @@
 """
-toc_ingest.py — PZA failu ielasīšana un automātiskā zīmju normalizācija (v2.1)
+toc_ingest.py  —  PZA failu ielasīšana (1.–3. solis)
 """
 from __future__ import annotations
 
@@ -15,8 +15,6 @@ import pandas as pd
 GENERIC_TOTAL = re.compile(r"^\W*(kopā|kopsumma|kopējais|kopējās|total|subtotal|summa)\W*$", re.I)
 ACCOUNT_CODE = re.compile(r"^\s*(\d{4,6})\s+")
 HAS_LETTER = re.compile(r"[A-Za-zĀ-žА-я]")
-
-EXPENSE_KEYWORDS = ["izmaks", "izdevum", "pašizmaksa", "alga", "nodokl", "amortizācij", "reklām", "nom", "pakalpojums", "transport", "materiāl", "biroj", "saimniecisk"]
 
 
 def decode_bytes(data: bytes) -> str:
@@ -224,7 +222,6 @@ class Line:
     vals: np.ndarray
     has_values: bool
     is_ratio: bool = False
-    id: str = ""
 
 
 @dataclass
@@ -277,22 +274,9 @@ def extract_lines(grid: pd.DataFrame, st: Structure) -> Extracted:
         has = any(v is not None for v in sel)
         if not label and not has:
             continue
-        
-        lbl_lower = label.lower()
-        is_cost_line = any(kw in lbl_lower for kw in EXPENSE_KEYWORDS)
-        
-        vec_vals = []
-        for v in sel:
-            val = v or 0.0
-            if is_cost_line and val > 0 and not any(inc in lbl_lower for inc in ["ienākum", "apgrozījum", "ieņēmum"]):
-                val = -val
-            vec_vals.append(val)
-
-        vec = np.array(vec_vals, dtype=float)
+        vec = np.array([v or 0.0 for v in sel], dtype=float)
         is_ratio = "%" in label or label.lower().startswith("(as ")
-        ln_id = f"r{r}"
-        lines.append(Line(len(lines), r, label or f"(rinda {r})", code, vec, has, is_ratio, id=ln_id))
-        
+        lines.append(Line(len(lines), r, label or f"(rinda {r})", code, vec, has, is_ratio))
     return Extracted(lines, kept_cols, dropped, dec, tol)
 
 
@@ -619,5 +603,5 @@ def request_structure(client, model: str, sheet: str, grid: pd.DataFrame, max_tr
             return st
         msgs += [{"role": "assistant", "content": resp.content},
                  {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tu.id, "is_error": True,
-                                              "content": "Validation failed: " + " ".join(last_errs) + " Fix and resend."}]}]
+                                               "content": "Validation failed: " + " ".join(last_errs) + " Fix and resend."}]}]
     raise ValueError("Struktūru neizdevās noteikt automātiski: " + " ".join(last_errs))
