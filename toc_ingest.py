@@ -17,8 +17,7 @@ ACCOUNT_CODE = re.compile(r"^\s*(\d{4,6})\s+")
 HAS_LETTER = re.compile(r"[A-Za-zĀ-žА-я]")
 
 # Atslēgvārdi, kas pēc grāmatvedības un TOC loģikas vienmēr ir izdevumi/izmaksas
-EXPENSE_KEYWORDS = [izmaksa, izdevums, pašizmaksa, alga, nodoklis, amortizācija, reklāma, noma, pakalpojums, transports, materiāl]
-
+EXPENSE_KEYWORDS = ["izmaksa", "izdevum", "pašizmaksa", "alga", "nodokl", "amortizācij", "reklām", "nom", "pakalpojums", "transport", "materiāl", "biroj", "saimniecisk"]
 
 def decode_bytes(data: bytes) -> str:
     for enc in ("utf-8-sig", "cp1257", "cp1252", "latin-1"):
