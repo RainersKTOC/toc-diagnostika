@@ -70,9 +70,28 @@ class LoadedReportResult:
     by_group: dict
 
 
-API_KEY = str(st.secrets.get("ANTHROPIC_API_KEY", "")).strip().strip('"').strip("'")
+def _load_anthropic_key() -> str:
+    import os
+    for k in ("ANTHROPIC_API_KEY", "anthropic_api_key", "CLAUDE_API_KEY", "API_KEY"):
+        val = os.environ.get(k) or st.secrets.get(k, "")
+        if val and isinstance(val, str) and val.strip():
+            return val.strip().strip('"').strip("'")
+    for sec in ("anthropic", "claude", "general", "default"):
+        if sec in st.secrets:
+            try:
+                sec_obj = st.secrets[sec]
+                for k in ("api_key", "ANTHROPIC_API_KEY", "key"):
+                    val = sec_obj.get(k, "")
+                    if val and str(val).strip():
+                        return str(val).strip().strip('"').strip("'")
+            except Exception:
+                pass
+    return ""
+
+
+API_KEY = _load_anthropic_key()
 if not API_KEY:
-    st.error("Nav atrasta ANTHROPIC_API_KEY. Pievienojiet to Streamlit Secrets iestatījumos.")
+    st.error("Nav atrasta ANTHROPIC_API_KEY. Pārbaudiet Streamlit Cloud -> Settings -> Secrets.")
     st.stop()
 
 
