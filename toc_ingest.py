@@ -160,7 +160,7 @@ STRUCTURE_SYSTEM = """You inspect accounting exports (Latvian or English, any ac
 You receive a cell-by-cell preview: `r<row> | c<col>:<value> ...` (0-based indices, empty cells omitted).
 Rules:
 - Report indices only. Never output or compute amounts.
-- period_cols: ACTUAL amounts only (skip budget 'BU', prior year 'PY', variances, % columns). Monthly files: one entry per month column that has data. If the file has a YTD/cumulative actual column, add it with kind 'ytd'. A single full-year column -> kind 'year'.
+- period_cols: ACTUAL amounts only (skip budget 'BU', prior year 'PY', variances, % columns, and empty future months that only have 0 in total rows). Monthly files: one entry per month column that has actual data. If the file has a YTD/cumulative actual column, add it with kind 'ytd'. A single full-year column -> kind 'year'.
 - first_row/last_row delimit the P&L body. In files where a summary P&L is followed by a detailed breakdown (decoding of line items), last_row is the END of the breakdown.
 - result_row is the final profit/loss line (e.g. 'Pārskata gada peļņa vai zaudējumi', 'Net Result').
 - If the statement is by function (only COGS / selling / admin totals, no breakdown by cost type), say pl_layout='by_function'.
@@ -222,6 +222,11 @@ class Line:
     vals: np.ndarray
     has_values: bool
     is_ratio: bool = False
+    id: str = ""
+
+    def __post_init__(self):
+        if not self.id:
+            self.id = f"r{self.row}"
 
 
 @dataclass
@@ -276,7 +281,7 @@ def extract_lines(grid: pd.DataFrame, st: Structure) -> Extracted:
             continue
         vec = np.array([v or 0.0 for v in sel], dtype=float)
         is_ratio = "%" in label or label.lower().startswith("(as ")
-        lines.append(Line(len(lines), r, label or f"(rinda {r})", code, vec, has, is_ratio))
+        lines.append(Line(len(lines), r, label or f"(rinda {r})", code, vec, has, is_ratio, id=f"r{r}"))
     return Extracted(lines, kept_cols, dropped, dec, tol)
 
 
@@ -473,7 +478,7 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
         ln = lines[i]
         if i in mult_of:
             mult: int | None = mult_of[i]
-        elif st.sign_convention == "costs_positive":
+        elif st.sign_convention in ("costs_positive", "mixed"):
             mult = None
         else:
             mult = 1
@@ -487,16 +492,31 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
 
 
 def leaf_amounts(leaves: list[Leaf], income_ids: set[str] | None) -> tuple[np.ndarray, bool]:
+    """
+    Zelta likums:
+    - Ja konts ir ieņēmums (lf.id in income_ids), tam PZA vienādojumā ir pozitīva zīme (+).
+    - Ja konts NAV ieņēmums (visi TVC un Uzturēšanas izdevumi / OE), tam PZA vienādojumā ir negatīva zīme (-),
+      lai compute_toc rezultātā izdevumu rinda vienmēr ir pozitīvs izdevumu skaitlis (piem. +91 389), nevis mīnuss!
+    """
     if not leaves:
         return np.zeros((0, 1)), True
     rows, complete = [], True
     for lf in leaves:
-        if lf.mult is not None:
+        if income_ids is not None:
+            is_inc = lf.id in income_ids
+            # Pārbaudām kāda ir konta dominējošā zīme failā
+            non_zero = lf.vals[np.abs(lf.vals) > 1e-6]
+            median_sign = np.median(non_zero) if len(non_zero) > 0 else 1.0
+            if is_inc:
+                # Ieņēmumiem rezultātā jābūt pozitīviem (+)
+                m = 1 if median_sign >= 0 else -1
+            else:
+                # Izdevumiem (TVC, OE) PZA summā jābūt negatīviem (-), lai compute_toc tos rādītu kā pozitīvas izmaksas
+                m = -1 if median_sign >= 0 else 1
+        elif lf.mult is not None:
             m = lf.mult
-        elif income_ids is None:
-            m, complete = 0, False
         else:
-            m = 1 if lf.id in income_ids else -1
+            m, complete = 0, False
         rows.append(m * lf.vals)
     return np.array(rows), complete
 
