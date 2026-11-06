@@ -1,5 +1,10 @@
 """
-app.py — TOC-FIN Vadības lēmumu un finanšu diagnostikas sistēma (v13.0 ar autentifikāciju)
+app.py — TOC-FIN Vadības lēmumu un finanšu diagnostikas sistēma (v14.0)
+- Visur pieejams AI diagnostikas un atbalsta čats (redz PZA struktūru, kontus un aprēķinus)
+- Manuāla PZA rindu korekcija (ja kāds konts nolasīts kā starpsumma vai otrādi)
+- Finanšu gada sākuma mēneša izvēle (Janvāris..Decembris, piem., no Septembra)
+- Uzkrājošā (YTD) tabula: S, TVC, T un NP no finanšu gada sākuma pelēkā dizainā
+- Salabota skaitļu apcirpšana (vairs nerāda '72...')
 Project ID: amprqueamdcxpjufigvm
 """
 from __future__ import annotations
@@ -7,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 import io
+import re
 from pathlib import Path
 
 import anthropic
@@ -66,6 +72,103 @@ def fmt_num(x) -> str:
 
 def fmt_pct_int(x) -> str:
     return "" if pd.isna(x) else f"{x * 100:.0f}%"
+
+
+MONTH_NAMES_LV = {
+    1: "1. Janvāris (Jan–Dec)",
+    2: "2. Februāris (Feb–Jan)",
+    3: "3. Marts (Mar–Feb)",
+    4: "4. Aprīlis (Apr–Mar)",
+    5: "5. Maijs (Mai–Apr)",
+    6: "6. Jūnijs (Jūn–Mai)",
+    7: "7. Jūlijs (Jūl–Jūn)",
+    8: "8. Augusts (Aug–Jūl)",
+    9: "9. Septembris (Sep–Aug)",
+    10: "10. Oktobris (Okt–Sep)",
+    11: "11. Novembris (Nov–Okt)",
+    12: "12. Decembris (Dec–Nov)",
+}
+
+MONTH_SHORT_LV = {
+    1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "Mai", 6: "Jūn",
+    7: "Jūl", 8: "Aug", 9: "Sep", 10: "Okt", 11: "Nov", 12: "Dec",
+}
+
+LV_MONTH_PARSE = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "mai": 5, "may": 5,
+    "jūn": 6, "jun": 6, "jūl": 7, "jul": 7, "aug": 8, "sep": 9,
+    "okt": 10, "oct": 10, "nov": 11, "dec": 12,
+}
+
+
+def parse_period_month_year(col_name: str) -> tuple[int | None, int | None]:
+    """Atpazīst mēnesi (1..12) un gadu no perioda kolonnas nosaukuma (piem., '01.2026.', '2026-09', 'Sep 2025')."""
+    s = str(col_name or "").strip().lower()
+    if "ytd" in s or "avg" in s or "kopā" in s or "izmaiņa" in s:
+        return None, None
+
+    # 1) MM.YYYY vai MM/YYYY vai MM-YYYY
+    m1 = re.search(r"(?<!\d)(0?[1-9]|1[0-2])[\./\-](20\d{2})(?!\d)", s)
+    if m1:
+        return int(m1.group(1)), int(m1.group(2))
+
+    # 2) YYYY.MM vai YYYY-MM vai YYYY/MM
+    m2 = re.search(r"(?<!\d)(20\d{2})[\./\-](0?[1-9]|1[0-2])(?!\d)", s)
+    if m2:
+        return int(m2.group(2)), int(m2.group(1))
+
+    # 3) Teksta mēnesis
+    yr_m = re.search(r"(20\d{2})", s)
+    yr = int(yr_m.group(1)) if yr_m else None
+    for k, m_num in LV_MONTH_PARSE.items():
+        if k in s:
+            return m_num, yr
+
+    return None, None
+
+
+def compute_cumulative_toc_df(amounts_df: pd.DataFrame, fy_start_month: int = 1) -> tuple[pd.DataFrame, list[str], set[str]]:
+    """
+    Aprēķina uzkrājošo (kumulatīvo) S, TVC, T un NP tabulu no izvēlētā finanšu gada sākuma mēneša.
+    Ja tabulā ir vairāki finanšu gadi, uzkrājums automātiski sākas no nulles katrā jaunā finanšu gada sākumā.
+    Atgriež: (cum_df, period_cols, fy_boundary_cols)
+    """
+    target_rows = [r for r in ["S", "TVC", "T", "NP"] if r in amounts_df.index]
+    period_cols = [
+        c for c in amounts_df.columns
+        if not ("YTD" in str(c).upper() or "AVG" in str(c).upper() or "KOPĀ" in str(c).upper() or "IZMAIŅA" in str(c).upper())
+    ]
+    if not period_cols:
+        period_cols = list(amounts_df.columns)
+
+    cum_data: dict[str, pd.Series] = {}
+    running = pd.Series(0.0, index=target_rows)
+    fy_boundary_cols: set[str] = set()
+
+    for idx, col in enumerate(period_cols):
+        m_num, _ = parse_period_month_year(str(col))
+        if idx == 0:
+            running = amounts_df.loc[target_rows, col].fillna(0.0).astype(float).copy()
+            if m_num == fy_start_month:
+                fy_boundary_cols.add(col)
+        else:
+            if m_num is not None and m_num == fy_start_month:
+                # Jauns finanšu gads sākas šajā kolonnā — sākam uzkrāšanu no jauna
+                running = amounts_df.loc[target_rows, col].fillna(0.0).astype(float).copy()
+                fy_boundary_cols.add(col)
+            else:
+                running = running + amounts_df.loc[target_rows, col].fillna(0.0).astype(float)
+        cum_data[col] = running.copy()
+
+    cum_df = pd.DataFrame(cum_data, index=target_rows)
+    row_labels = {
+        "S": "∑ S — Uzkrātie ieņēmumi (Sales)",
+        "TVC": "∑ TVC — Uzkrātās patiesi mainīgās izmaksas",
+        "T": "∑ T — Uzkrātā caurlaidība (Throughput)",
+        "NP": "∑ NP — Uzkrātā neto peļņa (Net Profit)",
+    }
+    cum_df.index = [row_labels.get(r, r) for r in cum_df.index]
+    return cum_df, period_cols, fy_boundary_cols
 
 
 MAIN_CAT_BY_CODE = {
@@ -180,40 +283,33 @@ def render_unified_toc_tables_html(
     row_kinds: dict[str, str],
     title_kpi: str = "📈 Produktivitātes un atdeves rādītāji",
     grey_cols: set[str] | None = None,
+    fy_start_month: int = 1,
+    show_cumulative: bool = True,
 ) -> str:
     periods = list(amounts_df.columns)
     row_names = list(amounts_df.index)
     kinds = [row_kinds.get(rn, "OE_CHILD") for rn in row_names]
     grey_cols = grey_cols or set()
 
-    lbl_width_pct = 26.0 if len(periods) <= 4 else 23.0
-    rem_pct = 100.0 - lbl_width_pct
-    per_period_pct = rem_pct / max(len(periods), 1)
-    val_w = per_period_pct * 0.68
-    pct_w = per_period_pct * 0.32
-
-    html = [f"""
+    # Izmantojam table-layout: auto + horizontālo ritināšanu, lai skaitļi NEKAD netiktu apgriezti ar '72...'
+    html = ["""
     <style>
-    .toc-table-wrap {{ width: 100%; overflow-x: visible; margin-bottom: 14px; }}
-    table.toc-unified {{ width: 100%; border-collapse: collapse; font-family: 'Calibri', sans-serif; font-size: 12px; table-layout: fixed; }}
-    table.toc-unified th {{ background-color: #EAECEE; color: #111111; font-weight: 700; text-align: center; padding: 5px 2px; border-top: 2px solid #404040; border-bottom: 2px solid #404040; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-    table.toc-unified td {{ padding: 4px 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
-    table.toc-unified td.lbl-main {{ text-align: left; font-weight: 700; padding-left: 6px; border-left: 2px solid #404040; border-right: 2px solid #404040; }}
-    table.toc-unified td.lbl-sub {{ text-align: left; font-weight: 400; padding-left: 16px; border-left: 2px solid #404040; border-right: 2px solid #404040; }}
-    table.toc-unified td.val-col {{ text-align: right; border-left: 1px solid #BFBFBF; }}
-    table.toc-unified td.pct-col {{ text-align: right; font-size: 11px; padding-right: 4px; border-left: 1px dotted #D0D3D4; border-right: 2px solid #595959; }}
-    table.toc-unified th.th-val {{ border-left: 1px solid #BFBFBF; }}
-    table.toc-unified th.th-pct {{ font-size: 11px; border-left: 1px dotted #BFBFBF; border-right: 2px solid #595959; }}
-    table.toc-unified th.th-lbl {{ text-align: left; padding-left: 6px; border-left: 2px solid #404040; border-right: 2px solid #404040; }}
-    table.toc-unified tr.spacer-row td {{ background: transparent !important; border: none !important; height: 26px; padding: 10px 0 4px 0; font-size: 16px; font-weight: 700; color: #1f2937; }}
+    .toc-table-wrap { width: 100%; overflow-x: auto; margin-bottom: 18px; }
+    table.toc-unified { width: 100%; border-collapse: collapse; font-family: 'Calibri', 'Segoe UI', sans-serif; font-size: 12px; table-layout: auto; }
+    table.toc-unified th { background-color: #EAECEE; color: #111111; font-weight: 700; text-align: center; padding: 6px 5px; border-top: 2px solid #404040; border-bottom: 2px solid #404040; white-space: nowrap; }
+    table.toc-unified td { padding: 4px 6px; white-space: nowrap; }
+    table.toc-unified td.lbl-main { text-align: left; font-weight: 700; padding-left: 8px; padding-right: 10px; border-left: 2px solid #404040; border-right: 2px solid #404040; min-width: 210px; }
+    table.toc-unified td.lbl-sub { text-align: left; font-weight: 400; padding-left: 18px; padding-right: 10px; border-left: 2px solid #404040; border-right: 2px solid #404040; min-width: 210px; }
+    table.toc-unified td.val-col { text-align: right; border-left: 1px solid #BFBFBF; font-variant-numeric: tabular-nums; }
+    table.toc-unified td.pct-col { text-align: right; font-size: 11px; padding-left: 3px; padding-right: 5px; border-left: 1px dotted #D0D3D4; border-right: 2px solid #595959; color: #333333; font-variant-numeric: tabular-nums; }
+    table.toc-unified th.th-val { border-left: 1px solid #BFBFBF; }
+    table.toc-unified th.th-pct { font-size: 11px; border-left: 1px dotted #BFBFBF; border-right: 2px solid #595959; }
+    table.toc-unified th.th-lbl { text-align: left; padding-left: 8px; border-left: 2px solid #404040; border-right: 2px solid #404040; }
+    table.toc-unified tr.spacer-row td { background: transparent !important; border: none !important; height: 28px; padding: 14px 0 6px 0; font-size: 15px; font-weight: 700; color: #1f2937; }
     </style>
     <div class="toc-table-wrap"><table class="toc-unified">
-    <colgroup>
-        <col style="width: {lbl_width_pct:.2f}%;">
+    <thead><tr>
     """]
-    for _ in periods:
-        html.append(f'<col style="width: {val_w:.3f}%;"><col style="width: {pct_w:.3f}%;">')
-    html.append("</colgroup><thead><tr>")
     html.append('<th class="th-lbl">Rādītājs / Kontugrupa</th>')
     for p in periods:
         th_bg = "background-color: #D5D8DC; color: #333333;" if p in grey_cols else ""
@@ -250,13 +346,14 @@ def render_unified_toc_tables_html(
                 g_txt = "#2C3E50" if is_bold else "#4D5656"
                 cell_style = f"background-color: {g_bg}; color: {g_txt};"
             else:
-                cell_style = ""
+                cell_style = f"color: #{text_hex};"
             html.append(f'<td class="val-col" style="{cell_style}">{val_str}</td><td class="pct-col" style="{cell_style}">{pct_str}</td>')
         html.append("</tr>")
 
     total_cols = 1 + 2 * len(periods)
-    html.append(f'<tr class="spacer-row"><td colspan="{total_cols}">{title_kpi}</td></tr>')
 
+    # --- 2. TABULA: PRODUKTIVITĀTES UN ATDEVES RĀDĪTĀJI ---
+    html.append(f'<tr class="spacer-row"><td colspan="{total_cols}">{title_kpi}</td></tr>')
     html.append("<tr>")
     html.append('<th class="th-lbl" style="background-color: #EAECEE; border-top: 2px solid #404040; border-bottom: 2px solid #404040;">Produktivitātes rādītājs</th>')
     for p in periods:
@@ -286,6 +383,88 @@ def render_unified_toc_tables_html(
             )
         html.append("</tr>")
 
+    # --- 3. TABULA: UZKRĀJOŠIE RĀDĪTĀJI NO FINANŠU GADA SĀKUMA (ATŠĶIRĪGĀ PELĒKĀ NOFORMĒJUMĀ) ---
+    if show_cumulative:
+        cum_df, cum_periods, fy_boundaries = compute_cumulative_toc_df(amounts_df, fy_start_month=fy_start_month)
+        fy_lbl = MONTH_NAMES_LV.get(fy_start_month, "1. Janvāris")
+        html.append(
+            f'<tr class="spacer-row"><td colspan="{total_cols}">'
+            f'📊 Uzkrājošā finanšu dinamika no finanšu gada sākuma (Sākuma mēnesis: {fy_lbl})'
+            f'</td></tr>'
+        )
+        # Tumšāka antracīta-pelēka galvene, lai vizuāli atšķirtos no KPI tabulas
+        html.append("<tr>")
+        html.append(
+            '<th class="th-lbl" style="background-color: #34495E; color: #FFFFFF; '
+            'border-top: 2px solid #1C2833; border-bottom: 2px solid #1C2833;">'
+            'Uzkrājošais rādītājs (YTD dinamika)</th>'
+        )
+        for p in periods:
+            is_fy_start = p in fy_boundaries and p != periods[0]
+            left_b = "3px solid #1C2833" if is_fy_start else "1px solid #5D6D7E"
+            badge = " ★" if (p in fy_boundaries) else ""
+            if p in cum_periods:
+                html.append(
+                    f'<th class="th-val" style="background-color: #34495E; color: #FFFFFF; border-top: 2px solid #1C2833; border-bottom: 2px solid #1C2833; border-left: {left_b};">{p}{badge}</th>'
+                    f'<th class="th-pct" style="background-color: #2C3E50; color: #D5D8DC; border-top: 2px solid #1C2833; border-bottom: 2px solid #1C2833; border-right: 2px solid #1C2833;">∑%</th>'
+                )
+            else:
+                html.append(
+                    f'<th colspan="2" style="background-color: #2C3E50; color: #BDC3C7; border-top: 2px solid #1C2833; border-bottom: 2px solid #1C2833; border-left: 1px solid #5D6D7E; border-right: 2px solid #1C2833;">{p}</th>'
+                )
+        html.append("</tr>")
+
+        # 4 uzkrājošās rindas ar atšķirīgu pelēko gradāciju un kreiso akcenta joslu
+        cum_styles = [
+            # (fona_krāsa, teksta_krāsa, kreisais_akcents, ir_izcelts)
+            ("#EBEDEF", "#1B2631", "#F1C40F", True),   # ∑ S
+            ("#E5E7E9", "#2C3E50", "#D35400", False),  # ∑ TVC
+            ("#D6DBDF", "#11171D", "#2980B9", True),   # ∑ T
+            ("#CCD1D1", "#0B5345", "#27AE60", True),   # ∑ NP
+        ]
+        s_row_label = cum_df.index[0] if len(cum_df.index) > 0 else None
+
+        for idx_c, c_name in enumerate(cum_df.index):
+            bg_c, txt_c, accent_c, bold_c = cum_styles[idx_c % len(cum_styles)]
+            b_bot = "2.5px solid #1C2833" if idx_c == len(cum_df.index) - 1 else "1px solid #ABB2B9"
+            fw_c = "700" if bold_c else "600"
+            html.append(
+                f'<tr style="background-color: {bg_c}; color: {txt_c}; font-weight: {fw_c}; '
+                f'border-top: 1px solid #ABB2B9; border-bottom: {b_bot};">'
+            )
+            html.append(
+                f'<td class="lbl-main" style="border-left: 5px solid {accent_c}; font-weight: {fw_c}; color: {txt_c};" title="{c_name}">{c_name}</td>'
+            )
+            for p in periods:
+                if p in cum_df.columns:
+                    val_c = cum_df.loc[c_name, p]
+                    s_c = cum_df.loc[s_row_label, p] if s_row_label else np.nan
+                    pct_c = (val_c / s_c) if (s_c and not pd.isna(s_c) and s_c != 0) else np.nan
+                    val_s = fmt_num(val_c)
+                    pct_s = fmt_pct_int(pct_c)
+                    # Negatīvu uzkrāto NP iezīmējam tumši sarkanā tonī uz pelēkā fona
+                    val_color = "#922B21" if (not pd.isna(val_c) and val_c < 0 and "NP" in c_name) else txt_c
+                    html.append(
+                        f'<td class="val-col" style="color: {val_color}; font-weight: {fw_c};">{val_s}</td>'
+                        f'<td class="pct-col" style="background-color: #DDE1E4; color: #2C3E50; font-weight: 600;">{pct_s}</td>'
+                    )
+                else:
+                    # YTD vai AVG kolonnām rādām pēdējā perioda uzkrājumu vai mēneša vidējo
+                    last_p = cum_periods[-1] if cum_periods else None
+                    if last_p and "YTD" in str(p).upper():
+                        v_ytd = cum_df.loc[c_name, last_p]
+                        html.append(
+                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: #D5D8DC; color: #1B2631; font-weight: 700; border-right: 2px solid #404040;">{fmt_num(v_ytd)}</td>'
+                        )
+                    elif last_p and "AVG" in str(p).upper() and len(cum_periods) > 0:
+                        v_avg = cum_df.loc[c_name, last_p] / len(cum_periods)
+                        html.append(
+                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: #EAEDED; color: #2C3E50; font-weight: 600; border-right: 2px solid #404040;">{fmt_num(v_avg)}</td>'
+                        )
+                    else:
+                        html.append('<td colspan="2" style="background-color: #EAEDED; border-right: 2px solid #404040;"></td>')
+            html.append("</tr>")
+
     html.append("</tbody></table></div>")
     return "".join(html)
 
@@ -297,6 +476,88 @@ for fname in ["toc_knowledge.txt", "toc_knowledge.md", "knowledge.txt"]:
         break
 
 S = st.session_state
+
+
+# ------------------------------------------------------------------ VISUR PIEEJAMĀ AĢENTA KONTEKSTA BŪVĒTĀJS
+def build_global_diagnostic_context() -> str:
+    """Sagatavo pilnu tehnisko un finanšu kontekstu par jebkuru posmu, kurā lietotājs šobrīd atrodas."""
+    parts = [f"Aktīvais uzņēmuma profils: {S.get('active_profile', 'Nav')}"]
+    parts.append(f"Izvēlētais finanšu gada sākuma mēnesis: {MONTH_NAMES_LV.get(S.get('fy_start_month', 1), 'Janvāris')}")
+
+    if "stc" in S or "structure" in S:
+        stc: Structure = S.get("structure")
+        if stc:
+            parts.append(
+                f"\n--- 1. FAILA STRUKTŪRAS DIAGNOSTIKA (toc_ingest) ---\n"
+                f"Izvēlētā lapa (sheet): {stc.sheet}\n"
+                f"Kontu nosaukumu kolonnas: {stc.label_cols}\n"
+                f"Periodu galvenes rinda (header_row): {stc.header_row}\n"
+                f"PZA gala rezultāta rinda (result_row): {stc.result_row}\n"
+                f"Periodu kolonnas: {stc.period_cols}"
+            )
+
+    if "analysis" in S and S.analysis is not None:
+        an = S.analysis
+        leaf_ids = {lf.id for lf in an.leaves}
+        lines_info = []
+        for ln in an.ex.lines:
+            status = "IEKĻAUTS KĀ KONTS (LEAF)" if ln.id in leaf_ids else (
+                "GALA REZULTĀTA RINDA" if (S.get("structure") and ln.row == S.structure.result_row)
+                else "IZLAISTS (ATPAZĪTS KĀ VIRSRAKSTS VAI STARPSUMMA)"
+            )
+            tot_val = float(ln.vals.sum()) if hasattr(ln, "vals") else 0.0
+            first_val = float(ln.vals.iloc[0]) if (hasattr(ln, "vals") and len(ln.vals) > 0) else 0.0
+            lines_info.append(
+                f"Rinda #{ln.row} (id={ln.id}): '{ln.label}' | Ceļš: '{ln.path}' | "
+                f"Statuss: {status} | Pirmais mēn.: {first_val:,.2f} | Kopā pa periodiem: {tot_val:,.2f}"
+            )
+        parts.append(
+            "\n--- 2. VISAS NO FAILA NOLASĪTĀS RINDAS UN TO STATUSS ---\n"
+            + "\n".join(lines_info[:120])
+        )
+
+    if "cls_df" in S and S.cls_df is not None:
+        df_c = S.cls_df[["id", "Konts", "Displeja_konts", "Grupa", "Ieņēmums", "Avots"]]
+        parts.append("\n--- 3. PAŠREIZĒJĀ KONTU KLASIFIKĀCIJA ---\n" + df_c.to_markdown(index=False))
+
+    if "result" in S and S.result is not None:
+        res = S.result
+        parts.append("\n--- 4. APRĒĶINĀTĀ TOC-FIN TABULA (EUR) ---\n" + res.amounts.round(0).to_markdown())
+        parts.append("\n--- 5. PRODUKTIVITĀTES RĀDĪTĀJI (KPI) ---\n" + res.kpi.round(3).to_markdown())
+        if getattr(res, "reconciliation", None) is not None and not res.reconciliation.empty:
+            parts.append("\n--- 6. SALĪDZINĀJUMS AR GRĀMATVEDĪBAS PZA REZULTĀTU (RECONCILIATION) ---\n" + res.reconciliation.round(0).to_markdown())
+
+    return "\n\n".join(parts)
+
+
+def ask_global_assistant(user_question: str) -> str:
+    ctx = build_global_diagnostic_context()
+    know = f"\nTOC-FIN metodoloģija:\n{knowledge_file}\n" if knowledge_file else ""
+    sys_prompt = (
+        "Tu esi TOC-FIN sistēmas galvenais finanšu un tehniskās diagnostikas aģents. "
+        "Lietotājs var tev uzdot jautājumus JEBKURĀ posmā — gan par to, kāpēc kāds PZA konts vai rinda no Excel/CSV faila "
+        "ir nolasīta nepareizi (vai izlaista kā starpsumma, vai nepareizā kolonnā/zīmē), gan par kontu klasifikāciju, "
+        "gan par vadības finanšu rādītājiem (S, TVC, T, OE, NP, PR). "
+        "Ja lietotājs jautā par nepareizi nolasītu kontu: pārbaudi 'VISAS NO FAILA NOLASĪTĀS RINDAS UN TO STATUSS', "
+        "pasaki precīzi, kurā rindā (#row) šis konts atrodas, kāds ir tā statuss (IEKĻAUTS vai IZLAISTS kā starpsumma) un kādas summas tam ir nolasītas, "
+        "un paskaidro, kā lietotājs to var izlabot turpat sadaļā '🛠️ PZA struktūras un rindu korekcija' vai kontu tabulā. "
+        f"{know}"
+        "Atbildi latviešu valodā — skaidri, konkrēti un ar precīziem skaitļiem no konteksta."
+    )
+    history = S.get("global_chat", [])
+    messages = [
+        {"role": "user", "content": f"Šī brīža sistēmas un PZA faila stāvoklis:\n{ctx}"},
+        {"role": "assistant", "content": "Esmu iepazinies ar pilno faila struktūru, rindām un aprēķiniem. Kā varu palīdzēt?"},
+    ] + history + [{"role": "user", "content": user_question}]
+
+    resp = get_client().messages.create(
+        model=MODEL,
+        max_tokens=1800,
+        system=sys_prompt,
+        messages=messages,
+    )
+    return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+
 
 # ------------------------------------------------------------------ AUTENTIFIKĀCIJAS EKRĀNS (LOGIN / REGISTER)
 if not S.get("authenticated", False):
@@ -326,8 +587,7 @@ if not S.get("authenticated", False):
 
     with auth_tab2:
         st.subheader("Reģistrēt jaunu uzņēmumu")
-        with st.info("Šeit izveidotais profils nodrošinās, ka neviens cits uzņēmums nevarēs piekļūt jūsu datiem vai kontu klasifikācijai."):
-            pass
+        st.info("Šeit izveidotais profils nodrošinās, ka neviens cits uzņēmums nevarēs piekļūt jūsu datiem vai kontu klasifikācijai.")
 
         with st.form("register_form"):
             reg_company = st.text_input("Jauna uzņēmuma nosaukums:", placeholder="Piemēram, SIA Ražotājs")
@@ -349,6 +609,9 @@ if not S.get("authenticated", False):
 # ------------------------------------------------------------------ GALVENĀ APLIKĀCIJA (PĒC AUTENTIFIKĀCIJAS)
 profile = SupabaseProfileStore(company_name=S.active_profile)
 
+if "fy_start_month" not in S:
+    S.fy_start_month = 1
+
 with st.sidebar:
     st.subheader(f"🏢 Uzņēmums: **{S.active_profile}**")
     if st.button("🚪 Izrakstīties (Logout)", use_container_width=True):
@@ -357,6 +620,17 @@ with st.sidebar:
         S.pop("result", None)
         S.pop("cls_df", None)
         st.rerun()
+
+    st.markdown("---")
+    st.subheader("📅 Finanšu gada iestatījumi")
+    selected_fy_month = st.selectbox(
+        "Finanšu gada sākuma mēnesis:",
+        options=list(MONTH_NAMES_LV.keys()),
+        format_func=lambda m: MONTH_NAMES_LV[m],
+        index=list(MONTH_NAMES_LV.keys()).index(S.get("fy_start_month", 1)),
+        help="Nosaka, no kura mēneša tiek rēķināti uzkrājošie (YTD) rādītāji S, TVC, T un NP.",
+    )
+    S.fy_start_month = selected_fy_month
 
     st.markdown("---")
     st.subheader("🗄️ Datubāzes statuss")
@@ -405,7 +679,6 @@ with st.sidebar:
                         S.commentary = loaded["commentary"]
                     else:
                         S.pop("commentary", None)
-                    S.chat = []
                     st.rerun()
         with col_del:
             if st.button("🗑️", help="Dzēst šo saglabāto tabulu", use_container_width=True):
@@ -420,13 +693,51 @@ with st.sidebar:
         st.rerun()
 
 
+# --- GALVENAIS VIRSRAKSTS ---
+st.title("📊 TOC-FIN: Finanšu diagnostika un vadības lēmumu sistēma")
+st.markdown("""
+**TOC-FIN** pārvērš grāmatvedības datus vadības lēmumiem piemērotā ekonomiskajā informācijā. 
+Sistēma atbrīvo vadības komandu no mākslīgām pašizmaksas alokācijām, nodalot patiesi mainīgās izmaksas ($TVC$) 
+no kapacitātes uzturēšanas izmaksām ($OE$), lai novērtētu patieso caurlaidību ($T$), produktivitāti ($PR = T / OE$) un modelētu nākotnes lēmumus.
+""")
+
+
+# ------------------------------------------------------------------ VISUR PIEEJAMAIS AI AĢENTS (JEBKURĀ POSMĀ)
+def render_always_available_agent():
+    with st.expander("💬 Saruna ar TOC-FIN aģentu un PZA nolasīšanas diagnostika (pieejams jebkurā solī)", expanded=bool(S.get("global_chat"))):
+        st.caption(
+            "Uzdodiet jebkuru jautājumu par nolasītajiem PZA kontiem (piem., *'Kāpēc konts X nav sarakstā vai nolasījās nepareizi?'*), "
+            "klasifikāciju vai finanšu rādītājiem. Aģents redz visas faila rindas un aprēķinus."
+        )
+        if "global_chat" not in S:
+            S.global_chat = []
+
+        for msg in S.global_chat:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+        col_q, col_clr = st.columns([5, 1])
+        with col_clr:
+            if S.global_chat and st.button("🧹 Notīrīt čatu", use_container_width=True):
+                S.global_chat = []
+                st.rerun()
+
+        q_input = st.chat_input("Rakstiet jautājumu aģentam šeit (piem., Kāpēc nepareizi nolasīja PZA kontu...)...", key="global_agent_input")
+        if q_input:
+            S.global_chat.append({"role": "user", "content": q_input})
+            with st.spinner("Aģents pārbauda PZA struktūru un datus..."):
+                ans = ask_global_assistant(q_input)
+                S.global_chat.append({"role": "assistant", "content": ans})
+            st.rerun()
+
+
 def render_results_and_simulation(res, report_title: str = ""):
     if report_title:
         st.info(f"📂 **Atvērta atskaite:** {report_title}")
 
     main_tab1, main_tab2 = st.tabs(
         [
-            "📊 1. TOC-FIN Analytics (Vēsturiskā diagnostika un Vadības analīze)",
+            "📊 1. TOC-FIN Analytics (Vēsturiskā diagnostika un Uzkrājošie rādītāji)",
             "⚡ 2. TOC-FIN Decision Support (Procentu % Simulācija pa periodiem)",
         ]
     )
@@ -463,7 +774,14 @@ def render_results_and_simulation(res, report_title: str = ""):
 
         st.subheader("Finanšu pārskata tabula (T* skats)")
         st.markdown(
-            render_unified_toc_tables_html(res.amounts, res.main, res.kpi, res.row_kinds),
+            render_unified_toc_tables_html(
+                res.amounts,
+                res.main,
+                res.kpi,
+                res.row_kinds,
+                fy_start_month=S.get("fy_start_month", 1),
+                show_cumulative=True,
+            ),
             unsafe_allow_html=True,
         )
 
@@ -473,7 +791,14 @@ def render_results_and_simulation(res, report_title: str = ""):
 
         st.markdown("---")
         st.subheader("📝 Vadības kopsavilkums un stratēģiskie secinājumi")
-        tables_md = res.amounts.round(0).to_markdown() + "\n\n" + res.kpi.round(3).to_markdown()
+        cum_df_md, _, _ = compute_cumulative_toc_df(res.amounts, fy_start_month=S.get("fy_start_month", 1))
+        tables_md = (
+            res.amounts.round(0).to_markdown()
+            + "\n\n"
+            + res.kpi.round(3).to_markdown()
+            + "\n\nUzkrājošie rādītāji (S, TVC, T, NP):\n"
+            + cum_df_md.round(0).to_markdown()
+        )
 
         knowledge_context = f"TOC-FIN zināšanu bāze:\n{knowledge_file}\n\n" if knowledge_file else ""
         COMMENT_SYSTEM = (
@@ -503,37 +828,6 @@ def render_results_and_simulation(res, report_title: str = ""):
                     st.rerun()
         else:
             st.markdown(S.commentary)
-
-            st.markdown("---")
-            st.subheader("💬 Diskusija ar TOC-FIN finanšu konsultantu")
-            for msg in S.get("chat", []):
-                with st.chat_message(msg["role"]):
-                    st.markdown(msg["content"])
-
-            user_q = st.chat_input("Uzdodiet jautājumu par šiem skaitļiem vai lēmumu scenārijiem...")
-            if user_q:
-                S.chat.append({"role": "user", "content": user_q})
-                with st.chat_message("user"):
-                    st.markdown(user_q)
-
-                with st.chat_message("assistant"):
-                    with st.spinner("Domā..."):
-                        chat_messages = [
-                            {
-                                "role": "user",
-                                "content": f"Konteksts — uzņēmuma TOC-FIN tabulas:\n\n{tables_md}\n\nSākotnējā analīze:\n{S.commentary}",
-                            },
-                            {"role": "assistant", "content": "Sapratu datus. Esmu gatavs atbildēt uz vadības jautājumiem."},
-                        ] + S.chat
-                        resp = get_client().messages.create(
-                            model=MODEL,
-                            max_tokens=1500,
-                            system=COMMENT_SYSTEM,
-                            messages=chat_messages,
-                        )
-                        ans = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
-                        st.markdown(ans)
-                        S.chat.append({"role": "assistant", "content": ans})
 
     with main_tab2:
         st.subheader("⚡ Interaktīvā scenāriju un mērķu simulācija (% izmaiņas pret izvēlēto periodu)")
@@ -676,6 +970,8 @@ def render_results_and_simulation(res, report_title: str = ""):
                 res.row_kinds,
                 title_kpi="📈 Simulētie Produktivitātes un atdeves rādītāji",
                 grey_cols={"Bāze KOPĀ"},
+                fy_start_month=S.get("fy_start_month", 1),
+                show_cumulative=False,
             ),
             unsafe_allow_html=True,
         )
@@ -685,6 +981,7 @@ def render_results_and_simulation(res, report_title: str = ""):
 uploaded = st.file_uploader("Augšupielādējiet PZA failu (CSV vai Excel formātā)", type=["csv", "xlsx", "xlsm", "xls"])
 
 if uploaded is None:
+    render_always_available_agent()
     if "result" in S and S.get("loaded_report_meta"):
         meta = S.loaded_report_meta
         title_str = f"{meta.get('report_name')} ({meta.get('periods_label')})"
@@ -698,6 +995,11 @@ fid = hashlib.md5(data).hexdigest()
 if S.get("fid") != fid:
     S.fid = fid
     S.grids = load_grids(uploaded.name, data)
+    S.pop("structure", None)
+    S.pop("analysis", None)
+    S.pop("cls_df", None)
+    S.pop("result", None)
+    S.pop("manual_leaf_overrides", None)
 
 grids: dict[str, pd.DataFrame] = S.grids
 
@@ -713,13 +1015,69 @@ if "structure" not in S:
 stc: Structure = S.structure
 try:
     ex = extract_lines(grids[stc.sheet], stc)
-    S.analysis = analyze(ex, stc)
+    base_analysis = analyze(ex, stc)
+    # Pielietojam manuālos labojumus, ja lietotājs ir iekļāvis vai izslēdzis kādu PZA rindu
+    overrides: dict[str, bool] = S.get("manual_leaf_overrides", {})
+    if overrides:
+        base_leaf_ids = {lf.id for lf in base_analysis.leaves}
+        new_leaves = []
+        for ln in base_analysis.ex.lines:
+            if stc.result_row is not None and ln.row == stc.result_row:
+                continue
+            is_leaf = overrides.get(ln.id, ln.id in base_leaf_ids)
+            if is_leaf:
+                new_leaves.append(ln)
+        base_analysis.leaves = new_leaves
+    S.analysis = base_analysis
 except Exception as e:
     st.error(f"Kļūda datu ielasīšanā: {e}")
     st.stop()
 
 an = S.analysis
 display_labels = build_display_labels(an.leaves)
+
+# --- VISUR PIEEJAMAIS AI AĢENTS UN PZA STRUKTŪRAS DIAGNOSTIKA ---
+render_always_available_agent()
+
+with st.expander("🛠️ PZA struktūras diagnostika un manuāla rindu korekcija (ja kāds konts nav nolasīts pareizi)"):
+    st.markdown(
+        "Šeit redzamas **visas no faila nolasītās rindas**. Ja sistēma kādu kontu kļūdaini uzskatījusi par virsrakstu/kopsummu "
+        "(vai otrādi — iekļāvusi starpsummu kā kontu), ieķeksējiet vai izņemiet ķeksi kolonnā **'Iekļaut kā kontu'** un nospiediet pogu zemāk."
+    )
+    leaf_id_set = {lf.id for lf in an.leaves}
+    diag_rows = []
+    for ln in an.ex.lines:
+        is_res = stc.result_row is not None and ln.row == stc.result_row
+        tot_v = float(ln.vals.sum()) if hasattr(ln, "vals") else 0.0
+        first_v = float(ln.vals.iloc[0]) if (hasattr(ln, "vals") and len(ln.vals) > 0) else 0.0
+        diag_rows.append(
+            {
+                "id": ln.id,
+                "Rinda failā": ln.row,
+                "Iekļaut kā kontu": (ln.id in leaf_id_set) and not is_res,
+                "Nosaukums PZA failā": ln.label,
+                "Pilns ceļš / Sadaļa": ln.path,
+                "1. perioda summa": round(first_v, 2),
+                "Summa visos periodos": round(tot_v, 2),
+                "Statuss": "🏁 PZA Rezultāta rinda" if is_res else ("✅ Konts" if ln.id in leaf_id_set else "⏭️ Izlaists (Starpsumma / Virsraksts)"),
+            }
+        )
+    diag_df = pd.DataFrame(diag_rows)
+    edited_diag = st.data_editor(
+        diag_df,
+        hide_index=True,
+        use_container_width=True,
+        disabled=["id", "Rinda failā", "Nosaukums PZA failā", "Pilns ceļš / Sadaļa", "1. perioda summa", "Summa visos periodos", "Statuss"],
+        key="pza_diag_editor",
+    )
+    if st.button("✅ Saglabāt PZA rindu izmaiņas un pārlasīt kontus"):
+        new_overrides = {}
+        for _, r_d in edited_diag.iterrows():
+            new_overrides[r_d["id"]] = bool(r_d["Iekļaut kā kontu"])
+        S.manual_leaf_overrides = new_overrides
+        S.pop("cls_df", None)
+        S.pop("result", None)
+        st.rerun()
 
 st.header(f"1. Kontu ekonomiskā klasifikācija ({S.active_profile})")
 
@@ -936,7 +1294,6 @@ if st.button("🚀 Apstiprināt klasifikāciju, veikt aprēķinu un saglabāt", 
             st.warning(f"Kļūda saglabājot tabulu: {profile.last_error}")
 
     S.pop("commentary", None)
-    S.chat = []
     st.rerun()
 
 if "result" in S:
