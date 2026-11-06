@@ -1248,19 +1248,23 @@ display_labels = build_display_labels(an.leaves)
 with st.expander("PZA rindu korekcija"):
     leaf_id_set = {lf.id for lf in an.leaves}
     diag_rows = []
-    for ln in an.ex.lines:
-        is_res = stc.result_row is not None and ln.row == stc.result_row
+    for idx, ln in enumerate(an.ex.lines):
+        ln_id = getattr(ln, "id", f"row_{idx}")
+        ln_row = getattr(ln, "row", idx + 1)
+        ln_label = getattr(ln, "label", str(ln))
+        ln_path = getattr(ln, "path", "")
+        is_res = stc.result_row is not None and ln_row == stc.result_row
         first_v, tot_v = _safe_line_stats(getattr(ln, "vals", None))
         diag_rows.append(
             {
-                "id": ln.id,
-                "Rinda": ln.row,
-                "Iekļaut kā kontu": (ln.id in leaf_id_set) and not is_res,
-                "Nosaukums": ln.label,
-                "Sadaļa": getattr(ln, "path", ""),
+                "id": ln_id,
+                "Rinda": ln_row,
+                "Iekļaut kā kontu": (ln_id in leaf_id_set) and not is_res,
+                "Nosaukums": ln_label,
+                "Sadaļa": ln_path,
                 "1. periods": round(first_v, 2),
                 "Kopā": round(tot_v, 2),
-                "Statuss": "Rezultāta rinda" if is_res else ("Konts" if ln.id in leaf_id_set else "Izlaists"),
+                "Statuss": "Rezultāta rinda" if is_res else ("Konts" if ln_id in leaf_id_set else "Izlaists"),
             }
         )
     diag_df = pd.DataFrame(diag_rows)
