@@ -72,26 +72,52 @@ class LoadedReportResult:
 
 def _load_anthropic_key() -> str:
     import os
-    for k in ("ANTHROPIC_API_KEY", "anthropic_api_key", "CLAUDE_API_KEY", "API_KEY"):
-        val = os.environ.get(k) or st.secrets.get(k, "")
-        if val and isinstance(val, str) and val.strip():
-            return val.strip().strip('"').strip("'")
-    for sec in ("anthropic", "claude", "general", "default"):
-        if sec in st.secrets:
-            try:
-                sec_obj = st.secrets[sec]
-                for k in ("api_key", "ANTHROPIC_API_KEY", "key"):
-                    val = sec_obj.get(k, "")
-                    if val and str(val).strip():
-                        return str(val).strip().strip('"').strip("'")
-            except Exception:
-                pass
+    # 1. Pārbaudām vides mainīgos
+    for k, v in os.environ.items():
+        if isinstance(v, str) and v.strip().startswith("sk-ant-"):
+            return v.strip().strip('"').strip("'")
+        if k.upper() in ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY") and v.strip():
+            return v.strip().strip('"').strip("'")
+
+    # 2. Rekursīvi pārmeklējam visus st.secrets laukus un apakšsadaļas
+    def _scan_dict(d) -> str:
+        try:
+            items = d.items()
+        except Exception:
+            return ""
+        for k, v in items:
+            if isinstance(v, str):
+                clean = v.strip().strip('"').strip("'")
+                if clean.startswith("sk-ant-"):
+                    return clean
+                if str(k).upper() in ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY", "API_KEY") and not clean.startswith("eyJ") and not clean.startswith("http"):
+                    return clean
+            elif hasattr(v, "items"):
+                found = _scan_dict(v)
+                if found:
+                    return found
+        return ""
+
+    try:
+        res = _scan_dict(st.secrets)
+        if res:
+            return res
+    except Exception:
+        pass
     return ""
 
 
 API_KEY = _load_anthropic_key()
 if not API_KEY:
-    st.error("Nav atrasta ANTHROPIC_API_KEY. Pārbaudiet Streamlit Cloud -> Settings -> Secrets.")
+    try:
+        available_keys = list(st.secrets.keys())
+    except Exception:
+        available_keys = []
+    st.error(
+        f"Nav atrasta ANTHROPIC_API_KEY. Šobrīd Streamlit Secrets atrastās sadaļas/atslēgas ir: {available_keys}. "
+        "Atveriet Streamlit Cloud -> Manage app -> Settings -> Secrets un pievienojiet rindiņu:\n\n"
+        'ANTHROPIC_API_KEY = "sk-ant-..."'
+    )
     st.stop()
 
 
