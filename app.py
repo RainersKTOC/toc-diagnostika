@@ -1481,7 +1481,7 @@ if run_calc:
             res_obj=res,
             commentary="",
         )
-        profile.increment_usage()
+        profile.log_api_usage(500, 0.005)
         S.current_report_id = rep_id
         if ok_map and ok_rep:
             st.toast("Atskaite saglabāta.")
