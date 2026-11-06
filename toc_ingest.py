@@ -1,5 +1,5 @@
 """
-toc_ingest.py — PZA failu ielasīšana un automātiskā zīmju normalizācija (v2.0)
+toc_ingest.py — PZA failu ielasīšana un automātiskā zīmju normalizācija (v2.1)
 """
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ GENERIC_TOTAL = re.compile(r"^\W*(kopā|kopsumma|kopējais|kopējās|total|subto
 ACCOUNT_CODE = re.compile(r"^\s*(\d{4,6})\s+")
 HAS_LETTER = re.compile(r"[A-Za-zĀ-žА-я]")
 
-# Atslēgvārdi, kas pēc grāmatvedības un TOC loģikas vienmēr ir izdevumi/izmaksas
-EXPENSE_KEYWORDS = ["izmaksa", "izdevum", "pašizmaksa", "alga", "nodokl", "amortizācij", "reklām", "nom", "pakalpojums", "transport", "materiāl", "biroj", "saimniecisk"]
+EXPENSE_KEYWORDS = ["izmaks", "izdevum", "pašizmaksa", "alga", "nodokl", "amortizācij", "reklām", "nom", "pakalpojums", "transport", "materiāl", "biroj", "saimniecisk"]
+
 
 def decode_bytes(data: bytes) -> str:
     for enc in ("utf-8-sig", "cp1257", "cp1252", "latin-1"):
@@ -278,14 +278,13 @@ def extract_lines(grid: pd.DataFrame, st: Structure) -> Extracted:
         if not label and not has:
             continue
         
-        # Automātiskā zīmju normalizācija: ja tā ir izmaksa/pašizmaksa un mēnešos ieviesusies pozitīva summa, padarām to negatīvu
         lbl_lower = label.lower()
-        is_cost_line = any(kw in lbl_lower for kw in [izmaks, izdevum, pašizmaksa, biroja, nomas, reklām, algas, nodokļ])
+        is_cost_line = any(kw in lbl_lower for kw in EXPENSE_KEYWORDS)
         
         vec_vals = []
         for v in sel:
             val = v or 0.0
-            if is_cost_line and val > 0 and not any(in, ienākum, apgrozīj):
+            if is_cost_line and val > 0 and not any(inc in lbl_lower for inc in ["ienākum", "apgrozījum", "ieņēmum"]):
                 val = -val
             vec_vals.append(val)
 
