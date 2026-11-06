@@ -1,5 +1,9 @@
 """
-app.py — TOC-FIN Finanšu diagnostikas un vadības lēmumu sistēma (v15.0)
+app.py — TOC-FIN Finanšu diagnostikas un vadības lēmumu sistēma (v16.0)
+- Administratora vadības panelis (klientu izveide, paroles, limiti, pārslēgšanās uz jebkura klienta profilu)
+- Salaboti AttributeError (ln.vals un Structure atribūtiem)
+- Pilns atskaites nosaukums un dzēšanas apstiprinājums sānjoslā
+- Tieša poga 'Rediģēt kontus' sānjoslā, kas aizved uz kontu rediģēšanu jebkurā brīdī
 Project ID: amprqueamdcxpjufigvm
 """
 from __future__ import annotations
@@ -67,6 +71,26 @@ def fmt_num(x) -> str:
 
 def fmt_pct_int(x) -> str:
     return "" if pd.isna(x) else f"{x * 100:.0f}%"
+
+
+def _safe_line_stats(vals) -> tuple[float, float]:
+    """Droši aprēķina (1. perioda summu, kopējo summu) neatkarīgi no tā, vai vals ir dict, ndarray, list vai Series."""
+    if vals is None:
+        return 0.0, 0.0
+    try:
+        if isinstance(vals, dict):
+            nums = [float(v) for v in vals.values() if v is not None and not pd.isna(v)]
+        elif hasattr(vals, "values") and not isinstance(vals, (list, tuple, np.ndarray)):
+            arr = np.asarray(vals.values, dtype=float)
+            nums = [float(x) for x in arr if not np.isnan(x)]
+        else:
+            arr = np.asarray(vals, dtype=float).flatten()
+            nums = [float(x) for x in arr if not np.isnan(x)]
+        if not nums:
+            return 0.0, 0.0
+        return float(nums[0]), float(sum(nums))
+    except Exception:
+        return 0.0, 0.0
 
 
 MONTH_NAMES_LV = {
@@ -367,7 +391,7 @@ def render_unified_toc_tables_html(
             )
         html.append("</tr>")
 
-    # --- 3. TABULA: UZKRĀJOŠIE RĀDĪTĀJI (SASKAŅOTS STILS AR FINANŠU UN KPI TABULĀM) ---
+    # --- 3. TABULA: UZKRĀJOŠIE RĀDĪTĀJI ---
     if show_cumulative:
         cum_df, cum_periods, _ = compute_cumulative_toc_df(amounts_df, fy_start_month=fy_start_month)
         html.append(f'<tr class="spacer-row"><td colspan="{total_cols}">Uzkrājošie rādītāji</td></tr>')
@@ -438,35 +462,35 @@ for fname in ["toc_knowledge.txt", "toc_knowledge.md", "knowledge.txt"]:
 S = st.session_state
 
 
-# ------------------------------------------------------------------ DIAGNOSTIKAS UN ASISTENTA KONTEKSTS
+# ------------------------------------------------------------------ DROŠS DIAGNOSTIKAS KONTEKSTS (BEZ ATTRIBUTEERROR)
 def build_global_diagnostic_context() -> str:
     parts = [f"Aktīvais uzņēmuma profils: {S.get('active_profile', 'Nav')}"]
     parts.append(f"Finanšu gada sākuma mēnesis: {MONTH_NAMES_LV.get(S.get('fy_start_month', 1), 'Janvāris')}")
 
-    if "structure" in S and S.get("structure"):
-        stc: Structure = S.get("structure")
-        parts.append(
-            f"\n--- 1. FAILA STRUKTŪRA ---\n"
-            f"Lapa: {stc.sheet} | Kontu kolonnas: {stc.label_cols} | "
-            f"Galvenes rinda: {stc.header_row} | Rezultāta rinda: {stc.result_row} | Periodi: {stc.period_cols}"
-        )
+    if "structure" in S and S.get("structure") is not None:
+        stc = S.get("structure")
+        try:
+            stc_dict = vars(stc) if hasattr(stc, "__dict__") else str(stc)
+            parts.append(f"\n--- 1. FAILA STRUKTŪRA ---\n{stc_dict}")
+        except Exception:
+            pass
 
     if "analysis" in S and S.analysis is not None:
         an = S.analysis
         leaf_ids = {lf.id for lf in an.leaves}
         lines_info = []
+        res_row = getattr(S.get("structure"), "result_row", None)
         for ln in an.ex.lines:
             status = "KONTS" if ln.id in leaf_ids else (
-                "REZULTĀTA RINDA" if (S.get("structure") and ln.row == S.structure.result_row)
+                "REZULTĀTA RINDA" if (res_row is not None and ln.row == res_row)
                 else "IZLAISTS (STARPSUMMA / VIRSRAKSTS)"
             )
-            tot_val = float(ln.vals.sum()) if hasattr(ln, "vals") else 0.0
-            first_val = float(ln.vals.iloc[0]) if (hasattr(ln, "vals") and len(ln.vals) > 0) else 0.0
+            first_val, tot_val = _safe_line_stats(getattr(ln, "vals", None))
             lines_info.append(
-                f"Rinda #{ln.row} (id={ln.id}): '{ln.label}' | Ceļš: '{ln.path}' | "
+                f"Rinda #{ln.row} (id={ln.id}): '{ln.label}' | Sadaļa: '{getattr(ln, 'path', '')}' | "
                 f"Statuss: {status} | 1. mēn.: {first_val:,.2f} | Kopā: {tot_val:,.2f}"
             )
-        parts.append("\n--- 2. NOLASĪTĀS PZA RINDAS ---\n" + "\n".join(lines_info[:120]))
+        parts.append("\n--- 2. NOLASĪTĀS PZA RINDAS ---\n" + "\n".join(lines_info[:140]))
 
     if "cls_df" in S and S.cls_df is not None:
         df_c = S.cls_df[["id", "Konts", "Displeja_konts", "Grupa", "Ieņēmums"]]
@@ -489,7 +513,7 @@ def ask_global_assistant(user_question: str) -> str:
         "Tu esi TOC-FIN sistēmas finanšu un tehniskās diagnostikas asistents. "
         "Atbildi tieši, skaidri un konkrēti latviešu valodā. "
         "Ja lietotājs jautā par nepareizi nolasītu PZA kontu vai skaitļu nesakritību, pārbaudi nolasītās PZA rindas, "
-        "norādi precīzu rindas numuru, statusu un summas, un paskaidro, kā to izlabot sadaļā 'PZA rindu korekcija' vai kontu tabulā."
+        "norādi precīzu rindas numuru, statusu un summas, un paskaidro, kā to izlabot sadaļā 'PZA rindu korekcija' vai 'Rediģēt kontus'."
         f"{know}"
     )
     history = S.get("global_chat", [])
@@ -507,106 +531,216 @@ def ask_global_assistant(user_question: str) -> str:
     return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
 
 
-# ------------------------------------------------------------------ AUTENTIFIKĀCIJAS EKRĀNS
+# ------------------------------------------------------------------ 1. DROŠAS AUTORIZĀCIJAS EKRĀNS (TIKAI LOGIN)
 if not S.get("authenticated", False):
-    st.title("TOC-FIN Vadības Sistēma")
-    st.markdown("Ielogojieties uzņēmuma profilā vai izveidojiet jaunu.")
+    col_l1, col_l2, col_l3 = st.columns([1, 1.4, 1])
+    with col_l2:
+        st.title("TOC-FIN Vadības Sistēma")
+        st.markdown("Ievadiet piešķirto uzņēmuma lietotājvārdu un paroli.")
 
-    auth_tab1, auth_tab2 = st.tabs(["Ielogoties", "Jauns profils"])
-    temp_store = SupabaseProfileStore()
-
-    with auth_tab1:
+        temp_store = SupabaseProfileStore()
         with st.form("login_form"):
-            login_company = st.text_input("Uzņēmuma nosaukums")
+            login_company = st.text_input("Lietotājvārds / Uzņēmums")
             login_password = st.text_input("Parole", type="password")
-            login_submitted = st.form_submit_button("Ielogoties", type="primary")
+            login_submitted = st.form_submit_button("Ielogoties", type="primary", use_container_width=True)
 
             if login_submitted:
-                ok, msg = temp_store.authenticate(login_company, login_password)
+                ok, msg, is_adm = temp_store.authenticate(login_company, login_password)
                 if ok:
                     S.authenticated = True
-                    S.active_profile = login_company.strip()
-                    st.rerun()
-                else:
-                    st.error(msg)
-
-    with auth_tab2:
-        with st.form("register_form"):
-            reg_company = st.text_input("Uzņēmuma nosaukums")
-            reg_password = st.text_input("Parole (min. 4 simboli)", type="password")
-            reg_submitted = st.form_submit_button("Izveidot profilu", type="primary")
-
-            if reg_submitted:
-                ok, msg = temp_store.register_company(reg_company, reg_password)
-                if ok:
-                    S.authenticated = True
-                    S.active_profile = reg_company.strip()
+                    S.is_admin = is_adm
+                    if is_adm:
+                        S.active_profile = "admin"
+                        S.view_mode = "admin_panel"
+                    else:
+                        S.active_profile = login_company.strip()
+                        S.view_mode = "workspace"
                     st.rerun()
                 else:
                     st.error(msg)
     st.stop()
 
 
-# ------------------------------------------------------------------ SĀNJOSLA (KOMPAKTA UN TĪRA)
+# ------------------------------------------------------------------ 2. ADMINISTRATORA PANELIS (KLIENTU UN LIMITU PĀRVALDĪBA)
+admin_store = SupabaseProfileStore()
+
+if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
+    top_a1, top_a2 = st.columns([5, 1])
+    with top_a1:
+        st.title("Administratora vadības panelis")
+        st.caption("Klientu profilu, paroļu, limitu un saglabāto datu pārvaldība.")
+    with top_a2:
+        st.write("")
+        if st.button("Iziet", use_container_width=True):
+            S.clear()
+            st.rerun()
+
+    companies = admin_store.list_all_companies_admin()
+
+    col_adm_left, col_adm_right = st.columns([1.8, 1.2])
+
+    with col_adm_left:
+        st.subheader(f"Reģistrētie klientu profili ({len(companies)})")
+        if not companies:
+            st.info("Vēl nav izveidots neviens klienta profils. Izveidojiet to labajā pusē.")
+        else:
+            comp_df = pd.DataFrame(companies)[
+                ["company_name", "is_active", "usage_count", "monthly_limit", "accounts_count", "reports_count", "created_at", "notes"]
+            ]
+            comp_df.columns = ["Uzņēmums (Lietotājvārds)", "Aktīvs", "Izlietots", "Mēneša limits", "Konti", "Atskaites", "Izveidots", "Piezīmes"]
+            st.dataframe(comp_df, use_container_width=True, hide_index=True)
+
+            st.markdown("#### Piekļūt klienta profilam (skatīt un rediģēt klienta datus)")
+            c_names = [c["company_name"] for c in companies]
+            sel_c1, sel_c2, sel_c3 = st.columns([2, 1, 1])
+            with sel_c1:
+                target_client = st.selectbox("Izvēlieties klientu", options=c_names, label_visibility="collapsed")
+            with sel_c2:
+                if st.button("Atvērt klienta vidi", type="primary", use_container_width=True):
+                    S.active_profile = target_client
+                    S.view_mode = "workspace"
+                    S.pop("result", None)
+                    S.pop("cls_df", None)
+                    S.pop("loaded_report_meta", None)
+                    st.rerun()
+            with sel_c3:
+                if st.button("Dzēst klientu", use_container_width=True):
+                    S.confirm_del_client = target_client
+
+            if S.get("confirm_del_client") == target_client:
+                st.warning(f"Vai tiešām dzēst profilu **{target_client}** un visas tā atskaites?")
+                dc1, dc2 = st.columns(2)
+                with dc1:
+                    if st.button("Jā, dzēst profilu", type="primary", use_container_width=True):
+                        admin_store.delete_company_admin(target_client)
+                        S.pop("confirm_del_client", None)
+                        st.rerun()
+                with dc2:
+                    if st.button("Atcelt", use_container_width=True):
+                        S.pop("confirm_del_client", None)
+                        st.rerun()
+
+    with col_adm_right:
+        st.subheader("Izveidot vai rediģēt klientu")
+        with st.form("admin_manage_client_form"):
+            f_cname = st.text_input("Uzņēmuma nosaukums (Lietotājvārds)", placeholder="piem., SIA Klients")
+            f_pw = st.text_input("Parole (atstājiet tukšu, ja maināt tikai limitu esošam)", type="password")
+            f_limit = st.number_input("Mēneša aprēķinu limits", min_value=1, max_value=10000, value=50, step=5)
+            f_active = st.checkbox("Profils ir aktīvs (atļauta ielogošanās)", value=True)
+            f_reset = st.checkbox("Nullēt izlietoto aprēķinu skaitītāju (0)", value=False)
+            f_notes = st.text_input("Iekšējās piezīmes (redz tikai administrators)")
+            sub_adm = st.form_submit_button("Saglabāt klienta profilu", type="primary", use_container_width=True)
+
+            if sub_adm:
+                ok_a, msg_a = admin_store.create_or_update_company_admin(
+                    company_name=f_cname,
+                    password=f_pw,
+                    monthly_limit=int(f_limit),
+                    is_active=f_active,
+                    notes=f_notes,
+                    reset_usage=f_reset,
+                )
+                if ok_a:
+                    st.success(msg_a)
+                    st.rerun()
+                else:
+                    st.error(msg_a)
+    st.stop()
+
+
+# ------------------------------------------------------------------ 3. SĀNJOSLA (KLIENTA VAI ADMIN-IMPERSONATION VIDE)
 profile = SupabaseProfileStore(company_name=S.active_profile)
 
 if "fy_start_month" not in S:
     S.fy_start_month = 1
 
 with st.sidebar:
-    st.markdown(f"**Profils:** {S.active_profile}")
+    if S.get("is_admin", False):
+        st.info(f"Admin skats: **{S.active_profile}**")
+        if st.button("← Atpakaļ uz Admin paneli", use_container_width=True):
+            S.view_mode = "admin_panel"
+            S.pop("result", None)
+            S.pop("cls_df", None)
+            st.rerun()
+    else:
+        st.markdown(f"**Profils:** {S.active_profile}")
+
     col_s1, col_s2 = st.columns(2)
     with col_s1:
         if st.button("Jauns aprēķins", use_container_width=True):
+            S.view_mode = "workspace"
             S.pop("result", None)
             S.pop("cls_df", None)
             S.pop("loaded_report_meta", None)
             st.rerun()
     with col_s2:
         if st.button("Iziet", use_container_width=True):
-            S.authenticated = False
-            S.pop("active_profile", None)
-            S.pop("result", None)
-            S.pop("cls_df", None)
+            S.clear()
             st.rerun()
 
+    # Tieša poga uz kontu rediģēšanu jebkurā brīdī
+    saved_acc_count = profile.count_saved()
+    if st.button(f"Rediģēt kontus ({saved_acc_count})", use_container_width=True):
+        S.view_mode = "edit_accounts"
+        st.rerun()
+
+    # Saglabātās atskaites — pilns nosaukums un skaidra dzēšana ar apstiprinājumu
     saved_reports = profile.list_reports()
     with st.expander(f"Saglabātās atskaites ({len(saved_reports)})", expanded=False):
         if not saved_reports:
             st.caption("Nav saglabātu atskaišu.")
         else:
-            report_labels = {}
-            for rep in saved_reports:
-                dt_str = str(rep.get("created_at", ""))[:10]
-                lbl = f"{rep.get('report_name')} ({dt_str})"
-                report_labels[lbl] = rep["id"]
+            rep_by_id = {r["id"]: r for r in saved_reports}
+            chosen_rep_id = st.selectbox(
+                "Izvēlieties atskaiti",
+                options=list(rep_by_id.keys()),
+                format_func=lambda rid: f"{rep_by_id[rid].get('report_name')} ({str(rep_by_id[rid].get('created_at', ''))[:10]})",
+                label_visibility="collapsed",
+            )
+            sel_rep = rep_by_id[chosen_rep_id]
+            # Parādām pilnu atskaites nosaukumu un periodu, lai nekas nav nogriezts
+            st.caption(
+                f"**Nosaukums:** {sel_rep.get('report_name')}\n\n"
+                f"**Periods:** {sel_rep.get('periods_label') or '—'}"
+            )
 
-            chosen_rep_lbl = st.selectbox("Atskaite", options=list(report_labels.keys()), label_visibility="collapsed")
-            chosen_rep_id = report_labels[chosen_rep_lbl]
+            if st.button("Atvērt atskaiti", type="primary", use_container_width=True):
+                loaded = profile.load_report(chosen_rep_id)
+                if loaded:
+                    S.result = LoadedReportResult(
+                        amounts=loaded["amounts"],
+                        main=loaded["main"],
+                        kpi=loaded["kpi"],
+                        row_kinds=loaded["row_kinds"],
+                        reconciliation=loaded["reconciliation"],
+                        by_group={},
+                    )
+                    S.loaded_report_meta = loaded
+                    S.current_report_id = loaded["id"]
+                    S.view_mode = "workspace"
+                    if loaded.get("commentary"):
+                        S.commentary = loaded["commentary"]
+                    else:
+                        S.pop("commentary", None)
+                    st.rerun()
 
-            c_op, c_dl = st.columns([3, 1])
-            with c_op:
-                if st.button("Atvērt", type="primary", use_container_width=True):
-                    loaded = profile.load_report(chosen_rep_id)
-                    if loaded:
-                        S.result = LoadedReportResult(
-                            amounts=loaded["amounts"],
-                            main=loaded["main"],
-                            kpi=loaded["kpi"],
-                            row_kinds=loaded["row_kinds"],
-                            reconciliation=loaded["reconciliation"],
-                            by_group={},
-                        )
-                        S.loaded_report_meta = loaded
-                        S.current_report_id = loaded["id"]
-                        if loaded.get("commentary"):
-                            S.commentary = loaded["commentary"]
-                        else:
-                            S.pop("commentary", None)
-                        st.rerun()
-            with c_dl:
-                if st.button("Dzēst", use_container_width=True):
-                    if profile.delete_report(chosen_rep_id):
+            if st.button("Dzēst atskaiti", use_container_width=True):
+                S.confirm_delete_rep_id = chosen_rep_id
+
+            if S.get("confirm_delete_rep_id") == chosen_rep_id:
+                st.warning(f"Vai tiešām dzēst atskaiti **{sel_rep.get('report_name')}**?")
+                cd1, cd2 = st.columns(2)
+                with cd1:
+                    if st.button("Jā, dzēst", type="primary", use_container_width=True):
+                        if profile.delete_report(chosen_rep_id):
+                            S.pop("confirm_delete_rep_id", None)
+                            if S.get("current_report_id") == chosen_rep_id:
+                                S.pop("result", None)
+                                S.pop("loaded_report_meta", None)
+                            st.rerun()
+                with cd2:
+                    if st.button("Atcelt", use_container_width=True):
+                        S.pop("confirm_delete_rep_id", None)
                         st.rerun()
 
     with st.expander("Iestatījumi", expanded=False):
@@ -619,17 +753,16 @@ with st.sidebar:
         S.fy_start_month = selected_fy_month
 
         st.markdown("---")
+        ok_q, q_info = profile.check_quota()
         if profile.is_connected:
-            saved_cnt = profile.count_saved()
-            if profile.last_error:
-                st.caption(f"Datubāzes brīdinājums: {profile.last_error}")
-            else:
-                st.caption(f"Datubāze: pieslēgta ({saved_cnt} konti)")
+            st.caption(f"Datubāze: pieslēgta ({saved_acc_count} konti)")
+            if q_info:
+                st.caption(f"Mēneša kvota: {q_info}")
         else:
             st.caption(f"Datubāze: nav savienojuma ({profile.init_error})")
 
 
-# ------------------------------------------------------------------ VIRSRAKSTS UN ATVERAMS AĢENTA LOGS MALĀ
+# ------------------------------------------------------------------ VIRSRAKSTS UN ASISTENTA LOGS MALĀ
 top_col1, top_col2 = st.columns([5, 1])
 with top_col1:
     st.title("TOC-FIN: Finanšu diagnostika un vadības lēmumu sistēma")
@@ -658,7 +791,10 @@ with top_col2:
 
             if sub_q and q_in.strip():
                 S.global_chat.append({"role": "user", "content": q_in.strip()})
-                ans = ask_global_assistant(q_in.strip())
+                try:
+                    ans = ask_global_assistant(q_in.strip())
+                except Exception as e:
+                    ans = f"Neizdevās saņemt atbildi: {e}"
                 S.global_chat.append({"role": "assistant", "content": ans})
                 st.rerun()
             if clr_q:
@@ -676,6 +812,145 @@ with st.expander("Metodoloģija un pamatjēdzieni"):
     """)
 
 
+# ------------------------------------------------------------------ SKATS: TIEŠA KONTU REDIĢĒŠANA (NO SĀNJOSLAS POGAS)
+if S.get("view_mode") == "edit_accounts":
+    head_e1, head_e2 = st.columns([4, 1])
+    with head_e1:
+        st.header(f"Kontu klasifikācijas rediģēšana ({S.active_profile})")
+    with head_e2:
+        st.write("")
+        if st.button("← Atgriezties uz pārskatu", use_container_width=True):
+            S.view_mode = "workspace"
+            st.rerun()
+
+    # Ja šobrīd ir ielādēts fails sesijā, ļaujam rediģēt sesijas kontus un uzreiz pārrēķināt
+    if "cls_df" in S and S.cls_df is not None and "analysis" in S and S.analysis is not None:
+        st.caption("Izmainiet jebkura konta lielo grupu vai apakšgrupu un nospiediet 'Saglabāt un pārrēķināt tabulu'.")
+        cls_df_edit: pd.DataFrame = S.cls_df.copy()
+        cls_df_edit["Grupa"] = cls_df_edit["Grupa"].map(normalize_group_key)
+
+        ed_view_df = pd.DataFrame(
+            {
+                "Konts": cls_df_edit["Displeja_konts"].tolist(),
+                "Lielā grupa": [get_main_cat(g) for g in cls_df_edit["Grupa"]],
+                "Apakšgrupa (Rinda atskaitē)": [SUBGROUP_LABELS[normalize_group_key(g)] for g in cls_df_edit["Grupa"]],
+            }
+        )
+        ed_h = (len(ed_view_df) + 1) * 36 + 14
+        edited_ses = st.data_editor(
+            ed_view_df,
+            hide_index=True,
+            use_container_width=True,
+            height=ed_h,
+            disabled=["Konts"],
+            key=f"direct_ses_editor_{S.get('editor_v', 0)}",
+            column_config={
+                "Konts": st.column_config.TextColumn("Konta nosaukums", width="large"),
+                "Lielā grupa": st.column_config.SelectboxColumn("Lielā grupa", options=MAIN_GROUP_OPTIONS, required=True, width="medium"),
+                "Apakšgrupa (Rinda atskaitē)": st.column_config.SelectboxColumn("Apakšgrupa / Rinda atskaitē", options=list(SUBGROUP_LABELS.values()), required=True, width="large"),
+            },
+        )
+
+        new_grps = []
+        ch_flag = False
+        for idx_p in range(len(cls_df_edit)):
+            o_g = normalize_group_key(cls_df_edit.iloc[idx_p]["Grupa"])
+            o_m = get_main_cat(o_g)
+            o_s = SUBGROUP_LABELS[o_g]
+            n_m = edited_ses.iloc[idx_p]["Lielā grupa"]
+            n_s = edited_ses.iloc[idx_p]["Apakšgrupa (Rinda atskaitē)"]
+            if n_s != o_s and n_s in LABEL_TO_KEY:
+                new_grps.append(LABEL_TO_KEY[n_s])
+                ch_flag = True
+            elif n_m != o_m and n_m in MAIN_GROUP_TO_DEFAULT_SUB:
+                new_grps.append(MAIN_GROUP_TO_DEFAULT_SUB[n_m])
+                ch_flag = True
+            else:
+                new_grps.append(o_g)
+
+        if ch_flag:
+            cls_df_edit["Grupa"] = new_grps
+            cls_df_edit["Ieņēmums"] = cls_df_edit["Grupa"].str.startswith("S_")
+            S.cls_df = cls_df_edit
+            S.editor_v = S.get("editor_v", 0) + 1
+            st.rerun()
+
+        if st.button("Saglabāt izmaiņas un pārrēķināt tabulu", type="primary"):
+            an = S.analysis
+            stc = S.structure
+            cls_sorted = sort_cls_df(S.cls_df)
+            S.cls_df = cls_sorted
+            mapping = {
+                r["id"]: {
+                    "group": normalize_group_key(r["Grupa"]),
+                    "is_income": bool(str(r["Grupa"]).startswith("S_") or r["Ieņēmums"]),
+                }
+                for _, r in cls_sorted.iterrows()
+            }
+            pos = next((l.pos for l in an.ex.lines if l.row == stc.result_row), None)
+            reported = an.ex.lines[pos].vals if pos is not None else None
+            S.result = compute_toc(an.leaves, mapping, an.ex.period_cols, reported)
+            profile.save(an.leaves, mapping)
+            S.view_mode = "workspace"
+            st.toast("Konti atjaunināti un tabula pārrēķināta.")
+            st.rerun()
+    else:
+        # Ja fails nav ielādēts, rediģējam uzņēmuma saglabātos kontus tieši Supabase datubāzē
+        saved_maps = profile.list_saved_mappings()
+        if not saved_maps:
+            st.info("Šim uzņēmumam datubāzē vēl nav saglabātu kontu.")
+        else:
+            st.caption("Šie ir uzņēmuma profilā saglabātie konti. Izmainiet grupu vai apakšgrupu un nospiediet 'Saglabāt izmaiņas'.")
+            db_df = pd.DataFrame(saved_maps)
+            db_df["toc_group"] = db_df["toc_group"].map(normalize_group_key)
+            db_view = pd.DataFrame(
+                {
+                    "id": db_df["id"],
+                    "Sadaļa": db_df["path_label"],
+                    "Konts": db_df["account_label"],
+                    "Lielā grupa": [get_main_cat(g) for g in db_df["toc_group"]],
+                    "Apakšgrupa (Rinda atskaitē)": [SUBGROUP_LABELS[normalize_group_key(g)] for g in db_df["toc_group"]],
+                }
+            )
+            db_h = min((len(db_view) + 1) * 36 + 14, 750)
+            edited_db = st.data_editor(
+                db_view,
+                hide_index=True,
+                use_container_width=True,
+                height=db_h,
+                disabled=["id", "Sadaļa", "Konts"],
+                key="db_mappings_editor",
+                column_config={
+                    "id": None,
+                    "Sadaļa": st.column_config.TextColumn("Sadaļa / Ceļš", width="medium"),
+                    "Konts": st.column_config.TextColumn("Konta nosaukums", width="large"),
+                    "Lielā grupa": st.column_config.SelectboxColumn("Lielā grupa", options=MAIN_GROUP_OPTIONS, required=True, width="medium"),
+                    "Apakšgrupa (Rinda atskaitē)": st.column_config.SelectboxColumn("Apakšgrupa / Rinda atskaitē", options=list(SUBGROUP_LABELS.values()), required=True, width="large"),
+                },
+            )
+            if st.button("Saglabāt izmaiņas datubāzē", type="primary"):
+                updates_to_save = []
+                for idx_r in range(len(db_df)):
+                    orig_g = normalize_group_key(db_df.iloc[idx_r]["toc_group"])
+                    orig_m = get_main_cat(orig_g)
+                    orig_s = SUBGROUP_LABELS[orig_g]
+                    new_m = edited_db.iloc[idx_r]["Lielā grupa"]
+                    new_s = edited_db.iloc[idx_r]["Apakšgrupa (Rinda atskaitē)"]
+                    if new_s != orig_s and new_s in LABEL_TO_KEY:
+                        final_g = LABEL_TO_KEY[new_s]
+                    elif new_m != orig_m and new_m in MAIN_GROUP_TO_DEFAULT_SUB:
+                        final_g = MAIN_GROUP_TO_DEFAULT_SUB[new_m]
+                    else:
+                        final_g = orig_g
+                    updates_to_save.append({"id": int(db_df.iloc[idx_r]["id"]), "toc_group": final_g})
+                if profile.update_saved_mappings_direct(updates_to_save):
+                    st.success("Kontu klasifikācija saglabāta.")
+                    st.rerun()
+                else:
+                    st.error(f"Kļūda saglabājot: {profile.last_error}")
+    st.stop()
+
+
 # ------------------------------------------------------------------ REZULTĀTU UN SIMULĀCIJAS ATTĒLOŠANA
 def render_results_and_simulation(res, report_title: str = ""):
     if report_title:
@@ -689,34 +964,41 @@ def render_results_and_simulation(res, report_title: str = ""):
     )
 
     with main_tab1:
+        top_btn1, top_btn2, top_btn3 = st.columns([1.5, 1.5, 1])
         try:
             xl_f, xl_v = io.BytesIO(), io.BytesIO()
             build_excel(res, xl_f, formulas=True)
             build_excel(res, xl_v, formulas=False)
-            d1, d2 = st.columns(2)
-            d1.download_button(
+            top_btn1.download_button(
                 "Lejupielādēt Excel (ar formulām)",
                 xl_f.getvalue(),
                 "TOC_Finansu_Diagnostika.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
             )
-            d2.download_button(
+            top_btn2.download_button(
                 "Lejupielādēt Excel (vērtības)",
                 xl_v.getvalue(),
                 "TOC_Finansu_Diagnostika_vertibas.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
             )
         except Exception:
             xl_buf = io.BytesIO()
             with pd.ExcelWriter(xl_buf, engine="openpyxl") as writer:
                 res.amounts.to_excel(writer, sheet_name="TOC_Summas")
                 res.kpi.to_excel(writer, sheet_name="KPI")
-            st.download_button(
+            top_btn1.download_button(
                 "Lejupielādēt Excel",
                 xl_buf.getvalue(),
                 "TOC_Saglabata_Atskaite.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
             )
+        with top_btn3:
+            if st.button("Rediģēt kontu klasifikāciju", use_container_width=True):
+                S.view_mode = "edit_accounts"
+                st.rerun()
 
         st.subheader("Finanšu pārskata tabula")
         st.markdown(
@@ -935,6 +1217,12 @@ if uploaded is None:
         st.info("Augšupielādējiet PZA failu vai kreisajā malā atveriet kādu no saglabātajām atskaitēm.")
     st.stop()
 
+# Pārbaudām klienta mēneša limitu pirms jauna faila apstrādes
+ok_quota, quota_msg = profile.check_quota()
+if not ok_quota and not S.get("is_admin", False):
+    st.error(quota_msg)
+    st.stop()
+
 data = uploaded.getvalue()
 fid = hashlib.md5(data).hexdigest()
 if S.get("fid") != fid:
@@ -985,15 +1273,14 @@ with st.expander("PZA rindu korekcija"):
     diag_rows = []
     for ln in an.ex.lines:
         is_res = stc.result_row is not None and ln.row == stc.result_row
-        tot_v = float(ln.vals.sum()) if hasattr(ln, "vals") else 0.0
-        first_v = float(ln.vals.iloc[0]) if (hasattr(ln, "vals") and len(ln.vals) > 0) else 0.0
+        first_v, tot_v = _safe_line_stats(getattr(ln, "vals", None))
         diag_rows.append(
             {
                 "id": ln.id,
                 "Rinda": ln.row,
                 "Iekļaut kā kontu": (ln.id in leaf_id_set) and not is_res,
                 "Nosaukums": ln.label,
-                "Sadaļa": ln.path,
+                "Sadaļa": getattr(ln, "path", ""),
                 "1. periods": round(first_v, 2),
                 "Kopā": round(tot_v, 2),
                 "Statuss": "Rezultāta rinda" if is_res else ("Konts" if ln.id in leaf_id_set else "Izlaists (starpsumma)"),
@@ -1221,6 +1508,7 @@ if run_calc:
             res_obj=res,
             commentary="",
         )
+        profile.increment_usage()
         S.current_report_id = rep_id
         if ok_map and ok_rep:
             st.toast("Atskaite saglabāta.")
