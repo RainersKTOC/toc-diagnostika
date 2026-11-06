@@ -1,8 +1,7 @@
 """
-db.py — Supabase datubāzes integrācija (v4.0):
-- Administratora (Master) klientu pārvaldība, paroles, limiti un lietojuma uzskaite
-- Klientu datu stingra izolācija
-- Tieša saglabāto kontu rediģēšana un atskaišu arhīvs
+db.py — Supabase datubāzes integrācija (v5.0):
+- Administratora paneļa un klienta profili, limiti, tokenu un EUR izmaksu uzskaite
+- Atskaišu saglabāšana un dzēšana
 Project ID: amprqueamdcxpjufigvm
 """
 from __future__ import annotations
@@ -80,12 +79,7 @@ class SupabaseProfileStore:
     def is_connected(self) -> bool:
         return self.client is not None
 
-    # ------------------------------------------------------------------ AUTENTIFIKĀCIJA UN ADMIN PĀRVALDĪBA
     def authenticate(self, username: str, password: str) -> tuple[bool, str, bool]:
-        """
-        Atgriež (veiksmīgi, ziņojums, ir_admins).
-        Ja username == 'admin', pārbauda administratora paroli.
-        """
         u_clean = str(username or "").strip()
         if not u_clean or not password:
             return False, "Ievadiet lietotājvārdu un paroli.", False
@@ -109,21 +103,20 @@ class SupabaseProfileStore:
             )
             rows = res.data or []
             if not rows:
-                return False, "Lietotājs nav atrasts. Sazinieties ar sistēmas administratoru.", False
+                return False, "Lietotājs nav atrasts.", False
 
             row = rows[0]
             if row.get("is_active") is False:
-                return False, "Šis profils ir deaktivizēts. Sazinieties ar administratoru.", False
+                return False, "Šis profils ir deaktivizēts.", False
 
             if row["password_hash"] == pw_hash:
                 self.user_id = row["company_name"]
-                return True, "Veiksmīga ielogošanās.", False
+                return True, "Veiksmīga ielagošanās.", False
             return False, "Nepareiza parole.", False
         except Exception as e:
             return False, f"Kļūda autorizācijā: {e}", False
 
     def check_quota(self) -> tuple[bool, str]:
-        """Pārbauda, vai klientam nav izsmelts mēneša aprēķinu limits."""
         if not self.client or not self.user_id:
             return True, ""
         try:
@@ -142,37 +135,46 @@ class SupabaseProfileStore:
             lim = int(r.get("monthly_limit") or 50)
             used = int(r.get("usage_count") or 0)
             if used >= lim:
-                return False, f"Sasniegts profila aprēķinu limits ({used}/{lim}). Sazinieties ar administratoru."
+                return False, f"Sasniegts limits ({used}/{lim})."
             return True, f"{used}/{lim}"
         except Exception:
             return True, ""
 
-    def increment_usage(self) -> None:
+    def log_api_usage(self, tokens_used: int, cost_eur: float) -> None:
+        """Piefiksē Claude API izmantotos tokenus un izmaksas eur."""
         if not self.client or not self.user_id:
             return
         try:
             res = (
                 self.client.table("company_profiles")
-                .select("id, usage_count")
+                .select("id, total_tokens, total_cost_eur, usage_count")
                 .eq("company_name", self.user_id)
                 .limit(1)
                 .execute()
             )
             if res.data:
-                cur = int(res.data[0].get("usage_count") or 0)
-                self.client.table("company_profiles").update({"usage_count": cur + 1}).eq("id", res.data[0]["id"]).execute()
+                r = res.data[0]
+                cur_tokens = int(r.get("total_tokens") or 0)
+                cur_cost = float(r.get("total_cost_eur") or 0.0)
+                cur_usage = int(r.get("usage_count") or 0)
+
+                self.client.table("company_profiles").update(
+                    {
+                        "total_tokens": cur_tokens + int(tokens_used),
+                        "total_cost_eur": round(cur_cost + float(cost_eur), 4),
+                        "usage_count": cur_usage + 1,
+                    }
+                ).eq("id", r["id"]).execute()
         except Exception:
             pass
 
     def list_all_companies_admin(self) -> list[dict]:
-        """Administratora saraksts ar visiem klientu profiliem, kontu skaitu un atskaišu skaitu."""
         if not self.client:
             return []
         try:
             res = self.client.table("company_profiles").select("*").order("created_at", desc=True).execute()
             companies = res.data or []
 
-            # Saskaitām kontus un atskaites katram
             acc_res = self.client.table("account_mappings").select("user_id").execute()
             rep_res = self.client.table("saved_reports").select("profile_name").execute()
 
@@ -196,6 +198,8 @@ class SupabaseProfileStore:
                         "is_active": bool(c.get("is_active", True)),
                         "monthly_limit": int(c.get("monthly_limit") or 50),
                         "usage_count": int(c.get("usage_count") or 0),
+                        "total_tokens": int(c.get("total_tokens") or 0),
+                        "total_cost_eur": float(c.get("total_cost_eur") or 0.0),
                         "notes": str(c.get("notes") or ""),
                         "accounts_count": acc_counts.get(cname, 0),
                         "reports_count": rep_counts.get(cname, 0),
@@ -216,14 +220,13 @@ class SupabaseProfileStore:
         notes: str = "",
         reset_usage: bool = False,
     ) -> tuple[bool, str]:
-        """Ļauj administratoram izveidot jaunu klientu vai atjaunināt paroli / limitus esošam."""
         if not self.client:
             return False, "Nav datubāzes savienojuma."
         c_name = company_name.strip()
         if not c_name:
-            return False, "Norādiet uzņēmuma nosaukumu."
+            return False, "Norādiet nosaukumu."
         if c_name.lower() == "admin":
-            return False, "Rezervēts lietotājvārds."
+            return False, "Rezervēts vārds."
 
         try:
             chk = self.client.table("company_profiles").select("*").eq("company_name", c_name).execute()
@@ -235,27 +238,31 @@ class SupabaseProfileStore:
                 }
                 if password.strip():
                     if len(password.strip()) < 4:
-                        return False, "Parolei jābūt vismaz 4 simbolus garai."
+                        return False, "Parolei jābūt min. 4 simboli."
                     upd["password_hash"] = _hash_pw(password.strip())
                 if reset_usage:
                     upd["usage_count"] = 0
+                    upd["total_tokens"] = 0
+                    upd["total_cost_eur"] = 0.0
                 self.client.table("company_profiles").update(upd).eq("company_name", c_name).execute()
-                return True, f"Klienta '{c_name}' iestatījumi atjaunināti."
+                return True, f"Profils '{c_name}' atjaunināts."
             else:
                 if len(password.strip()) < 4:
-                    return False, "Jaunam profilam jānorāda parole (min. 4 simboli)."
+                    return False, "Norādiet paroli (min. 4 simboli)."
                 payload = {
                     "company_name": c_name,
                     "password_hash": _hash_pw(password.strip()),
                     "monthly_limit": int(monthly_limit),
                     "is_active": bool(is_active),
                     "usage_count": 0,
+                    "total_tokens": 0,
+                    "total_cost_eur": 0.0,
                     "notes": notes,
                 }
                 self.client.table("company_profiles").insert(payload).execute()
-                return True, f"Klients '{c_name}' veiksmīgi izveidots."
+                return True, f"Profils '{c_name}' izveidots."
         except Exception as e:
-            return False, f"Datubāzes kļūda: {e}"
+            return False, f"Kļūda: {e}"
 
     def delete_company_admin(self, company_name: str) -> bool:
         if not self.client or not company_name:
@@ -269,7 +276,6 @@ class SupabaseProfileStore:
             self.last_error = str(e)
             return False
 
-    # ------------------------------------------------------------------ KONTU ATMIŅA UN REDIĢĒŠANA
     def count_saved(self) -> int:
         if not self.client or not self.user_id:
             return 0
@@ -286,7 +292,6 @@ class SupabaseProfileStore:
             return 0
 
     def list_saved_mappings(self) -> list[dict]:
-        """Atgriež visus profila saglabātos kontus tiešai rediģēšanai."""
         if not self.client or not self.user_id:
             return []
         try:
@@ -303,7 +308,6 @@ class SupabaseProfileStore:
             return []
 
     def update_saved_mappings_direct(self, rows: list[dict]) -> bool:
-        """Saglabā rediģētos kontu kartējumus tieši Supabase tabulā."""
         if not self.client or not self.user_id:
             return False
         try:
@@ -318,15 +322,6 @@ class SupabaseProfileStore:
             return True
         except Exception as e:
             self.last_error = str(e)
-            return False
-
-    def delete_saved_mapping(self, mapping_id: int) -> bool:
-        if not self.client or not self.user_id:
-            return False
-        try:
-            self.client.table("account_mappings").delete().eq("id", mapping_id).eq("user_id", self.user_id).execute()
-            return True
-        except Exception:
             return False
 
     def lookup(self, leaves) -> tuple[dict[str, dict], list]:
@@ -403,7 +398,6 @@ class SupabaseProfileStore:
             self.last_error = str(e)
             return False, 0
 
-    # ------------------------------------------------------------------ FINANŠU TABULU VĒSTURE
     def save_report(
         self,
         report_name: str,
