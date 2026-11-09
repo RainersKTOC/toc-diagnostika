@@ -1,5 +1,5 @@
 """
-app.py — TOC-FIN Finanšu diagnostikas un vadības lēmumu sistēma (v24.2)
+app.py — TOC-FIN Finanšu diagnostikas un vadības lēmumu sistēma (v24.5)
 Project ID: amprqueamdcxpjufigvm
 """
 from __future__ import annotations
@@ -76,13 +76,28 @@ class LoadedReportResult:
     by_group: dict
 
 
-def _load_anthropic_key() -> str:
-    for k, v in os.environ.items():
-        if isinstance(v, str) and v.strip().startswith("sk-ant-"):
-            return v.strip().strip('"').strip("'")
-        if k.upper() in ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY") and v.strip():
-            return v.strip().strip('"').strip("'")
+def _clean_api_key_str(raw_val: str) -> str:
+    """Iztīra jebkādus Enter pārnesumus (\\n, \\r), atstarpes un pēdiņas no API atslēgas."""
+    s = str(raw_val or "").strip().strip('"').strip("'")
+    return re.sub(r"\s+", "", s)
 
+
+def _load_anthropic_key() -> str:
+    # 0. Pārbaudām, vai lietotājs nav ievadījis jaunu atslēgu tieši aplikācijas uzstādījumos
+    override_k = st.session_state.get("custom_anthropic_key", "")
+    if override_k and _clean_api_key_str(override_k).startswith("sk-ant-"):
+        return _clean_api_key_str(override_k)
+
+    # 1. Pārbaudām vides mainīgos
+    for k, v in os.environ.items():
+        if isinstance(v, str):
+            cl = _clean_api_key_str(v)
+            if cl.startswith("sk-ant-"):
+                return cl
+            if k.upper() in ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY") and cl:
+                return cl
+
+    # 2. Pārbaudām st.secrets
     def _scan_dict(d) -> str:
         try:
             items = d.items()
@@ -90,7 +105,7 @@ def _load_anthropic_key() -> str:
             return ""
         for k, v in items:
             if isinstance(v, str):
-                clean = v.strip().strip('"').strip("'")
+                clean = _clean_api_key_str(v)
                 if clean.startswith("sk-ant-"):
                     return clean
                 if str(k).upper() in ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY", "API_KEY") and not clean.startswith("eyJ") and not clean.startswith("http"):
@@ -137,9 +152,10 @@ def _verify_auth_token(company: str, token: str) -> tuple[bool, bool]:
     return False, False
 
 
-@st.cache_resource
 def get_client() -> anthropic.Anthropic:
-    return anthropic.Anthropic(api_key=API_KEY)
+    """Vienmēr izveido klientu ar svaigi attīrītu API atslēgu (bez kešošanas)."""
+    active_key = _load_anthropic_key() or API_KEY
+    return anthropic.Anthropic(api_key=active_key)
 
 
 def fmt_num(x) -> str:
@@ -735,9 +751,9 @@ def render_unified_toc_tables_html(
     show_cumulative: bool = True,
 ) -> str:
     """
-    Visās trīs tabulās:
-    - Iekšējās līnijas uzliktas tieši uz <td> ar !important kā viegli melnas (1px solid #222222 !important).
-    - Grupu un mēnešu robežas ir bold melnas (2.5px solid #000000 !important).
+    Zīmē visas 3 tabulas ar 1:1 vertikālu kolonnu sakritību:
+    - Produktivitātes tabulai tiek izmantots savs 1-kolonnas-uz-mēnesi <colgroup> (summējot 66%+34% = 100% no mēneša platuma),
+      lai nenotiktu colspan="2" vertikālo robežu pazušana un mēnešu vertikālās līnijas būtu 100% tikpat melnas kā augšējā tabulā!
     """
     valid_rows = [
         r for r in amounts_df.index
@@ -754,8 +770,9 @@ def render_unified_toc_tables_html(
 
     display_row_name = lambda rn: "Uzturēšanas izmaksas (OE)" if rn == "OE" else rn
 
-    def _build_colgroup(num_periods: int, total_ref_periods: int) -> tuple[str, str]:
-        lbl_w_px = 235
+    lbl_w_px = 235
+
+    def _build_two_subcol_colgroup(num_periods: int, total_ref_periods: int) -> tuple[str, str]:
         if num_periods == total_ref_periods:
             table_style = "width: 100%; table-layout: fixed;"
         else:
@@ -769,7 +786,21 @@ def render_unified_toc_tables_html(
             cols_html.append('<col style="width: 34%;">')
         return "<colgroup>" + "".join(cols_html) + "</colgroup>", table_style
 
-    main_colgroup, main_tbl_style = _build_colgroup(n_per, n_per)
+    def _build_single_col_kpi_colgroup(num_periods: int, total_ref_periods: int) -> tuple[str, str]:
+        """KPI tabulai katrs mēnesis ir 1 vesela kolonna (100% no mēneša platuma), lai melnās vertikālās līnijas vienmēr zīmējas perfekti."""
+        if num_periods == total_ref_periods:
+            table_style = "width: 100%; table-layout: fixed;"
+        else:
+            ratio_pct = (num_periods / total_ref_periods) * 100.0
+            extra_px = lbl_w_px * (1.0 - num_periods / total_ref_periods)
+            table_style = f"width: calc({ratio_pct:.4f}% + {extra_px:.1f}px); table-layout: fixed;"
+
+        cols_html = [f'<col style="width: {lbl_w_px}px;">']
+        for _ in range(num_periods):
+            cols_html.append('<col style="width: 100%;">')
+        return "<colgroup>" + "".join(cols_html) + "</colgroup>", table_style
+
+    main_colgroup, main_tbl_style = _build_two_subcol_colgroup(n_per, n_per)
 
     html = ["""
     <style>
@@ -834,7 +865,6 @@ def render_unified_toc_tables_html(
         border-right: 2.5px solid #000000 !important;
         color: #000000 !important;
     }
-    /* Viegli melnas iekšējās vertikālās līnijas (1px solid #222222) un bold melnas mēnešu robežas (2.5px solid #000000) */
     table.toc-unified td.val-col {
         text-align: right;
         border-left: 1px solid #222222 !important;
@@ -851,6 +881,21 @@ def render_unified_toc_tables_html(
         border-right: 2.5px solid #000000 !important;
         color: #000000 !important;
         font-variant-numeric: tabular-nums;
+    }
+    table.toc-unified td.kpi-col {
+        text-align: right;
+        padding: 4px 8px;
+        border-left: 2.5px solid #000000 !important;
+        border-right: 2.5px solid #000000 !important;
+        font-weight: 400;
+        font-variant-numeric: tabular-nums;
+        color: #000000 !important;
+    }
+    table.toc-unified th.th-kpi {
+        border-top: 2.5px solid #000000 !important;
+        border-bottom: 2.5px solid #000000 !important;
+        border-left: 2.5px solid #000000 !important;
+        border-right: 2.5px solid #000000 !important;
     }
     table.toc-unified th.th-val { border-left: 1px solid #222222 !important; border-right: 1px solid #222222 !important; }
     table.toc-unified th.th-pct { font-size: 11px; border-left: 1px solid #222222 !important; border-right: 2.5px solid #000000 !important; }
@@ -901,9 +946,9 @@ def render_unified_toc_tables_html(
 
     html.append("</tbody></table></div>")
 
-    # --- 2. PRODUKTIVITĀTES UN ATDEVES RĀDĪTĀJI ---
+    # --- 2. PRODUKTIVITĀTES UN ATDEVES RĀDĪTĀJI (AR IZTEIKTĀM MELNĀM VERTIKĀLAJĀM LĪNIJĀM) ---
     kpi_periods = [p for p in periods if p in kpi_df.columns]
-    kpi_colgroup, kpi_tbl_style = _build_colgroup(len(kpi_periods), n_per)
+    kpi_colgroup, kpi_tbl_style = _build_single_col_kpi_colgroup(len(kpi_periods), n_per)
     month_only_kpi_cols = [
         p for p in kpi_periods
         if not ("YTD" in str(p).upper() or "AVG" in str(p).upper() or "BĀZE" in str(p).upper())
@@ -913,11 +958,8 @@ def render_unified_toc_tables_html(
     html.append(f'<div class="toc-table-wrap"><table class="toc-unified" style="{kpi_tbl_style}">{kpi_colgroup}<thead><tr>')
     html.append('<th class="th-lbl">Produktivitātes rādītājs</th>')
     for p in kpi_periods:
-        th_bg = "#CBD5E1" if p in grey_cols else "#E2E8F0"
-        html.append(
-            f'<th colspan="2" style="background-color: {th_bg}; color: #000000; border-top: 2.5px solid #000000 !important; '
-            f'border-bottom: 2.5px solid #000000 !important; border-left: 1px solid #222222 !important; border-right: 2.5px solid #000000 !important;">{p}</th>'
-        )
+        th_bg = "background-color: #CBD5E1;" if p in grey_cols else "background-color: #E2E8F0;"
+        html.append(f'<th class="th-kpi" style="{th_bg}">{p}</th>')
     html.append("</tr></thead><tbody>")
 
     for i, idx_name in enumerate(kpi_df.index):
@@ -941,10 +983,7 @@ def render_unified_toc_tables_html(
             else:
                 bg_cell = _kpi_cond_color(idx_name, v, row_month_vals)
 
-            html.append(
-                f'<td colspan="2" style="text-align: right; padding: 4px 8px; background-color: {bg_cell}; color: #000000 !important; '
-                f'border-left: 1px solid #222222 !important; border-right: 2.5px solid #000000 !important; font-weight: 400; font-variant-numeric: tabular-nums;">{s}</td>'
-            )
+            html.append(f'<td class="kpi-col" style="background-color: {bg_cell};">{s}</td>')
         html.append("</tr>")
 
     html.append("</tbody></table></div>")
@@ -961,7 +1000,7 @@ def render_unified_toc_tables_html(
             else:
                 html.append(
                     f'<th colspan="2" style="background-color: #E2E8F0; color: #000000; border-top: 2.5px solid #000000 !important; '
-                    f'border-bottom: 2.5px solid #000000 !important; border-left: 1px solid #222222 !important; border-right: 2.5px solid #000000 !important;">{p}</th>'
+                    f'border-bottom: 2.5px solid #000000 !important; border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important;">{p}</th>'
                 )
         html.append("</tr></thead><tbody>")
 
@@ -1008,16 +1047,16 @@ def render_unified_toc_tables_html(
                         v_ytd = cum_df.loc[c_name, last_p]
                         ytd_bg = ("#D4EFDF" if v_ytd >= 0 else "#FADBD8") if is_np_cum else "#F8F9F9"
                         html.append(
-                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: {ytd_bg}; color: #000000; border-left: 1px solid #222222 !important; border-right: 2.5px solid #000000 !important; font-weight: 400;">{fmt_num(v_ytd)}</td>'
+                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: {ytd_bg}; color: #000000; border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important; font-weight: 400;">{fmt_num(v_ytd)}</td>'
                         )
                     elif last_p and "AVG" in str(p).upper() and len(cum_periods) > 0:
                         v_avg = cum_df.loc[c_name, last_p] / len(cum_periods)
                         avg_bg = ("#D4EFDF" if v_avg >= 0 else "#FADBD8") if is_np_cum else "#F8F9F9"
                         html.append(
-                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: {avg_bg}; color: #000000; border-left: 1px solid #222222 !important; border-right: 2.5px solid #000000 !important; font-weight: 400;">{fmt_num(v_avg)}</td>'
+                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: {avg_bg}; color: #000000; border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important; font-weight: 400;">{fmt_num(v_avg)}</td>'
                         )
                     else:
-                        html.append('<td colspan="2" style="background-color: #FFFFFF; border-left: 1px solid #222222 !important; border-right: 2.5px solid #000000 !important;"></td>')
+                        html.append('<td colspan="2" style="background-color: #FFFFFF; border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important;"></td>')
             html.append("</tr>")
 
         html.append("</tbody></table></div>")
@@ -1037,7 +1076,7 @@ for c_key, (c_lbl, c_mc) in S.get("custom_subgroups", {}).items():
     register_custom_subgroup(c_key, c_lbl, c_mc)
 
 
-# ------------------------------------------------------------------ PELDOŠA (STICKY) RĪKJOSLA BEZ DUBLĒTĀS LĪNIJAS UN ZILĀ FONA
+# ------------------------------------------------------------------ PELDOŠA RĪKJOSLA UN TĪRS ASISTENTA LOGS (BEZ PĀRKLĀŠANĀS)
 st.markdown(
     """
     <style>
@@ -1049,7 +1088,17 @@ st.markdown(
         padding-bottom: 2.5rem !important;
         max-width: 97% !important;
     }
-    /* Paslēpjam pašu marķiera elementu un tā konteineru, lai virs rīkjoslas nekad neparādās tukša līnija/kaste */
+    /* Paslēpjam "Press Enter to submit form", lai tas nekad nepārklājas ar tekstu */
+    div[data-testid="InputInstructions"] {
+        display: none !important;
+    }
+    /* Plašāks Asistenta logs */
+    div[data-testid="stPopoverBody"] {
+        min-width: 390px !important;
+        max-width: 440px !important;
+        font-size: 13px !important;
+        line-height: 1.45 !important;
+    }
     div.sticky-nav-marker {
         display: none !important;
     }
@@ -1060,7 +1109,6 @@ st.markdown(
         padding: 0 !important;
         height: 0 !important;
     }
-    /* Tīra, dabiska rīkjosla, kas pielāgojas lapas fonam un seko līdzi ritinot */
     div[data-testid="stVerticalBlock"] > div:has(div.sticky-nav-marker) {
         position: sticky !important;
         top: 2.8rem !important;
@@ -1075,10 +1123,6 @@ st.markdown(
     h1, h2, h3, h4 {
         font-family: 'Inter', 'Segoe UI', sans-serif !important;
         letter-spacing: -0.3px;
-    }
-    div[data-testid="stPopoverBody"] {
-        font-size: 13px !important;
-        line-height: 1.45 !important;
     }
     div[data-testid="stPopoverBody"] p,
     div[data-testid="stPopoverBody"] li,
@@ -1244,7 +1288,7 @@ if not S.get("authenticated", False):
             with st.form("login_form"):
                 login_company = st.text_input("Lietotājvārds / Uzņēmums")
                 login_password = st.text_input("Parole", type="password")
-                remember_me = st.checkbox("Atcerēties mani (neizmest no profila pēc dīkstāves)", value=True)
+                remember_me = st.checkbox("Atcerēties mani", value=True)
                 login_submitted = st.form_submit_button("Pieslēgties", type="primary", use_container_width=True)
 
                 if login_submitted:
@@ -1394,6 +1438,42 @@ if not S.get("auto_loaded_latest", False):
                 S.pop("commentary", None)
 
 
+# ------------------------------------------------------------------ ASISTENTA IEKŠĒJAIS LOGS
+def _render_assistant_popover_content(form_key: str) -> None:
+    st.caption("TOC-FIN Asistents (pieejams visos posmos)")
+    if "global_chat" not in S:
+        S.global_chat = []
+    chat_box = st.container(height=280)
+    with chat_box:
+        if not S.global_chat:
+            st.caption("Uzdodiet jautājumu par datiem vai situāciju...")
+        for msg in S.global_chat:
+            with st.chat_message(msg["role"]):
+                st.write(msg["content"])
+    with st.form(form_key, clear_on_submit=True):
+        q_in = st.text_input("Jautājums", placeholder="Rakstiet jautājumu šeit...", label_visibility="collapsed")
+        f_c1, f_c2 = st.columns([2.2, 1.2])
+        sub_q = f_c1.form_submit_button("Sūtīt", type="primary", use_container_width=True)
+        clr_q = f_c2.form_submit_button("Notīrīt", use_container_width=True)
+        if sub_q and q_in.strip():
+            S.global_chat.append({"role": "user", "content": q_in.strip()})
+            try:
+                ans, t_tok, t_eur = ask_global_assistant(q_in.strip())
+                profile.log_api_usage(t_tok, t_eur)
+            except anthropic.AuthenticationError:
+                ans = (
+                    "Kļūda (401): Claude API atslēga nav derīga vai satur pārrāvumu. "
+                    "Atveriet sadaļu 'Profils un Uzstādījumi' -> '4. Claude API atslēga' un ielīmējiet derīgu sk-ant-... atslēgu."
+                )
+            except Exception as e:
+                ans = f"Kļūda: {e}"
+            S.global_chat.append({"role": "assistant", "content": ans})
+            st.rerun()
+        if clr_q:
+            S.global_chat = []
+            st.rerun()
+
+
 # ------------------------------------------------------------------ 4. PELDOŠA (STICKY) UN IZCELTA AUGŠĒJĀ RĪKJOSLA
 NAV_ITEMS = {
     "overview": "Pārskats",
@@ -1416,31 +1496,7 @@ with st.container():
         _, col_asist, col_arr = st.columns([6.2, 1.0, 0.35], vertical_alignment="center")
         with col_asist:
             with st.popover("Asistents", use_container_width=True):
-                st.caption("TOC-FIN Asistents")
-                if "global_chat" not in S:
-                    S.global_chat = []
-                chat_box = st.container(height=280)
-                with chat_box:
-                    for msg in S.global_chat:
-                        with st.chat_message(msg["role"]):
-                            st.write(msg["content"])
-                with st.form("side_agent_form_min", clear_on_submit=True):
-                    q_in = st.text_input("Jautājums", placeholder="Jautājums...", label_visibility="collapsed")
-                    f_c1, f_c2 = st.columns([3, 1])
-                    sub_q = f_c1.form_submit_button("Sūtīt", type="primary", use_container_width=True)
-                    clr_q = f_c2.form_submit_button("Notīrīt", use_container_width=True)
-                    if sub_q and q_in.strip():
-                        S.global_chat.append({"role": "user", "content": q_in.strip()})
-                        try:
-                            ans, t_tok, t_eur = ask_global_assistant(q_in.strip())
-                            profile.log_api_usage(t_tok, t_eur)
-                        except Exception as e:
-                            ans = f"Kļūda: {e}"
-                        S.global_chat.append({"role": "assistant", "content": ans})
-                        st.rerun()
-                    if clr_q:
-                        S.global_chat = []
-                        st.rerun()
+                _render_assistant_popover_content("side_agent_form_min")
         with col_arr:
             if st.button("▼", help="Rādīt rīkjoslu", use_container_width=True):
                 S.hide_top_toolbar = False
@@ -1457,33 +1513,7 @@ with st.container():
             )
         with hdr_asist:
             with st.popover("Asistents", use_container_width=True):
-                st.caption("TOC-FIN Asistents (pieejams visos posmos)")
-                if "global_chat" not in S:
-                    S.global_chat = []
-                chat_box = st.container(height=280)
-                with chat_box:
-                    if not S.global_chat:
-                        st.caption("Uzdodiet jautājumu par datiem vai situāciju...")
-                    for msg in S.global_chat:
-                        with st.chat_message(msg["role"]):
-                            st.write(msg["content"])
-                with st.form("side_agent_form", clear_on_submit=True):
-                    q_in = st.text_input("Jautājums", placeholder="Jautājums...", label_visibility="collapsed")
-                    f_c1, f_c2 = st.columns([3, 1])
-                    sub_q = f_c1.form_submit_button("Sūtīt", type="primary", use_container_width=True)
-                    clr_q = f_c2.form_submit_button("Notīrīt", use_container_width=True)
-                    if sub_q and q_in.strip():
-                        S.global_chat.append({"role": "user", "content": q_in.strip()})
-                        try:
-                            ans, t_tok, t_eur = ask_global_assistant(q_in.strip())
-                            profile.log_api_usage(t_tok, t_eur)
-                        except Exception as e:
-                            ans = f"Kļūda: {e}"
-                        S.global_chat.append({"role": "assistant", "content": ans})
-                        st.rerun()
-                    if clr_q:
-                        S.global_chat = []
-                        st.rerun()
+                _render_assistant_popover_content("side_agent_form")
         with hdr_arr:
             if st.button("▲", help="Paslēpt rīkjoslu", use_container_width=True):
                 S.hide_top_toolbar = True
@@ -1544,7 +1574,6 @@ if S.nav_page == "overview":
         fin_preset_opts.append("Pēdējie 6 mēneši")
     fin_preset_opts.append("Manuāla mēnešu izlase")
 
-    # Sinhronizējam "Periods pārskatam" un "Mēnešu izlase", lai abi atjaunojas automātiski
     if "fin_period_preset" not in S or S.fin_period_preset not in fin_preset_opts:
         S.fin_period_preset = fin_preset_opts[0]
     if "fin_months_active" not in S or not set(S.fin_months_active).issubset(set(all_months)):
@@ -1682,25 +1711,46 @@ if S.nav_page == "overview":
 
     if regen_btn:
         with st.spinner("Sagatavo vadības ieteikumus izvēlētajam periodam..."):
-            r = get_client().messages.create(
-                model=MODEL,
-                max_tokens=2500,
-                system=COMMENT_SYSTEM,
-                messages=[{"role": "user", "content": f"Tabulas:\n\n{tables_md}\n\nUzraksti analīzi un konkrētus ieteikumus šim periodam."}],
-            )
-            S.commentary = "".join(b.text for b in r.content if getattr(b, "type", "") == "text")
-            u_c = getattr(r, "usage", None)
-            tok_c = (getattr(u_c, "input_tokens", 800) + getattr(u_c, "output_tokens", 800)) if u_c else 1600
-            profile.log_api_usage(tok_c, tok_c * 0.000009)
-            if S.get("current_report_id") and len(fin_selected_months) == len(all_months):
-                profile.update_report_commentary(S.current_report_id, S.commentary)
-            st.rerun()
+            try:
+                r = get_client().messages.create(
+                    model=MODEL,
+                    max_tokens=2500,
+                    system=COMMENT_SYSTEM,
+                    messages=[{"role": "user", "content": f"Tabulas:\n\n{tables_md}\n\nUzraksti analīzi un konkrētus ieteikumus šim periodam."}],
+                )
+                S.commentary = "".join(b.text for b in r.content if getattr(b, "type", "") == "text")
+                u_c = getattr(r, "usage", None)
+                tok_c = (getattr(u_c, "input_tokens", 800) + getattr(u_c, "output_tokens", 800)) if u_c else 1600
+                profile.log_api_usage(tok_c, tok_c * 0.000009)
+                if S.get("current_report_id"):
+                    profile.update_report_commentary(S.current_report_id, S.commentary)
+                    st.toast("Vadības kopsavilkums saglabāts pie atskaites!")
+                st.rerun()
+            except anthropic.AuthenticationError:
+                st.error(
+                    "Kļūda (401): Claude API atslēga nav derīga vai satur pārrāvumu. "
+                    "Atveriet sadaļu **Profils un Uzstādījumi -> 4. Claude API atslēga** (vai Streamlit Secrets) un ielīmējiet derīgu `sk-ant-...` atslēgu vienā rindiņā."
+                )
+            except Exception as e:
+                st.error(f"Neizdevās uzģenerēt ieteikumus: {e}")
 
     if S.get("commentary"):
         with st.container(border=True):
             st.markdown(S.commentary)
+            with st.expander("Rediģēt vai papildināt vadības kopsavilkumu un saglabāt", expanded=False):
+                edited_comm = st.text_area("Kopsavilkuma teksts", value=S.commentary, height=240)
+                if st.button("Saglabāt kopsavilkumu atskaitē", type="primary"):
+                    S.commentary = edited_comm
+                    if S.get("current_report_id"):
+                        profile.update_report_commentary(S.current_report_id, edited_comm)
+                        if S.get("loaded_report_meta"):
+                            S.loaded_report_meta["commentary"] = edited_comm
+                        st.success("Vadības kopsavilkums saglabāts datubāzē!")
+                    else:
+                        st.toast("Kopsavilkums atjaunināts sesijā.")
+                    st.rerun()
     else:
-        st.caption("Nospiediet pogu **Pieprasīt ieteikumus par periodu**, lai saņemtu AI diagnostiku.")
+        st.caption("Nospiediet pogu **Pieprasīt ieteikumus par periodu**, lai saņemtu un saglabātu AI diagnostiku.")
 
 
 # ==============================================================================
@@ -2224,6 +2274,14 @@ elif S.nav_page == "archive":
 # ==============================================================================
 elif S.nav_page == "ingest":
     st.subheader("Jauna PZA faila ielasīšana un kontu klasifikācija")
+
+    ignore_memory = st.checkbox(
+        "Ignorēt iepriekšējo profilu atmiņu un izvērtēt visus kontus pilnīgi no jauna (AI)",
+        value=S.get("ignore_mem_flag", False),
+        key="ignore_mem_checkbox",
+    )
+    S.ignore_mem_flag = ignore_memory
+
     uploaded = st.file_uploader("Augšupielādējiet PZA failu (CSV vai Excel)", type=["csv", "xlsx", "xlsm", "xls"])
 
     if uploaded is None:
@@ -2253,6 +2311,12 @@ elif S.nav_page == "ingest":
                 sheet = pick_sheet(get_client(), MODEL, grids)
                 S.structure = request_structure(get_client(), MODEL, sheet, grids[sheet])
                 profile.log_api_usage(1800, 0.012)
+            except anthropic.AuthenticationError:
+                st.error(
+                    "Kļūda (401): Claude API atslēga nav derīga vai satur pārrāvumu. "
+                    "Atveriet sadaļu **Profils un Uzstādījumi -> 4. Claude API atslēga** un ielīmējiet derīgu `sk-ant-...` atslēgu."
+                )
+                st.stop()
             except Exception as e:
                 st.error(f"Kļūda: {e}")
                 st.stop()
@@ -2319,12 +2383,10 @@ elif S.nav_page == "ingest":
 
     st.markdown("#### 1. Kontu klasifikācija")
 
-    col_ig1, col_ig2 = st.columns([3, 1], vertical_alignment="center")
-    with col_ig1:
-        ignore_memory = st.checkbox("Ignorēt iepriekšējo profilu atmiņu un klasificēt kontus pilnīgi no jauna (AI)", value=False)
-    with col_ig2:
-        if "cls_df" in S and st.button("Pārlasīt kontus no jauna", use_container_width=True):
+    if "cls_df" in S:
+        if st.button("Pārlasīt un izvērtēt kontus no jauna"):
             S.pop("cls_df", None)
+            S.pop("clarifications_done", None)
             st.rerun()
 
     if "cls_df" not in S:
@@ -2626,7 +2688,25 @@ elif S.nav_page == "settings":
                         st.error(msg_pw)
 
     with st.container(border=True):
-        st.markdown("#### 4. Pievienot jaunu apakšgrupu")
+        st.markdown("#### 4. Claude API atslēga (ja nepieciešams atjaunot)")
+        cur_k = _load_anthropic_key()
+        masked_k = f"{cur_k[:12]}...{cur_k[-4:]}" if len(cur_k) > 20 else "Nav iestatīta"
+        st.caption(f"Pašreizējā aktīvā atslēga: `{masked_k}` (garums: {len(cur_k)} simboli)")
+        ak1, ak2 = st.columns([3, 1], vertical_alignment="bottom")
+        with ak1:
+            new_api_k = st.text_input("Jauna Claude API atslēga (sk-ant-...)", type="password", placeholder="sk-ant-api03-...")
+        with ak2:
+            if st.button("Aktivizēt API atslēgu", use_container_width=True):
+                cleaned_k = _clean_api_key_str(new_api_k)
+                if cleaned_k.startswith("sk-ant-"):
+                    S.custom_anthropic_key = cleaned_k
+                    st.success("Jaunā API atslēga ir aktivizēta šai sesijai!")
+                    st.rerun()
+                else:
+                    st.error("Atslēgai jāsākas ar 'sk-ant-'.")
+
+    with st.container(border=True):
+        st.markdown("#### 5. Pievienot jaunu apakšgrupu")
         st.caption("Izveidojiet papildu izmaksu vai ieņēmumu rindu (piem., Pārējās administrācijas izmaksas, Pārējās pārdošanas izmaksas).")
         ns1, ns2, ns3 = st.columns([2, 1.5, 1], vertical_alignment="bottom")
         with ns1:
@@ -2643,7 +2723,7 @@ elif S.nav_page == "settings":
                     st.toast(f"Apakšgrupa '{custom_sub_lbl.strip()}' pievienota.")
                     st.rerun()
 
-    with st.expander("5. Saglabāto kontu klasifikācija (atvērt, lai rediģētu kontus)", expanded=False):
+    with st.expander("6. Saglabāto kontu klasifikācija (atvērt, lai rediģētu kontus)", expanded=False):
         if "cls_df" in S and S.cls_df is not None and "analysis" in S and S.analysis is not None:
             cls_df_edit: pd.DataFrame = S.cls_df.copy()
             cls_df_edit["Grupa"] = cls_df_edit["Grupa"].map(normalize_group_key)
