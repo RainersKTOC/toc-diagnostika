@@ -1,5 +1,5 @@
 """
-app.py — TOC-FIN Finanšu diagnostikas un vadības lēmumu sistēma (v24.0)
+app.py — TOC-FIN Finanšu diagnostikas un vadības lēmumu sistēma (v24.2)
 Project ID: amprqueamdcxpjufigvm
 """
 from __future__ import annotations
@@ -119,7 +119,6 @@ if not API_KEY:
     st.stop()
 
 
-# ------------------------------------------------------------------ PERSISTENT LOGIN TOKEN (LAI NEIZMET NO PROFILA)
 def _make_auth_token(company: str, is_admin: bool) -> str:
     adm_flag = "1" if is_admin else "0"
     payload = f"{company.strip().lower()}|{adm_flag}"
@@ -736,10 +735,9 @@ def render_unified_toc_tables_html(
     show_cumulative: bool = True,
 ) -> str:
     """
-    Zīmē visas tabulas ar precīzu v23 kolonnu proporciju un:
-    - Pirmajai tabulai tāds pats tumšais virsraksta noformējums kā apakšējām divām tabulām.
-    - Iekšējās šūnu līnijas ir viegli melnas (1px solid #333333), bet grupu/mēnešu robežas ir bold melnas (2px solid #000000).
-    - Krāsu indikācija vienmēr ir ieslēgta pēc noklusējuma.
+    Visās trīs tabulās:
+    - Iekšējās līnijas uzliktas tieši uz <td> ar !important kā viegli melnas (1px solid #222222 !important).
+    - Grupu un mēnešu robežas ir bold melnas (2.5px solid #000000 !important).
     """
     valid_rows = [
         r for r in amounts_df.index
@@ -789,9 +787,10 @@ def render_unified_toc_tables_html(
         display: inline-block;
     }
     table.toc-unified {
-        border-collapse: collapse;
+        border-collapse: collapse !important;
         font-family: 'Inter', 'Calibri', 'Segoe UI', sans-serif;
         font-size: 12px;
+        border: 2.5px solid #000000 !important;
     }
     table.toc-unified th {
         background-color: #E2E8F0;
@@ -799,8 +798,8 @@ def render_unified_toc_tables_html(
         font-weight: 700;
         text-align: center;
         padding: 6px 5px;
-        border-top: 2px solid #000000;
-        border-bottom: 2px solid #000000;
+        border-top: 2.5px solid #000000 !important;
+        border-bottom: 2.5px solid #000000 !important;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -811,14 +810,19 @@ def render_unified_toc_tables_html(
         color: #000000 !important;
         overflow: hidden;
         text-overflow: ellipsis;
+        border-top: 1px solid #222222 !important;
+        border-bottom: 1px solid #222222 !important;
+    }
+    table.toc-unified tr.thick-bottom td {
+        border-bottom: 2.5px solid #000000 !important;
     }
     table.toc-unified td.lbl-main {
         text-align: left;
         font-weight: 700;
         padding-left: 8px;
         padding-right: 8px;
-        border-left: 2px solid #000000;
-        border-right: 2px solid #000000;
+        border-left: 2.5px solid #000000 !important;
+        border-right: 2.5px solid #000000 !important;
         color: #000000 !important;
     }
     table.toc-unified td.lbl-sub {
@@ -826,14 +830,15 @@ def render_unified_toc_tables_html(
         font-weight: 400;
         padding-left: 16px;
         padding-right: 8px;
-        border-left: 2px solid #000000;
-        border-right: 2px solid #000000;
+        border-left: 2.5px solid #000000 !important;
+        border-right: 2.5px solid #000000 !important;
         color: #000000 !important;
     }
-    /* Iekšējās līnijas: viegli melnas (1px solid #333333), bet mēnešu un grupu robežas: bold melnas (2px solid #000000) */
+    /* Viegli melnas iekšējās vertikālās līnijas (1px solid #222222) un bold melnas mēnešu robežas (2.5px solid #000000) */
     table.toc-unified td.val-col {
         text-align: right;
-        border-left: 1px solid #333333;
+        border-left: 1px solid #222222 !important;
+        border-right: 1px solid #222222 !important;
         font-variant-numeric: tabular-nums;
         color: #000000 !important;
     }
@@ -842,18 +847,18 @@ def render_unified_toc_tables_html(
         font-size: 11px;
         padding-left: 2px;
         padding-right: 5px;
-        border-left: 1px solid #444444;
-        border-right: 2px solid #000000;
+        border-left: 1px solid #222222 !important;
+        border-right: 2.5px solid #000000 !important;
         color: #000000 !important;
         font-variant-numeric: tabular-nums;
     }
-    table.toc-unified th.th-val { border-left: 1px solid #333333; }
-    table.toc-unified th.th-pct { font-size: 11px; border-left: 1px solid #444444; border-right: 2px solid #000000; }
-    table.toc-unified th.th-lbl { text-align: left; padding-left: 8px; border-left: 2px solid #000000; border-right: 2px solid #000000; }
+    table.toc-unified th.th-val { border-left: 1px solid #222222 !important; border-right: 1px solid #222222 !important; }
+    table.toc-unified th.th-pct { font-size: 11px; border-left: 1px solid #222222 !important; border-right: 2.5px solid #000000 !important; }
+    table.toc-unified th.th-lbl { text-align: left; padding-left: 8px; border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important; }
     </style>
     """]
 
-    # --- 1. GALVENĀ FINANŠU PĀRSKATA TABULA (AR TĀDU PAŠU VIRSRAKSTA BIRKU KĀ APAKŠĒJĀM DIVĀM) ---
+    # --- 1. GALVENĀ FINANŠU PĀRSKATA TABULA ---
     if title_main:
         html.append(f'<div class="toc-sec-heading">{title_main}</div>')
     html.append(f'<div class="toc-table-wrap"><table class="toc-unified" style="{main_tbl_style}">{main_colgroup}<thead><tr>')
@@ -875,16 +880,13 @@ def render_unified_toc_tables_html(
             or (kind in ("OE", "OE_CHILD") and next_kind not in ("OE", "OE_CHILD"))
             or i == len(row_names) - 1
         )
-        border_bottom = "2.2px solid #000000" if thick_bottom else "1px solid #333333"
+        tr_cls = ' class="thick-bottom"' if thick_bottom else ""
         font_w = "700" if is_bold else "400"
         lbl_cls = "lbl-main" if is_bold else "lbl-sub"
         disp_rn = display_row_name(rname)
 
-        row_style = (
-            f"background-color: #{fill_hex}; color: #000000; font-weight: {font_w}; "
-            f"border-top: 1px solid #333333; border-bottom: {border_bottom};"
-        )
-        html.append(f'<tr style="{row_style}"><td class="{lbl_cls}" title="{disp_rn}">{disp_rn}</td>')
+        row_style = f"background-color: #{fill_hex}; color: #000000; font-weight: {font_w};"
+        html.append(f'<tr{tr_cls} style="{row_style}"><td class="{lbl_cls}" title="{disp_rn}">{disp_rn}</td>')
 
         for p in periods:
             val_str = fmt_num(main_df.loc[rname, p])
@@ -913,14 +915,14 @@ def render_unified_toc_tables_html(
     for p in kpi_periods:
         th_bg = "#CBD5E1" if p in grey_cols else "#E2E8F0"
         html.append(
-            f'<th colspan="2" style="background-color: {th_bg}; color: #000000; border-top: 2px solid #000000; '
-            f'border-bottom: 2px solid #000000; border-left: 1px solid #333333; border-right: 2px solid #000000;">{p}</th>'
+            f'<th colspan="2" style="background-color: {th_bg}; color: #000000; border-top: 2.5px solid #000000 !important; '
+            f'border-bottom: 2.5px solid #000000 !important; border-left: 1px solid #222222 !important; border-right: 2.5px solid #000000 !important;">{p}</th>'
         )
     html.append("</tr></thead><tbody>")
 
     for i, idx_name in enumerate(kpi_df.index):
-        b_bot = "2.2px solid #000000" if i == len(kpi_df.index) - 1 else "1px solid #333333"
-        html.append(f'<tr style="background-color: #FFFFFF; color: #000000; border-top: 1px solid #333333; border-bottom: {b_bot};">')
+        tr_cls = ' class="thick-bottom"' if i == len(kpi_df.index) - 1 else ""
+        html.append(f'<tr{tr_cls} style="background-color: #FFFFFF; color: #000000;">')
         html.append(f'<td class="lbl-main" style="background-color: #F1F5F9; font-weight: 700; color: #000000;" title="{idx_name}">{idx_name}</td>')
 
         row_month_vals = [kpi_df.loc[idx_name, mp] for mp in month_only_kpi_cols] if month_only_kpi_cols else list(kpi_df.loc[idx_name].values)
@@ -941,7 +943,7 @@ def render_unified_toc_tables_html(
 
             html.append(
                 f'<td colspan="2" style="text-align: right; padding: 4px 8px; background-color: {bg_cell}; color: #000000 !important; '
-                f'border-left: 1px solid #333333; border-right: 2px solid #000000; font-weight: 400; font-variant-numeric: tabular-nums;">{s}</td>'
+                f'border-left: 1px solid #222222 !important; border-right: 2.5px solid #000000 !important; font-weight: 400; font-variant-numeric: tabular-nums;">{s}</td>'
             )
         html.append("</tr>")
 
@@ -958,8 +960,8 @@ def render_unified_toc_tables_html(
                 html.append(f'<th class="th-val">{p}</th><th class="th-pct">%</th>')
             else:
                 html.append(
-                    f'<th colspan="2" style="background-color: #E2E8F0; color: #000000; border-top: 2px solid #000000; '
-                    f'border-bottom: 2px solid #000000; border-left: 1px solid #333333; border-right: 2px solid #000000;">{p}</th>'
+                    f'<th colspan="2" style="background-color: #E2E8F0; color: #000000; border-top: 2.5px solid #000000 !important; '
+                    f'border-bottom: 2.5px solid #000000 !important; border-left: 1px solid #222222 !important; border-right: 2.5px solid #000000 !important;">{p}</th>'
                 )
         html.append("</tr></thead><tbody>")
 
@@ -973,14 +975,11 @@ def render_unified_toc_tables_html(
         }
 
         for idx_c, c_name in enumerate(cum_df.index):
-            b_bot = "2.2px solid #000000" if idx_c == len(cum_df.index) - 1 else "1px solid #333333"
+            tr_cls = ' class="thick-bottom"' if idx_c == len(cum_df.index) - 1 else ""
             lbl_bg_hex = cum_label_fills.get(c_name, "F1F5F9")
             is_np_cum = c_name.startswith("NP")
 
-            html.append(
-                f'<tr style="background-color: #FFFFFF; color: #000000; font-weight: 400; '
-                f'border-top: 1px solid #333333; border-bottom: {b_bot};">'
-            )
+            html.append(f'<tr{tr_cls} style="background-color: #FFFFFF; color: #000000; font-weight: 400;">')
             html.append(
                 f'<td class="lbl-main" style="background-color: #{lbl_bg_hex}; font-weight: 700; color: #000000;" title="{c_name}">{c_name}</td>'
             )
@@ -1009,16 +1008,16 @@ def render_unified_toc_tables_html(
                         v_ytd = cum_df.loc[c_name, last_p]
                         ytd_bg = ("#D4EFDF" if v_ytd >= 0 else "#FADBD8") if is_np_cum else "#F8F9F9"
                         html.append(
-                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: {ytd_bg}; color: #000000; border-left: 1px solid #333333; border-right: 2px solid #000000; font-weight: 400;">{fmt_num(v_ytd)}</td>'
+                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: {ytd_bg}; color: #000000; border-left: 1px solid #222222 !important; border-right: 2.5px solid #000000 !important; font-weight: 400;">{fmt_num(v_ytd)}</td>'
                         )
                     elif last_p and "AVG" in str(p).upper() and len(cum_periods) > 0:
                         v_avg = cum_df.loc[c_name, last_p] / len(cum_periods)
                         avg_bg = ("#D4EFDF" if v_avg >= 0 else "#FADBD8") if is_np_cum else "#F8F9F9"
                         html.append(
-                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: {avg_bg}; color: #000000; border-left: 1px solid #333333; border-right: 2px solid #000000; font-weight: 400;">{fmt_num(v_avg)}</td>'
+                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: {avg_bg}; color: #000000; border-left: 1px solid #222222 !important; border-right: 2.5px solid #000000 !important; font-weight: 400;">{fmt_num(v_avg)}</td>'
                         )
                     else:
-                        html.append('<td colspan="2" style="background-color: #FFFFFF; border-left: 1px solid #333333; border-right: 2px solid #000000;"></td>')
+                        html.append('<td colspan="2" style="background-color: #FFFFFF; border-left: 1px solid #222222 !important; border-right: 2.5px solid #000000 !important;"></td>')
             html.append("</tr>")
 
         html.append("</tbody></table></div>")
@@ -1038,37 +1037,40 @@ for c_key, (c_lbl, c_mc) in S.get("custom_subgroups", {}).items():
     register_custom_subgroup(c_key, c_lbl, c_mc)
 
 
-# ------------------------------------------------------------------ PELDOŠA (STICKY), VIZUĀLI IZCELTA RĪKJOSLA UN MODERNS STILS
+# ------------------------------------------------------------------ PELDOŠA (STICKY) RĪKJOSLA BEZ DUBLĒTĀS LĪNIJAS UN ZILĀ FONA
 st.markdown(
     """
     <style>
     [data-testid="stSidebar"], [data-testid="collapsedControl"] {
         display: none !important;
     }
-    /* Pietiekams augšējais atstatums, lai nekas nepazūd aiz Streamlit augšējās joslas */
     .block-container {
-        padding-top: 3.2rem !important;
+        padding-top: 3.0rem !important;
         padding-bottom: 2.5rem !important;
         max-width: 97% !important;
     }
-    /* Padarām pirmo konteineru (rīkjoslu) peldošu (sticky) un vizuāli izceltu */
+    /* Paslēpjam pašu marķiera elementu un tā konteineru, lai virs rīkjoslas nekad neparādās tukša līnija/kaste */
+    div.sticky-nav-marker {
+        display: none !important;
+    }
+    div[data-testid="stElementContainer"]:has(div.sticky-nav-marker),
+    div.element-container:has(div.sticky-nav-marker) {
+        display: none !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        height: 0 !important;
+    }
+    /* Tīra, dabiska rīkjosla, kas pielāgojas lapas fonam un seko līdzi ritinot */
     div[data-testid="stVerticalBlock"] > div:has(div.sticky-nav-marker) {
         position: sticky !important;
-        top: 2.75rem !important;
+        top: 2.8rem !important;
         z-index: 999 !important;
-        background-color: #F8FAFC !important;
-        border: 1.5px solid #CBD5E1 !important;
-        border-radius: 10px !important;
-        padding: 10px 16px !important;
-        box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08) !important;
-        margin-bottom: 14px !important;
-    }
-    @media (prefers-color-scheme: dark) {
-        div[data-testid="stVerticalBlock"] > div:has(div.sticky-nav-marker) {
-            background-color: #1E293B !important;
-            border: 1.5px solid #475569 !important;
-            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4) !important;
-        }
+        background-color: var(--secondary-background-color, #F4F3EE) !important;
+        border: 1px solid rgba(120, 120, 120, 0.28) !important;
+        border-radius: 12px !important;
+        padding: 12px 18px !important;
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.07) !important;
+        margin-bottom: 16px !important;
     }
     h1, h2, h3, h4 {
         font-family: 'Inter', 'Segoe UI', sans-serif !important;
@@ -1411,7 +1413,6 @@ with st.container():
     st.markdown('<div class="sticky-nav-marker"></div>', unsafe_allow_html=True)
 
     if S.hide_top_toolbar:
-        # Kad rīkjosla paslēpta -> rādām tikai Asistentu un mazu bultiņu ▼ rīkjoslas atvēršanai
         _, col_asist, col_arr = st.columns([6.2, 1.0, 0.35], vertical_alignment="center")
         with col_asist:
             with st.popover("Asistents", use_container_width=True):
@@ -1445,7 +1446,6 @@ with st.container():
                 S.hide_top_toolbar = False
                 st.rerun()
     else:
-        # Kad rīkjosla atvērta -> Zīmols + Asistents + bultiņa ▲ + izceltas navigācijas pogas
         hdr_left, hdr_asist, hdr_arr = st.columns([5.8, 1.0, 0.35], vertical_alignment="center")
         with hdr_left:
             st.markdown(
@@ -1544,34 +1544,57 @@ if S.nav_page == "overview":
         fin_preset_opts.append("Pēdējie 6 mēneši")
     fin_preset_opts.append("Manuāla mēnešu izlase")
 
-    # Eleganta, nepārblīvēta vadības rinda: Periods | Kompakta Mēnešu izlase | Viena Lejupielādēt Excel poga
+    # Sinhronizējam "Periods pārskatam" un "Mēnešu izlase", lai abi atjaunojas automātiski
+    if "fin_period_preset" not in S or S.fin_period_preset not in fin_preset_opts:
+        S.fin_period_preset = fin_preset_opts[0]
+    if "fin_months_active" not in S or not set(S.fin_months_active).issubset(set(all_months)):
+        S.fin_months_active = list(all_months)
+
+    def _on_fin_preset_change():
+        p = S.fin_period_preset
+        if p.startswith("Visi mēneši"):
+            S.fin_months_active = list(all_months)
+        elif p == "Pēdējie 12 mēneši":
+            S.fin_months_active = list(all_months[-12:])
+        elif p == "Pirmie 6 mēneši":
+            S.fin_months_active = list(all_months[:6])
+        elif p == "Pēdējie 6 mēneši":
+            S.fin_months_active = list(all_months[-6:])
+        else:
+            for yr_k, m_list in months_by_year.items():
+                if p.startswith(f"{yr_k}. gads"):
+                    S.fin_months_active = list(m_list)
+                    break
+
+    def _on_fin_months_change():
+        cur = S.fin_months_active
+        if cur == list(all_months):
+            S.fin_period_preset = fin_preset_opts[0]
+        else:
+            S.fin_period_preset = "Manuāla mēnešu izlase"
+
     bar_c1, bar_c2, bar_c3, _ = st.columns([1.4, 1.2, 1.1, 2.3], vertical_alignment="bottom")
     with bar_c1:
-        fin_preset = st.selectbox("Periods pārskatam", options=fin_preset_opts, key="fin_period_preset")
+        st.selectbox(
+            "Periods pārskatam",
+            options=fin_preset_opts,
+            key="fin_period_preset",
+            on_change=_on_fin_preset_change,
+        )
 
-    fin_default_months = all_months
-    for yr in sorted(months_by_year.keys()):
-        if fin_preset.startswith(f"{yr}. gads"):
-            fin_default_months = months_by_year[yr]
-            break
-    if fin_preset == "Pēdējie 12 mēneši":
-        fin_default_months = all_months[-12:]
-    elif fin_preset == "Pirmie 6 mēneši":
-        fin_default_months = all_months[:6]
-    elif fin_preset == "Pēdējie 6 mēneši":
-        fin_default_months = all_months[-6:]
-
+    cur_fin_months = S.get("fin_months_active", all_months)
     with bar_c2:
-        with st.popover(f"Mēnešu izlase ({len(fin_default_months)}/{len(all_months)})", use_container_width=True):
+        with st.popover(f"Mēnešu izlase ({len(cur_fin_months)}/{len(all_months)})", use_container_width=True):
             st.caption("Atzīmējiet mēnešus, kurus iekļaut tabulā:")
-            fin_selected_months = st.multiselect(
+            st.multiselect(
                 "Izvēlētie mēneši",
                 options=all_months,
-                default=fin_default_months,
-                key=f"fin_months_sel_{fin_preset}",
+                key="fin_months_active",
+                on_change=_on_fin_months_change,
                 label_visibility="collapsed",
             )
 
+    fin_selected_months = [m for m in all_months if m in S.get("fin_months_active", all_months)]
     if not fin_selected_months:
         st.warning("Izvēlieties vismaz vienu mēnesi finanšu pārskata tabulai.")
         st.stop()
@@ -1681,7 +1704,7 @@ if S.nav_page == "overview":
 
 
 # ==============================================================================
-# POSMS 2: SCENĀRIJU SIMULĀCIJA (AR KOMPAKTU TABULAS IEVADI)
+# POSMS 2: SCENĀRIJU SIMULĀCIJA
 # ==============================================================================
 elif S.nav_page == "simulation":
     st.subheader("Scenāriju simulācija un Jauns projekts")
@@ -1710,29 +1733,51 @@ elif S.nav_page == "simulation":
     if len(all_months) >= 6:
         sim_preset_opts.append("Pirmie 6 mēneši")
         sim_preset_opts.append("Pēdējie 6 mēneši")
-    sim_preset_opts.append("Manuāla izvēle")
+    sim_preset_opts.append("Manuāla mēnešu izlase")
+
+    if "sim_preset_sel" not in S or S.sim_preset_sel not in sim_preset_opts:
+        S.sim_preset_sel = sim_preset_opts[0]
+    if "sim_months_active" not in S or not set(S.sim_months_active).issubset(set(all_months)):
+        S.sim_months_active = list(all_months)
+
+    def _on_sim_preset_change():
+        p = S.sim_preset_sel
+        if p.startswith("Visi mēneši"):
+            S.sim_months_active = list(all_months)
+        elif p == "Pirmie 6 mēneši":
+            S.sim_months_active = list(all_months[:6])
+        elif p == "Pēdējie 6 mēneši":
+            S.sim_months_active = list(all_months[-6:])
+        else:
+            for yr_k, m_list in months_by_year.items():
+                if p.startswith(f"{yr_k}. gads"):
+                    S.sim_months_active = list(m_list)
+                    break
+
+    def _on_sim_months_change():
+        cur = S.sim_months_active
+        if cur == list(all_months):
+            S.sim_preset_sel = sim_preset_opts[0]
+        else:
+            S.sim_preset_sel = "Manuāla mēnešu izlase"
 
     p_col1, p_col2, p_col3, _ = st.columns([1.3, 1.3, 1.2, 2.2], vertical_alignment="bottom")
     with p_col1:
-        preset = st.selectbox("Periods simulācijai", options=sim_preset_opts, key="sim_preset_sel")
+        st.selectbox(
+            "Periods simulācijai",
+            options=sim_preset_opts,
+            key="sim_preset_sel",
+            on_change=_on_sim_preset_change,
+        )
 
-    default_sel = all_months
-    for yr in sorted(months_by_year.keys()):
-        if preset.startswith(f"{yr}. gads"):
-            default_sel = months_by_year[yr]
-            break
-    if preset == "Pirmie 6 mēneši":
-        default_sel = all_months[:6]
-    elif preset == "Pēdējie 6 mēneši":
-        default_sel = all_months[-6:]
-
+    cur_sim_months = S.get("sim_months_active", all_months)
     with p_col2:
-        with st.popover(f"Mēnešu izlase ({len(default_sel)}/{len(all_months)})", use_container_width=True):
-            selected_months = st.multiselect(
+        with st.popover(f"Mēnešu izlase ({len(cur_sim_months)}/{len(all_months)})", use_container_width=True):
+            st.multiselect(
                 "Mēneši simulācijā",
                 options=all_months,
-                default=default_sel,
-                key=f"sim_m_{preset}",
+                key="sim_months_active",
+                on_change=_on_sim_months_change,
                 label_visibility="collapsed",
             )
     with p_col3:
@@ -1747,6 +1792,7 @@ elif S.nav_page == "simulation":
             S["sim_ed_ver"] = S.get("sim_ed_ver", 0) + 1
             st.rerun()
 
+    selected_months = [m for m in all_months if m in S.get("sim_months_active", all_months)]
     if not selected_months:
         st.warning("Izvēlieties vismaz vienu mēnesi.")
         st.stop()
@@ -2080,6 +2126,8 @@ elif S.nav_page == "archive":
                                 S.result = strip_excluded_rows(loaded_res)
                                 S.loaded_report_meta = loaded
                                 S.current_report_id = loaded["id"]
+                                S.pop("fin_months_active", None)
+                                S.pop("fin_period_preset", None)
                                 if loaded.get("commentary"):
                                     S.commentary = loaded["commentary"]
                                 else:
@@ -2483,6 +2531,8 @@ elif S.nav_page == "ingest":
 
         res = compute_toc_with_dynamic_subgroups(an.leaves, mapping, an.ex.period_cols, reported)
         S.result = res
+        S.pop("fin_months_active", None)
+        S.pop("fin_period_preset", None)
 
         if profile.is_connected:
             ok_map, _ = profile.save(an.leaves, mapping)
