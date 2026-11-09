@@ -1,5 +1,6 @@
 """
-app.py — TOC-FIN Finanšu diagnostikas un vadības lēmumu sistēma (v21.0)
+app.py — TOC-FIN Finanšu diagnostikas un vadības lēmumu sistēma (v22.0)
+Modulāra navigācija: Pārskats (Overview) | Simulācija | Arhīvs | Jauns PZA | Profils un Uzstādījumi
 Project ID: amprqueamdcxpjufigvm
 """
 from __future__ import annotations
@@ -207,15 +208,10 @@ def strip_excluded_rows(res):
 
 
 def filter_result_by_months(res, selected_months: list[str], all_months: list[str]):
-    """
-    Izfiltrē Finanšu pārskata tabulu pēc izvēlētajiem mēnešiem un dinamiski pārrēķina
-    YTD, AVG YTD un KPI kolonnas šim izvēlētajam periodam.
-    """
     if not selected_months or len(selected_months) == len(all_months):
         return res
 
     sub_amounts = res.amounts[selected_months].copy().astype(float)
-    # Nosakām gada prefiksu YTD/AVG kolonnām
     years_found = []
     for m_col in selected_months:
         _, yr = parse_period_month_year(m_col)
@@ -291,7 +287,6 @@ def compute_cumulative_toc_df(amounts_df: pd.DataFrame, fy_start_month: int = 1)
         cum_data[col] = running.copy()
 
     cum_df = pd.DataFrame(cum_data, index=target_rows)
-    # Tabulā rādām S, TVC, T, NP
     table_rows = [r for r in ["S", "TVC", "T", "NP"] if r in cum_df.index]
     cum_table_df = cum_df.loc[table_rows].copy()
     row_labels = {
@@ -305,7 +300,6 @@ def compute_cumulative_toc_df(amounts_df: pd.DataFrame, fy_start_month: int = 1)
 
 
 def render_toc_lines_chart(amounts_df: pd.DataFrame, fy_start_month: int = 1) -> None:
-    """Vizualizē S, TVC, T, OE un NP līknes pa mēnešiem precīzās TOC grupu krāsās."""
     period_cols = [
         c for c in amounts_df.columns
         if not ("YTD" in str(c).upper() or "AVG" in str(c).upper() or "KOPĀ" in str(c).upper() or "IZMAIŅA" in str(c).upper())
@@ -323,7 +317,6 @@ def render_toc_lines_chart(amounts_df: pd.DataFrame, fy_start_month: int = 1) ->
     )
 
     series_order = ["S", "TVC", "T", "Uzturēšanas izmaksas (OE)", "NP"]
-    # Krāsas atbilstoši TOC grupām (S dzeltens, TVC brūns/oranžs, T zils, OE gaiši oranžs, NP zaļš)
     color_scale = alt.Scale(
         domain=series_order,
         range=["#FFF200", "#C55A11", "#00B0F0", "#F4B183", "#70AD47"],
@@ -589,11 +582,6 @@ def compute_toc_with_dynamic_subgroups(leaves, mapping: dict[str, dict], period_
 
 
 def _kpi_cond_color(idx_name: str, val: float, row_vals: list[float]) -> str:
-    """
-    Nosacījumu formatējums (Zaļš / Oranžs / Sarkans) produktivitātes rādītājiem (ieskaitot YTD un AVG YTD):
-    - PR = T/OE: < 1.00 = Sarkans (#FADBD8), 1.00..1.14 = Dzeltens/Oranžs (#FCF3CF), >= 1.15 = Zaļš (#D4EFDF)
-    - Pārējām rindām: salīdzina ar mēnešu sadalījumu (33% un 67% kvantiles).
-    """
     if pd.isna(val):
         return "#F8F9F9"
     if idx_name.startswith("PR"):
@@ -748,7 +736,6 @@ def render_unified_toc_tables_html(
             else:
                 s = f"{v:.2f}"
 
-            # Tagad arī YTD un AVG YTD kolonnas tiek iekrāsotas ar conditional formatting!
             if p in grey_cols:
                 bg_cell = "#E5E7E9"
             elif kpi_conditional_format:
@@ -810,8 +797,6 @@ def render_unified_toc_tables_html(
                     val_s = fmt_num(val_c)
                     pct_s = fmt_pct_int(pct_c)
 
-                    # Conditional formatting NP (uzkrājošais) rindai:
-                    # Ja attiecīgajā mēnesī NP gāja ar mīnusu (vai pats uzkrājošais NP < 0) -> sarkans (#FADBD8), ja pozitīvi -> zaļš (#D4EFDF)
                     if is_np_cum and kpi_conditional_format:
                         month_np_val = float(amounts_df.loc["NP", p]) if "NP" in amounts_df.index and p in amounts_df.columns else val_c
                         np_bg = "#D4EFDF" if (month_np_val >= 0 and val_c >= 0) else "#FADBD8"
@@ -895,6 +880,10 @@ st.markdown(
         background-color: #F4B183; color: #000000 !important; font-weight: 700;
         padding: 8px 12px; border-radius: 6px; margin-bottom: 10px; border-left: 5px solid #BA4A00;
     }
+    /* Navigācijas rīkjoslas izcelšana */
+    div[data-testid="stSidebar"] .stRadio > div {
+        gap: 6px;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -903,6 +892,7 @@ st.markdown(
 
 def build_global_diagnostic_context() -> str:
     parts = [f"Aktīvais uzņēmuma profils: {S.get('active_profile', 'Nav')}"]
+    parts.append(f"Pašreizējā sadaļa: {S.get('nav_page', 'overview')}")
     parts.append(
         f"Finanšu gada sākums: {S.get('fy_start_day', 1)}. {MONTH_NAMES_LV.get(S.get('fy_start_month', 1), 'Janvāris')}"
     )
@@ -939,7 +929,7 @@ def build_global_diagnostic_context() -> str:
 
     if "result" in S and S.result is not None:
         res = S.result
-        parts.append("\n--- 4. TOC-FIN TABULA (EUR) ---\n" + res.amounts.round(0).to_markdown())
+        parts.append("\n--- 4. AKTĪVĀ TOC-FIN TABULA (EUR) ---\n" + res.amounts.round(0).to_markdown())
         parts.append("\n--- 5. KPI ---\n" + res.kpi.round(3).to_markdown())
 
     return "\n\n".join(parts)
@@ -1027,6 +1017,8 @@ if not S.get("authenticated", False):
                     else:
                         S.active_profile = login_company.strip()
                         S.view_mode = "workspace"
+                        S.nav_page = "overview"
+                        S.auto_loaded_latest = False
                     st.rerun()
                 else:
                     st.error(msg)
@@ -1070,6 +1062,8 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
                 if st.button("Atvērt vidi", type="primary", use_container_width=True):
                     S.active_profile = target_client
                     S.view_mode = "workspace"
+                    S.nav_page = "overview"
+                    S.auto_loaded_latest = False
                     S.pop("result", None)
                     S.pop("cls_df", None)
                     S.pop("loaded_report_meta", None)
@@ -1119,211 +1113,101 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
     st.stop()
 
 
-# ------------------------------------------------------------------ 3. SĀNJOSLA
+# ------------------------------------------------------------------ 3. PROFILA IELĀDE UN AUTOMĀTISKAIS OVERVIEW
 profile = SupabaseProfileStore(company_name=S.active_profile)
 
 if "fy_start_month" not in S:
     S.fy_start_month = 1
 if "fy_start_day" not in S:
     S.fy_start_day = 1
+if "nav_page" not in S:
+    S.nav_page = "overview"
+
+all_saved_items = profile.list_reports()
+fin_reports = [r for r in all_saved_items if not str(r.get("file_name", "")).startswith("SIM::")]
+sim_reports = [r for r in all_saved_items if str(r.get("file_name", "")).startswith("SIM::")]
+saved_acc_count = profile.count_saved()
+
+# Automātiski ielādējam jaunāko finanšu atskaiti, kad lietotājs ienāk profilā
+if not S.get("auto_loaded_latest", False):
+    S.auto_loaded_latest = True
+    if "result" not in S and fin_reports:
+        latest_rep_id = fin_reports[0]["id"]
+        loaded_init = profile.load_report(latest_rep_id)
+        if loaded_init:
+            init_res = LoadedReportResult(
+                amounts=loaded_init["amounts"],
+                main=loaded_init["main"],
+                kpi=loaded_init["kpi"],
+                row_kinds=loaded_init["row_kinds"],
+                reconciliation=loaded_init["reconciliation"],
+                by_group={},
+            )
+            S.result = strip_excluded_rows(init_res)
+            S.loaded_report_meta = loaded_init
+            S.current_report_id = loaded_init["id"]
+            if loaded_init.get("commentary"):
+                S.commentary = loaded_init["commentary"]
+            else:
+                S.pop("commentary", None)
+
+
+# ------------------------------------------------------------------ 4. KREISĀ NAVIGĀCIJAS RĪKJOSLA
+NAV_ITEMS = {
+    "overview": "📊 Pārskats (Overview)",
+    "simulation": "🎯 Scenāriju simulācija",
+    "archive": f"🗂️ Atskaites un Simulācijas ({len(fin_reports) + len(sim_reports)})",
+    "ingest": "📥 Jauns PZA / Klasifikācija",
+    "settings": f"⚙️ Profils un Uzstādījumi ({saved_acc_count})",
+}
 
 with st.sidebar:
-    if S.get("is_admin", False):
-        st.info(f"Admin skats: **{S.active_profile}**")
-        if st.button("← Atpakaļ uz Admin paneli", use_container_width=True):
-            S.view_mode = "admin_panel"
-            S.pop("result", None)
-            S.pop("cls_df", None)
-            st.rerun()
+    st.markdown(f"### 🏢 {S.active_profile}")
+    if S.get("loaded_report_meta"):
+        st.caption(f"Aktīvā atskaite: **{S.loaded_report_meta.get('report_name')}**")
+    elif "result" in S:
+        st.caption("Aktīvā atskaite: **Jauns aprēķins**")
     else:
-        st.markdown(f"**Profils:** {S.active_profile}")
+        st.caption("Aktīvā atskaite: *Nav izvēlēta*")
 
-    col_s1, col_s2 = st.columns(2)
-    with col_s1:
-        if st.button("Jauns aprēķins", use_container_width=True):
-            S.view_mode = "workspace"
-            S.pop("result", None)
-            S.pop("cls_df", None)
-            S.pop("loaded_report_meta", None)
-            st.rerun()
-    with col_s2:
-        if st.button("Iziet", use_container_width=True):
-            S.clear()
-            st.rerun()
-
-    saved_acc_count = profile.count_saved()
-    if st.button(f"Rediģēt kontus ({saved_acc_count})", use_container_width=True):
-        S.view_mode = "edit_accounts"
+    st.markdown("---")
+    nav_keys = list(NAV_ITEMS.keys())
+    current_nav_idx = nav_keys.index(S.nav_page) if S.nav_page in nav_keys else 0
+    selected_nav_key = st.radio(
+        "Navigācija",
+        options=nav_keys,
+        index=current_nav_idx,
+        format_func=lambda k: NAV_ITEMS[k],
+        label_visibility="collapsed",
+    )
+    if selected_nav_key != S.nav_page:
+        S.nav_page = selected_nav_key
         st.rerun()
 
-    all_saved_items = profile.list_reports()
-    fin_reports = [r for r in all_saved_items if not str(r.get("file_name", "")).startswith("SIM::")]
-    sim_reports = [r for r in all_saved_items if str(r.get("file_name", "")).startswith("SIM::")]
-
-    with st.expander(f"Saglabātās atskaites ({len(fin_reports)})", expanded=False):
-        if not fin_reports:
-            st.caption("Nav saglabātu atskaišu.")
-        else:
-            rep_by_id = {r["id"]: r for r in fin_reports}
-            chosen_rep_id = st.selectbox(
-                "Atskaite",
-                options=list(rep_by_id.keys()),
-                format_func=lambda rid: f"{rep_by_id[rid].get('report_name')} ({str(rep_by_id[rid].get('created_at', ''))[:10]})",
-                label_visibility="collapsed",
-                key="sb_fin_rep_select",
-            )
-            sel_rep = rep_by_id[chosen_rep_id]
-            st.caption(
-                f"**Nosaukums:** {sel_rep.get('report_name')}\n\n"
-                f"**Periods:** {sel_rep.get('periods_label') or '—'}"
-            )
-
-            if st.button("Atvērt atskaiti", type="primary", use_container_width=True, key="btn_open_fin"):
-                loaded = profile.load_report(chosen_rep_id)
-                if loaded:
-                    loaded_res = LoadedReportResult(
-                        amounts=loaded["amounts"],
-                        main=loaded["main"],
-                        kpi=loaded["kpi"],
-                        row_kinds=loaded["row_kinds"],
-                        reconciliation=loaded["reconciliation"],
-                        by_group={},
-                    )
-                    S.result = strip_excluded_rows(loaded_res)
-                    S.loaded_report_meta = loaded
-                    S.current_report_id = loaded["id"]
-                    S.view_mode = "workspace"
-                    if loaded.get("commentary"):
-                        S.commentary = loaded["commentary"]
-                    else:
-                        S.pop("commentary", None)
-                    st.rerun()
-
-            if st.button("Dzēst atskaiti", use_container_width=True, key="btn_del_fin"):
-                S.confirm_delete_rep_id = chosen_rep_id
-
-            if S.get("confirm_delete_rep_id") == chosen_rep_id:
-                st.warning(f"Vai tiešām dzēst **{sel_rep.get('report_name')}**?")
-                cd1, cd2 = st.columns(2)
-                with cd1:
-                    if st.button("Jā, dzēst", type="primary", use_container_width=True, key="btn_yes_del_fin"):
-                        if profile.delete_report(chosen_rep_id):
-                            S.pop("confirm_delete_rep_id", None)
-                            if S.get("current_report_id") == chosen_rep_id:
-                                S.pop("result", None)
-                                S.pop("loaded_report_meta", None)
-                            st.rerun()
-                with cd2:
-                    if st.button("Atcelt", use_container_width=True, key="btn_no_del_fin"):
-                        S.pop("confirm_delete_rep_id", None)
-                        st.rerun()
-
-    with st.expander(f"Saglabātās simulācijas ({len(sim_reports)})", expanded=False):
-        if not sim_reports:
-            st.caption("Nav saglabātu simulāciju.")
-        else:
-            sim_by_id = {r["id"]: r for r in sim_reports}
-            chosen_sim_id = st.selectbox(
-                "Simulācija",
-                options=list(sim_by_id.keys()),
-                format_func=lambda rid: f"{sim_by_id[rid].get('report_name')} ({str(sim_by_id[rid].get('created_at', ''))[:10]})",
-                label_visibility="collapsed",
-                key="sb_sim_rep_select",
-            )
-            sel_sim = sim_by_id[chosen_sim_id]
-            st.caption(f"**Simulācija:** {sel_sim.get('report_name')}")
-
-            if st.button("Atvērt simulāciju", type="primary", use_container_width=True, key="btn_open_sim"):
-                loaded_s = profile.load_report(chosen_sim_id)
-                if loaded_s:
-                    loaded_sim_res = LoadedReportResult(
-                        amounts=loaded_s["amounts"],
-                        main=loaded_s["main"],
-                        kpi=loaded_s["kpi"],
-                        row_kinds=loaded_s["row_kinds"],
-                        reconciliation=loaded_s["reconciliation"],
-                        by_group={},
-                    )
-                    S.result = strip_excluded_rows(loaded_sim_res)
-                    S.loaded_report_meta = loaded_s
-                    S.view_mode = "workspace"
-                    try:
-                        sim_state = json.loads(loaded_s.get("commentary") or "{}")
-                        for k_s, v_s in sim_state.get("pct_changes", {}).items():
-                            S[f"sim_pct_{k_s}"] = float(v_s)
-                        for k_s, v_s in sim_state.get("eur_changes", {}).items():
-                            S[f"sim_eur_{k_s}"] = float(v_s)
-                        np_cfg = sim_state.get("new_product", {})
-                        S["np_enabled"] = bool(np_cfg.get("enabled", False))
-                        S["np_name"] = str(np_cfg.get("name", "Jauns produkts / projekts"))
-                        S["np_s_eur"] = float(np_cfg.get("s_eur", 0.0))
-                        S["np_mat_eur"] = float(np_cfg.get("tvc_mat_eur", 0.0))
-                        S["np_deliv_eur"] = float(np_cfg.get("tvc_deliv_eur", 0.0))
-                    except Exception:
-                        pass
-                    st.toast(f"Simulācija '{sel_sim.get('report_name')}' ielādēta.")
-                    st.rerun()
-
-            if st.button("Dzēst simulāciju", use_container_width=True, key="btn_del_sim"):
-                S.confirm_delete_sim_id = chosen_sim_id
-
-            if S.get("confirm_delete_sim_id") == chosen_sim_id:
-                st.warning(f"Vai tiešām dzēst simulāciju **{sel_sim.get('report_name')}**?")
-                cs1, cs2 = st.columns(2)
-                with cs1:
-                    if st.button("Jā, dzēst", type="primary", use_container_width=True, key="btn_yes_del_sim"):
-                        if profile.delete_report(chosen_sim_id):
-                            S.pop("confirm_delete_sim_id", None)
-                            st.rerun()
-                with cs2:
-                    if st.button("Atcelt", use_container_width=True, key="btn_no_del_sim"):
-                        S.pop("confirm_delete_sim_id", None)
-                        st.rerun()
-
-    with st.expander("Iestatījumi", expanded=False):
-        st.markdown("**Finanšu gada sākums**")
-        fy_c1, fy_c2 = st.columns([1, 1.6])
-        with fy_c1:
-            selected_fy_day = st.selectbox(
-                "Diena",
-                options=list(range(1, 32)),
-                index=int(S.get("fy_start_day", 1)) - 1,
-            )
-        with fy_c2:
-            selected_fy_month = st.selectbox(
-                "Mēnesis",
-                options=list(MONTH_NAMES_LV.keys()),
-                format_func=lambda m: MONTH_NAMES_LV[m],
-                index=list(MONTH_NAMES_LV.keys()).index(S.get("fy_start_month", 1)),
-            )
-        S.fy_start_day = selected_fy_day
-        S.fy_start_month = selected_fy_month
-
-        st.markdown("---")
-        ok_q, q_info = profile.check_quota()
-        if profile.is_connected:
-            st.caption(f"Datubāze: pieslēgta ({saved_acc_count} konti)")
-            if q_info:
-                st.caption(f"Mēneša kvota: {q_info}")
-        else:
-            st.caption(f"Datubāze: nav savienojuma ({profile.init_error})")
+    st.markdown("---")
+    if S.get("is_admin", False):
+        if st.button("← Uz Admin paneli", use_container_width=True):
+            S.view_mode = "admin_panel"
+            st.rerun()
+    if st.button("Iziet no sistēmas", use_container_width=True):
+        S.clear()
+        st.rerun()
 
 
-# ------------------------------------------------------------------ VIRSRAKSTS UN ASISTENTS
-top_col1, top_col2 = st.columns([5, 1])
+# ------------------------------------------------------------------ 5. AUGŠĒJĀ JOSLA UN ASISTENTS (PIEЕJAMS VISOS POSMOS)
+top_col1, top_col2 = st.columns([5, 1], vertical_alignment="center")
 with top_col1:
-    st.title("TOC-FIN: Finanšu diagnostika un vadības lēmumu sistēma")
+    st.title("TOC-FIN Vadības Sistēma")
 with top_col2:
-    st.write("")
-    with st.popover("Asistents", use_container_width=True):
-        st.caption("TOC-FIN Čats (īsas, konkrētas atbildes)")
+    with st.popover("💬 Asistents", use_container_width=True):
+        st.caption("TOC-FIN Čats (pieejams visos posmos)")
         if "global_chat" not in S:
             S.global_chat = []
 
         chat_box = st.container(height=300)
         with chat_box:
             if not S.global_chat:
-                st.caption("Uzdodiet jautājumu...")
+                st.caption("Uzdodiet jautājumu par datiem vai situāciju...")
             for msg in S.global_chat:
                 with st.chat_message(msg["role"]):
                     st.write(msg["content"])
@@ -1349,861 +1233,846 @@ with top_col2:
                 S.global_chat = []
                 st.rerun()
 
-with st.expander("Metodoloģija un pamatjēdzieni"):
-    st.markdown("""
-    * **S (Sales / Ieņēmumi)** — Visa reālā nauda, kas ienāk uzņēmumā.
-    * **TVC (Truly Variable Costs / Patiesi mainīgās izmaksas)** — Izdevumi, kas mainās 1:1 ar katru pārdoto vienību.
-    * **T (Throughput / Caurlaidība)** — Jaunā naudas masa: $$T = S - TVC$$.
-    * **Uzturēšanas izmaksas (OE)** — Kapacitātes un darbības nodrošināšanas izdevumi.
-    * **NP (Net Profit / Neto peļņa)** — $$NP = T - OE$$.
-    * **PR (Productivity Ratio / Produktivitātes rādītājs)** — $$PR = T / OE$$.
-    """)
 
-
-# ------------------------------------------------------------------ SKATS: TIEŠA KONTU REDIĢĒŠANA NO SĀNJOSLAS
-if S.get("view_mode") == "edit_accounts":
-    head_e1, head_e2 = st.columns([4, 1])
-    with head_e1:
-        st.header(f"Kontu klasifikācijas rediģēšana ({S.active_profile})")
-    with head_e2:
-        st.write("")
-        if st.button("← Atgriezties uz pārskatu", use_container_width=True):
-            S.view_mode = "workspace"
+# ==============================================================================
+# POSMS 1: 📊 PĀRSKATS (OVERVIEW)
+# ==============================================================================
+if S.nav_page == "overview":
+    if "result" not in S or S.result is None:
+        st.info("Šajā profilā vēl nav nevienas saglabātas atskaites. Pārejiet uz sadaļu **📥 Jauns PZA / Klasifikācija**, lai augšupielādētu pirmo PZA failu.")
+        if st.button("Doties uz PZA faila augšupielādi →", type="primary"):
+            S.nav_page = "ingest"
             st.rerun()
+        st.stop()
 
-    with st.expander("Pievienot jaunu apakšgrupu (sadalīt izmaksas sīkāk)", expanded=False):
-        ns1, ns2, ns3 = st.columns([2, 1.5, 1], vertical_alignment="bottom")
-        with ns1:
-            custom_sub_lbl = st.text_input("Jaunās apakšgrupas nosaukums", placeholder="piem., Pārējās administrācijas izmaksas", key="ed_new_sub_lbl")
-        with ns2:
-            custom_sub_main = st.selectbox("Lielā grupa", options=["Uzturēšanas izmaksas (OE)", "TVC (Mainīgās izmaksas)", "S (Ieņēmumi)"], key="ed_new_sub_main")
-        with ns3:
-            if st.button("Pievienot apakšgrupu", use_container_width=True, key="ed_btn_add_sub"):
-                if custom_sub_lbl.strip():
-                    m_c = "S" if custom_sub_main.startswith("S") else ("TVC" if custom_sub_main.startswith("TVC") else "OE")
-                    new_k = f"{m_c}_CUSTOM_{hashlib.md5(custom_sub_lbl.strip().encode()).hexdigest()[:6].upper()}"
-                    S.setdefault("custom_subgroups", {})[new_k] = (custom_sub_lbl.strip(), m_c)
-                    register_custom_subgroup(new_k, custom_sub_lbl.strip(), m_c)
-                    st.toast(f"Apakšgrupa '{custom_sub_lbl.strip()}' pievienota.")
-                    st.rerun()
+    res = strip_excluded_rows(S.result)
+    meta = S.get("loaded_report_meta")
+    rep_title = f"{meta.get('report_name')} ({meta.get('periods_label')})" if meta else "Aktīvais finanšu pārskats"
 
-    if "cls_df" in S and S.cls_df is not None and "analysis" in S and S.analysis is not None:
-        cls_df_edit: pd.DataFrame = S.cls_df.copy()
-        cls_df_edit["Grupa"] = cls_df_edit["Grupa"].map(normalize_group_key)
-
-        ed_view_df = pd.DataFrame(
-            {
-                "Konts": cls_df_edit["Displeja_konts"].tolist(),
-                "Lielā grupa": [get_main_cat(g) for g in cls_df_edit["Grupa"]],
-                "Apakšgrupa (Rinda atskaitē)": [SUBGROUP_LABELS[normalize_group_key(g)] for g in cls_df_edit["Grupa"]],
-            }
-        )
-        ed_h = (len(ed_view_df) + 1) * 36 + 14
-        edited_ses = st.data_editor(
-            ed_view_df,
-            hide_index=True,
-            use_container_width=True,
-            height=ed_h,
-            disabled=["Konts"],
-            key=f"direct_ses_editor_{S.get('editor_v', 0)}",
-            column_config={
-                "Konts": st.column_config.TextColumn("Konta nosaukums", width="large"),
-                "Lielā grupa": st.column_config.SelectboxColumn("Lielā grupa", options=MAIN_GROUP_OPTIONS, required=True, width="medium"),
-                "Apakšgrupa (Rinda atskaitē)": st.column_config.SelectboxColumn("Apakšgrupa / Rinda atskaitē", options=list(SUBGROUP_LABELS.values()), required=True, width="large"),
-            },
-        )
-
-        new_grps = []
-        ch_flag = False
-        for idx_p in range(len(cls_df_edit)):
-            o_g = normalize_group_key(cls_df_edit.iloc[idx_p]["Grupa"])
-            o_m = get_main_cat(o_g)
-            o_s = SUBGROUP_LABELS[o_g]
-            n_m = edited_ses.iloc[idx_p]["Lielā grupa"]
-            n_s = edited_ses.iloc[idx_p]["Apakšgrupa (Rinda atskaitē)"]
-            if n_s != o_s and n_s in LABEL_TO_KEY:
-                new_grps.append(LABEL_TO_KEY[n_s])
-                ch_flag = True
-            elif n_m != o_m:
-                new_grps.append(
-                    "S_REV" if n_m.startswith("S") else ("TVC_MATERIALS" if n_m.startswith("TVC") else ("EXCLUDED" if n_m.startswith("Izslēgt") else "OE_OTHER"))
-                )
-                ch_flag = True
-            else:
-                new_grps.append(o_g)
-
-        if ch_flag:
-            cls_df_edit["Grupa"] = new_grps
-            cls_df_edit["Ieņēmums"] = cls_df_edit["Grupa"].str.startswith("S_")
-            S.cls_df = cls_df_edit
-            S.editor_v = S.get("editor_v", 0) + 1
+    ov_h1, ov_h2 = st.columns([3, 1], vertical_alignment="center")
+    with ov_h1:
+        st.header("Finanšu pārskats (Overview)")
+        st.caption(f"Atskaite: **{rep_title}**")
+    with ov_h2:
+        if st.button("🎯 Doties uz šī pārskata simulāciju →", use_container_width=True):
+            S.nav_page = "simulation"
             st.rerun()
-
-        if st.button("Saglabāt izmaiņas un pārrēķināt", type="primary"):
-            an = S.analysis
-            stc = S.structure
-            cls_sorted = sort_cls_df(S.cls_df)
-            S.cls_df = cls_sorted
-            mapping = {
-                r["id"]: {
-                    "group": normalize_group_key(r["Grupa"]),
-                    "is_income": bool(str(r["Grupa"]).startswith("S_")),
-                }
-                for _, r in cls_sorted.iterrows()
-            }
-            pos = next((l.pos for l in an.ex.lines if l.row == stc.result_row), None)
-            reported = an.ex.lines[pos].vals if pos is not None else None
-            S.result = compute_toc_with_dynamic_subgroups(an.leaves, mapping, an.ex.period_cols, reported)
-            profile.save(an.leaves, mapping)
-            S.view_mode = "workspace"
-            st.toast("Konti atjaunināti un tabula pārrēķināta.")
-            st.rerun()
-    else:
-        saved_maps = profile.list_saved_mappings()
-        if not saved_maps:
-            st.info("Nav saglabātu kontu.")
-        else:
-            db_df = pd.DataFrame(saved_maps)
-            db_df["toc_group"] = db_df["toc_group"].map(normalize_group_key)
-            db_view = pd.DataFrame(
-                {
-                    "id": db_df["id"],
-                    "Sadaļa": db_df["path_label"],
-                    "Konts": db_df["account_label"],
-                    "Lielā grupa": [get_main_cat(g) for g in db_df["toc_group"]],
-                    "Apakšgrupa (Rinda atskaitē)": [SUBGROUP_LABELS[normalize_group_key(g)] for g in db_df["toc_group"]],
-                }
-            )
-            db_h = min((len(db_view) + 1) * 36 + 14, 750)
-            edited_db = st.data_editor(
-                db_view,
-                hide_index=True,
-                use_container_width=True,
-                height=db_h,
-                disabled=["id", "Sadaļa", "Konts"],
-                key="db_mappings_editor",
-                column_config={
-                    "id": None,
-                    "Sadaļa": st.column_config.TextColumn("Sadaļa", width="medium"),
-                    "Konts": st.column_config.TextColumn("Konta nosaukums", width="large"),
-                    "Lielā grupa": st.column_config.SelectboxColumn("Lielā grupa", options=MAIN_GROUP_OPTIONS, required=True, width="medium"),
-                    "Apakšgrupa (Rinda atskaitē)": st.column_config.SelectboxColumn("Apakšgrupa", options=list(SUBGROUP_LABELS.values()), required=True, width="large"),
-                },
-            )
-            if st.button("Saglabāt izmaiņas", type="primary"):
-                updates_to_save = []
-                for idx_r in range(len(db_df)):
-                    orig_g = normalize_group_key(db_df.iloc[idx_r]["toc_group"])
-                    orig_m = get_main_cat(orig_g)
-                    orig_s = SUBGROUP_LABELS[orig_g]
-                    new_m = edited_db.iloc[idx_r]["Lielā grupa"]
-                    new_s = edited_db.iloc[idx_r]["Apakšgrupa (Rinda atskaitē)"]
-                    if new_s != orig_s and new_s in LABEL_TO_KEY:
-                        final_g = LABEL_TO_KEY[new_s]
-                    elif new_m != orig_m:
-                        final_g = "S_REV" if new_m.startswith("S") else ("TVC_MATERIALS" if new_m.startswith("TVC") else ("EXCLUDED" if new_m.startswith("Izslēgt") else "OE_OTHER"))
-                    else:
-                        final_g = orig_g
-                    updates_to_save.append({"id": int(db_df.iloc[idx_r]["id"]), "toc_group": final_g})
-                if profile.update_saved_mappings_direct(updates_to_save):
-                    st.success("Klasifikācija saglabāta.")
-                    st.rerun()
-                else:
-                    st.error(f"Kļūda: {profile.last_error}")
-    st.stop()
-
-
-# ------------------------------------------------------------------ REZULTĀTU UN PILNĀS SIMULĀCIJAS ATTĒLOŠANA
-def render_results_and_simulation(res, report_title: str = ""):
-    res = strip_excluded_rows(res)
-    if report_title:
-        st.caption(f"Atvērta atskaite: **{report_title}**")
 
     all_months = [c for c in res.amounts.columns if not ("YTD" in c or "AVG" in c)]
     if not all_months:
         all_months = list(res.amounts.columns)
 
-    # Nosakām pieejamos gadus filtrēšanai, ja uzņēmumam ir vairāki gadi
     months_by_year: dict[int, list[str]] = {}
     for m_col in all_months:
         _, yr = parse_period_month_year(m_col)
         if yr:
             months_by_year.setdefault(yr, []).append(m_col)
 
-    main_tab1, main_tab2 = st.tabs(["1. Finanšu diagnostika", "2. Scenāriju simulācija"])
+    fin_preset_opts = [f"Visi mēneši ({len(all_months)} mēn.)"]
+    for yr in sorted(months_by_year.keys()):
+        fin_preset_opts.append(f"{yr}. gads ({len(months_by_year[yr])} mēn.)")
+    if len(all_months) > 12:
+        fin_preset_opts.append("Pēdējie 12 mēneši")
+    if len(all_months) >= 6:
+        fin_preset_opts.append("Pirmie 6 mēneši")
+        fin_preset_opts.append("Pēdējie 6 mēneši")
+    fin_preset_opts.append("Manuāla izvēle")
 
-    with main_tab1:
-        # Perioda un mēnešu filtrs Finanšu pārskata tabulai
-        fin_preset_opts = [f"Visi mēneši ({len(all_months)} mēn.)"]
-        for yr in sorted(months_by_year.keys()):
-            fin_preset_opts.append(f"{yr}. gads ({len(months_by_year[yr])} mēn.)")
-        if len(all_months) > 12:
-            fin_preset_opts.append("Pēdējie 12 mēneši")
-        if len(all_months) >= 6:
-            fin_preset_opts.append("Pirmie 6 mēneši")
-            fin_preset_opts.append("Pēdējie 6 mēneši")
-        fin_preset_opts.append("Manuāla izvēle")
+    fp1, fp2 = st.columns([1.2, 2.8], vertical_alignment="bottom")
+    with fp1:
+        fin_preset = st.selectbox("Periods pārskatam", options=fin_preset_opts, key="fin_period_preset")
 
-        fp1, fp2 = st.columns([1.2, 2.8], vertical_alignment="bottom")
-        with fp1:
-            fin_preset = st.selectbox("Periods pārskatam", options=fin_preset_opts, key="fin_period_preset")
+    fin_default_months = all_months
+    for yr in sorted(months_by_year.keys()):
+        if fin_preset.startswith(f"{yr}. gads"):
+            fin_default_months = months_by_year[yr]
+            break
+    if fin_preset == "Pēdējie 12 mēneši":
+        fin_default_months = all_months[-12:]
+    elif fin_preset == "Pirmie 6 mēneši":
+        fin_default_months = all_months[:6]
+    elif fin_preset == "Pēdējie 6 mēneši":
+        fin_default_months = all_months[-6:]
 
-        fin_default_months = all_months
-        for yr in sorted(months_by_year.keys()):
-            if fin_preset.startswith(f"{yr}. gads"):
-                fin_default_months = months_by_year[yr]
-                break
-        if fin_preset == "Pēdējie 12 mēneši":
-            fin_default_months = all_months[-12:]
-        elif fin_preset == "Pirmie 6 mēneši":
-            fin_default_months = all_months[:6]
-        elif fin_preset == "Pēdējie 6 mēneši":
-            fin_default_months = all_months[-6:]
-
-        with fp2:
-            fin_selected_months = st.multiselect(
-                "Mēneši pārskata tabulā",
-                options=all_months,
-                default=fin_default_months,
-                key=f"fin_months_sel_{fin_preset}",
-            )
-
-        if not fin_selected_months:
-            st.warning("Izvēlieties vismaz vienu mēnesi finanšu pārskata tabulai.")
-            st.stop()
-
-        view_res = filter_result_by_months(res, fin_selected_months, all_months)
-
-        top_btn1, top_btn2, top_btn3, top_btn4 = st.columns([1.3, 1.3, 1.2, 0.9], vertical_alignment="center")
-        try:
-            xl_f, xl_v = io.BytesIO(), io.BytesIO()
-            build_excel(view_res, xl_f, formulas=True)
-            build_excel(view_res, xl_v, formulas=False)
-            top_btn1.download_button(
-                "Lejupielādēt Excel (formulām)",
-                xl_f.getvalue(),
-                "TOC_Finansu_Diagnostika.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-            top_btn2.download_button(
-                "Lejupielādēt Excel (vērtībām)",
-                xl_v.getvalue(),
-                "TOC_Finansu_Diagnostika_vertibas.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-        except Exception:
-            xl_buf = io.BytesIO()
-            with pd.ExcelWriter(xl_buf, engine="openpyxl") as writer:
-                view_res.amounts.to_excel(writer, sheet_name="TOC_Summas")
-                view_res.kpi.to_excel(writer, sheet_name="KPI")
-            top_btn1.download_button(
-                "Lejupielādēt Excel",
-                xl_buf.getvalue(),
-                "TOC_Saglabata_Atskaite.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-        with top_btn3:
-            use_kpi_colors = st.checkbox("Krāsu indikācija (Zaļš/Oranžs/Sarkans)", value=True)
-        with top_btn4:
-            if st.button("Rediģēt kontus", use_container_width=True):
-                S.view_mode = "edit_accounts"
-                st.rerun()
-
-        st.subheader("Finanšu pārskata tabula")
-        st.markdown(
-            render_unified_toc_tables_html(
-                view_res.amounts,
-                view_res.main,
-                view_res.kpi,
-                view_res.row_kinds,
-                fy_start_month=S.get("fy_start_month", 1),
-                show_cumulative=True,
-                kpi_conditional_format=use_kpi_colors,
-            ),
-            unsafe_allow_html=True,
+    with fp2:
+        fin_selected_months = st.multiselect(
+            "Mēneši pārskata tabulā",
+            options=all_months,
+            default=fin_default_months,
+            key=f"fin_months_sel_{fin_preset}",
         )
 
-        # Līniju grafiks zem Uzkrājošajiem rādītājiem ar S, TVC, T, OE un NP līknēm grupu krāsās
-        render_toc_lines_chart(view_res.amounts, fy_start_month=S.get("fy_start_month", 1))
-
-        if getattr(res, "reconciliation", None) is not None and not res.reconciliation.empty:
-            with st.expander("Kontrole: Salīdzinājums ar PZA"):
-                st.dataframe(res.reconciliation.style.format(fmt_num), use_container_width=True)
-
-        st.markdown("---")
-        st.subheader("Vadības kopsavilkums un secinājumi")
-        cum_df_md, _, _ = compute_cumulative_toc_df(view_res.amounts, fy_start_month=S.get("fy_start_month", 1))
-        tables_md = (
-            view_res.amounts.round(0).to_markdown()
-            + "\n\n"
-            + view_res.kpi.round(3).to_markdown()
-            + "\n\nUzkrājošie rādītāji:\n"
-            + cum_df_md.round(0).to_markdown()
-        )
-
-        knowledge_context = f"TOC-FIN zināšanu bāze:\n{knowledge_file}\n\n" if knowledge_file else ""
-        COMMENT_SYSTEM = (
-            "Tu esi TOC-FIN finanšu konsultants. Raksti latviešu valodā, strukturēti, asi un uz lēmumiem vērsti."
-            f"{knowledge_context}"
-        )
-
-        if "commentary" not in S or not S.commentary:
-            if st.button("Ģenerēt analīzi", type="primary"):
-                with st.spinner("Sagatavo analīzi..."):
-                    r = get_client().messages.create(
-                        model=MODEL,
-                        max_tokens=2500,
-                        system=COMMENT_SYSTEM,
-                        messages=[{"role": "user", "content": f"Tabulas:\n\n{tables_md}\n\nUzraksti analīzi."}],
-                    )
-                    S.commentary = "".join(b.text for b in r.content if getattr(b, "type", "") == "text")
-                    u_c = getattr(r, "usage", None)
-                    tok_c = (getattr(u_c, "input_tokens", 800) + getattr(u_c, "output_tokens", 800)) if u_c else 1600
-                    profile.log_api_usage(tok_c, tok_c * 0.000009)
-                    if S.get("current_report_id"):
-                        profile.update_report_commentary(S.current_report_id, S.commentary)
-                    st.rerun()
-        else:
-            st.markdown(S.commentary)
-
-    # ------------------------------------------------------------------ 2. SCENĀRIJU SIMULĀCIJA UN JAUNS PRODUKTS / PROJEKTS
-    with main_tab2:
-        st.subheader("Scenāriju simulācija")
-
-        s_children = [r for r in res.amounts.index if res.row_kinds.get(r) == "S_CHILD"]
-        tvc_children = [r for r in res.amounts.index if res.row_kinds.get(r) == "TVC_CHILD"]
-        oe_children = [r for r in res.amounts.index if res.row_kinds.get(r) == "OE_CHILD"]
-
-        sim_preset_opts = [f"Visi mēneši ({len(all_months)} mēn.)"]
-        for yr in sorted(months_by_year.keys()):
-            sim_preset_opts.append(f"{yr}. gads ({len(months_by_year[yr])} mēn.)")
-        if len(all_months) >= 6:
-            sim_preset_opts.append("Pirmie 6 mēneši")
-            sim_preset_opts.append("Pēdējie 6 mēneši")
-        sim_preset_opts.append("Manuāla izvēle")
-
-        # Vienā līmenī (vertical_alignment="bottom") Periods, Mēneši un poga "Notīrīt visas izmaiņas (uz 0)"
-        p_col1, p_col2, p_col3 = st.columns([1.2, 2.2, 1], vertical_alignment="bottom")
-        with p_col1:
-            preset = st.selectbox("Periods", options=sim_preset_opts, key="sim_preset_sel")
-
-        default_sel = all_months
-        for yr in sorted(months_by_year.keys()):
-            if preset.startswith(f"{yr}. gads"):
-                default_sel = months_by_year[yr]
-                break
-        if preset == "Pirmie 6 mēneši":
-            default_sel = all_months[:6]
-        elif preset == "Pēdējie 6 mēneši":
-            default_sel = all_months[-6:]
-
-        with p_col2:
-            selected_months = st.multiselect("Mēneši", options=all_months, default=default_sel, key=f"sim_m_{preset}")
-        with p_col3:
-            if st.button("Notīrīt visas izmaiņas (uz 0)", use_container_width=True):
-                for r_nm in s_children + tvc_children + oe_children:
-                    S[f"sim_pct_{r_nm}"] = 0.0
-                    S[f"sim_eur_{r_nm}"] = 0.0
-                S["np_enabled"] = False
-                S["np_s_eur"] = 0.0
-                S["np_mat_eur"] = 0.0
-                S["np_deliv_eur"] = 0.0
-                st.rerun()
-
-        if not selected_months:
-            st.warning("Izvēlieties vismaz vienu mēnesi.")
-            st.stop()
-
-        base_sub = res.amounts[selected_months].copy().astype(float)
-        base_sum = base_sub.sum(axis=1)
-
-        # Situācijas apraksts un Balss ieraksts precīzi vienā līmenī
-        with st.expander("Aprakstīt vai ierunāt situāciju (AI automātiski saliks simulācijas skaitļus)", expanded=False):
-            d_col1, d_col2 = st.columns([2.2, 1], vertical_alignment="top")
-            with d_col1:
-                sim_text_prompt = st.text_area(
-                    "Situācijas apraksts",
-                    placeholder="Piemēram: Paceļam pārdošanu par 10%, mārketings +15 000 EUR, un palaižam jaunu produktu ar 50 000 EUR ieņēmumiem un 20 000 EUR materiālu izmaksām...",
-                    height=85,
-                )
-            with d_col2:
-                if hasattr(st, "audio_input"):
-                    st.audio_input("Balss ieraksts (pārlūka mikrofons)")
-                else:
-                    st.text_input("Balss ieraksts (pārlūka mikrofons)", value="Izmantojiet diktofonu", disabled=True)
-
-            if st.button("Piemērot situāciju simulācijai", type="primary"):
-                if sim_text_prompt.strip():
-                    with st.spinner("Analizē situāciju..."):
-                        try:
-                            parsed = parse_simulation_dialog_with_claude(
-                                sim_text_prompt.strip(), s_children, tvc_children, oe_children
-                            )
-                            for k_p, v_p in parsed.get("pct_changes", {}).items():
-                                if k_p in s_children + tvc_children + oe_children:
-                                    S[f"sim_pct_{k_p}"] = float(v_p)
-                            for k_e, v_e in parsed.get("eur_changes", {}).items():
-                                if k_e in s_children + tvc_children + oe_children:
-                                    S[f"sim_eur_{k_e}"] = float(v_e)
-                            np_d = parsed.get("new_product", {})
-                            if np_d.get("enabled"):
-                                S["np_enabled"] = True
-                                S["np_name"] = str(np_d.get("name") or "Jauns produkts / projekts")
-                                S["np_s_eur"] = float(np_d.get("s_eur") or 0.0)
-                                S["np_mat_eur"] = float(np_d.get("tvc_mat_eur") or 0.0)
-                                S["np_deliv_eur"] = float(np_d.get("tvc_deliv_eur") or 0.0)
-                            if parsed.get("summary"):
-                                st.success(parsed["summary"])
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Neizdevās apstrādāt aprakstu: {e}")
-
-        st.markdown("---")
-        st.markdown("#### 1. Esošās darbības izmaiņas (% un/vai € kopā izvēlētajā periodā)")
-
-        pct_changes: dict[str, float] = {}
-        eur_changes: dict[str, float] = {}
-
-        sc1, sc2, sc3 = st.columns(3)
-        with sc1:
-            st.markdown('<div class="sim-col-header-s">S — Ieņēmumi (Sales)</div>', unsafe_allow_html=True)
-            for sc_name in s_children:
-                if f"sim_pct_{sc_name}" not in S:
-                    S[f"sim_pct_{sc_name}"] = 0.0
-                if f"sim_eur_{sc_name}" not in S:
-                    S[f"sim_eur_{sc_name}"] = 0.0
-                with st.container(border=True):
-                    st.markdown(f"**{sc_name}**  \n*Bāze: {fmt_num(base_sum.get(sc_name, 0))} €*")
-                    c_p, c_e = st.columns(2)
-                    pct_changes[sc_name] = c_p.number_input("Izmaiņa %", step=1.0, format="%.1f", key=f"sim_pct_{sc_name}")
-                    eur_changes[sc_name] = c_e.number_input("Izmaiņa +/- €", step=500.0, format="%.0f", key=f"sim_eur_{sc_name}")
-
-        with sc2:
-            st.markdown('<div class="sim-col-header-tvc">TVC — Mainīgās izmaksas</div>', unsafe_allow_html=True)
-            for tc_name in tvc_children:
-                if f"sim_pct_{tc_name}" not in S:
-                    S[f"sim_pct_{tc_name}"] = 0.0
-                if f"sim_eur_{tc_name}" not in S:
-                    S[f"sim_eur_{tc_name}"] = 0.0
-                with st.container(border=True):
-                    st.markdown(f"**{tc_name}**  \n*Bāze: {fmt_num(base_sum.get(tc_name, 0))} €*")
-                    c_p, c_e = st.columns(2)
-                    pct_changes[tc_name] = c_p.number_input("Izmaiņa %", step=1.0, format="%.1f", key=f"sim_pct_{tc_name}")
-                    eur_changes[tc_name] = c_e.number_input("Izmaiņa +/- €", step=500.0, format="%.0f", key=f"sim_eur_{tc_name}")
-
-        with sc3:
-            st.markdown('<div class="sim-col-header-oe">Uzturēšanas izmaksas (OE)</div>', unsafe_allow_html=True)
-            for oc_name in oe_children:
-                if f"sim_pct_{oc_name}" not in S:
-                    S[f"sim_pct_{oc_name}"] = 0.0
-                if f"sim_eur_{oc_name}" not in S:
-                    S[f"sim_eur_{oc_name}"] = 0.0
-                with st.container(border=True):
-                    st.markdown(f"**{oc_name}**  \n*Bāze: {fmt_num(base_sum.get(oc_name, 0))} €*")
-                    c_p, c_e = st.columns(2)
-                    pct_changes[oc_name] = c_p.number_input("Izmaiņa %", step=1.0, format="%.1f", key=f"sim_pct_{oc_name}")
-                    eur_changes[oc_name] = c_e.number_input("Izmaiņa +/- €", step=500.0, format="%.0f", key=f"sim_eur_{oc_name}")
-
-        # --- JAUNS PRODUKTS / PROJEKTS ---
-        st.markdown("---")
-        st.markdown("#### 2. Jauns produkts / projekts (tiek pieskaitīts kopējai simulācijai)")
-        if "np_enabled" not in S:
-            S["np_enabled"] = False
-        if "np_name" not in S:
-            S["np_name"] = "Jauns produkts / projekts"
-        if "np_s_eur" not in S:
-            S["np_s_eur"] = 0.0
-        if "np_mat_eur" not in S:
-            S["np_mat_eur"] = 0.0
-        if "np_deliv_eur" not in S:
-            S["np_deliv_eur"] = 0.0
-
-        np_enable = st.checkbox("Iekļaut jaunu produktu / projektu kopējā simulācijā", key="np_enabled")
-        np_s_val, np_mat_val, np_deliv_val = 0.0, 0.0, 0.0
-
-        if np_enable:
-            with st.container(border=True):
-                np_c1, np_c2, np_c3, np_c4 = st.columns([1.4, 1, 1, 1])
-                with np_c1:
-                    np_title = st.text_input("Produkta / projekta nosaukums", key="np_name")
-                    np_input_mode = st.radio(
-                        "TVC ievades veids",
-                        options=["Summas (€)", "% no produkta S"],
-                        horizontal=True,
-                        key="np_mode_radio",
-                    )
-                with np_c2:
-                    np_s_val = st.number_input("Produkta S (Ieņēmumi, €)", min_value=0.0, step=1000.0, format="%.0f", key="np_s_eur")
-                with np_c3:
-                    if np_input_mode == "Summas (€)":
-                        np_mat_val = st.number_input("Izejvielas un materiāli (€)", min_value=0.0, step=500.0, format="%.0f", key="np_mat_eur")
-                    else:
-                        mat_pct = st.number_input("Izejvielas un materiāli (% no S)", min_value=0.0, max_value=100.0, value=30.0, step=1.0)
-                        np_mat_val = np_s_val * (mat_pct / 100.0)
-                with np_c4:
-                    if np_input_mode == "Summas (€)":
-                        np_deliv_val = st.number_input("Preču piegādes izdevumi (€)", min_value=0.0, step=500.0, format="%.0f", key="np_deliv_eur")
-                    else:
-                        deliv_pct = st.number_input("Preču piegādes izdevumi (% no S)", min_value=0.0, max_value=100.0, value=5.0, step=1.0)
-                        np_deliv_val = np_s_val * (deliv_pct / 100.0)
-
-                np_tvc_tot = np_mat_val + np_deliv_val
-                np_t_tot = np_s_val - np_tvc_tot
-                np_t_pct = (np_t_tot / np_s_val * 100.0) if np_s_val > 0 else 0.0
-                st.info(
-                    f"**{np_title} struktūra:** S = **{fmt_num(np_s_val)} €** | "
-                    f"TVC kopā = **{fmt_num(np_tvc_tot)} €** (Materiāli: {fmt_num(np_mat_val)} €, Piegāde: {fmt_num(np_deliv_val)} €) | "
-                    f"Produkta Caurlaidība **T = {fmt_num(np_t_tot)} € ({np_t_pct:.0f}%)** *(Uzturēšanas izmaksas OE paliek kopējās uzņēmuma)*"
-                )
-
-        # --- SIMULĀCIJAS APRĒĶINS ---
-        sim_sum = base_sum.copy()
-
-        for rname in s_children + tvc_children + oe_children:
-            if rname in sim_sum.index:
-                pct_v = pct_changes.get(rname, 0.0)
-                eur_v = eur_changes.get(rname, 0.0)
-                sim_sum.loc[rname] = base_sum.loc[rname] * (1.0 + pct_v / 100.0) + eur_v
-
-        if np_enable and (np_s_val != 0 or np_mat_val != 0 or np_deliv_val != 0):
-            s_target = GROUPS["S_REV"][0] if GROUPS["S_REV"][0] in sim_sum.index else (s_children[0] if s_children else None)
-            if s_target:
-                sim_sum.loc[s_target] += np_s_val
-
-            mat_target = GROUPS["TVC_MATERIALS"][0]
-            deliv_target = GROUPS["TVC_DELIVERY"][0]
-            if mat_target in sim_sum.index:
-                sim_sum.loc[mat_target] += np_mat_val
-            elif tvc_children:
-                sim_sum.loc[tvc_children[0]] += np_mat_val
-
-            if deliv_target in sim_sum.index:
-                sim_sum.loc[deliv_target] += np_deliv_val
-            elif tvc_children:
-                sim_sum.loc[tvc_children[-1]] += np_deliv_val
-
-        if s_children:
-            sim_sum.loc["S"] = sim_sum.loc[s_children].sum()
-        if tvc_children:
-            sim_sum.loc["TVC"] = sim_sum.loc[tvc_children].sum()
-        sim_sum.loc["T"] = sim_sum.loc["S"] - sim_sum.loc["TVC"]
-        if oe_children:
-            sim_sum.loc["OE"] = sim_sum.loc[oe_children].sum()
-        sim_sum.loc["NP"] = sim_sum.loc["T"] - sim_sum.loc["OE"]
-
-        diff_sum = sim_sum - base_sum
-
-        summary_amounts = pd.DataFrame(
-            {
-                "Bāze KOPĀ": base_sum,
-                "Simulācija KOPĀ": sim_sum,
-                "Δ Izmaiņa (€)": diff_sum,
-            },
-            index=res.amounts.index,
-        )
-
-        sim_main = {}
-        for c in summary_amounts.columns:
-            sim_main[c] = summary_amounts[c]
-            if c == "Δ Izmaiņa (€)":
-                sim_main[f"%|{c}"] = np.where(base_sum != 0, diff_sum / np.abs(base_sum), np.nan)
-            else:
-                s_col = summary_amounts.loc["S", c]
-                sim_main[f"%|{c}"] = summary_amounts[c] / s_col if s_col else np.nan
-        sim_main_df = pd.DataFrame(sim_main, index=summary_amounts.index)
-
-        def sim_kpi_for(col_vals: pd.Series) -> dict[str, float]:
-            S_, T_, OE_ = col_vals["S"], col_vals["T"], col_vals["OE"]
-            aw = col_vals.get(GROUPS["OE_ADMIN_WAGES"][0], 0.0)
-            ww = col_vals.get(GROUPS["OE_WORKER_WAGES"][0], 0.0)
-            div = lambda a, b: a / b if b else np.nan
-            return {
-                "PR = T/OE": div(T_, OE_),
-                "T% = T/S": div(T_, S_),
-                "Eiro Sales / Eiro algas kopā": div(S_, aw + ww),
-                "Eiro Sales / Eiro administrācijas algas": div(S_, aw),
-                "Eiro Sales / Eiro strādnieku algas": div(S_, ww),
-            }
-
-        sim_kpi_df = pd.DataFrame(
-            {
-                "Bāze KOPĀ": sim_kpi_for(summary_amounts["Bāze KOPĀ"]),
-                "Simulācija KOPĀ": sim_kpi_for(summary_amounts["Simulācija KOPĀ"]),
-            }
-        )
-
-        st.markdown("---")
-        m1, m2, m3, m4 = st.columns(4)
-        ds_val, dt_val, doe_val, dnp_val = diff_sum["S"], diff_sum["T"], diff_sum["OE"], diff_sum["NP"]
-
-        m1.metric("Simulētais S", f"{fmt_num(sim_sum['S'])} €", delta=f"{ds_val:+,.0f} €".replace(",", " "))
-        m2.metric("Simulētais T", f"{fmt_num(sim_sum['T'])} €", delta=f"{dt_val:+,.0f} €".replace(",", " "))
-        m3.metric("Simulētās Uzturēšanas izmaksas", f"{fmt_num(sim_sum['OE'])} €", delta=f"{doe_val:+,.0f} €".replace(",", " "), delta_color="inverse")
-        m4.metric("Simulētā Neto Peļņa (NP)", f"{fmt_num(sim_sum['NP'])} €", delta=f"{dnp_val:+,.0f} €".replace(",", " "))
-
-        st.subheader(f"Simulētā tabula ({len(selected_months)} mēn.)")
-        st.markdown(
-            render_unified_toc_tables_html(
-                summary_amounts,
-                sim_main_df,
-                sim_kpi_df,
-                res.row_kinds,
-                title_kpi="Simulētie produktivitātes rādītāji",
-                grey_cols={"Bāze KOPĀ"},
-                fy_start_month=S.get("fy_start_month", 1),
-                show_cumulative=False,
-                kpi_conditional_format=True,
-            ),
-            unsafe_allow_html=True,
-        )
-
-        # --- SIMULĀCIJAS SAGLABĀŠANA ---
-        st.markdown("---")
-        sv_c1, sv_c2 = st.columns([2, 1], vertical_alignment="bottom")
-        with sv_c1:
-            sim_save_name = st.text_input(
-                "Simulācijas nosaukums saglabāšanai",
-                value=f"Simulācija ({datetime.now().strftime('%d.%m.%Y %H:%M')})",
-            )
-        with sv_c2:
-            if st.button("Saglabāt simulāciju", type="primary", use_container_width=True):
-                sim_payload_json = json.dumps(
-                    {
-                        "pct_changes": pct_changes,
-                        "eur_changes": eur_changes,
-                        "new_product": {
-                            "enabled": np_enable,
-                            "name": S.get("np_name", ""),
-                            "s_eur": np_s_val,
-                            "tvc_mat_eur": np_mat_val,
-                            "tvc_deliv_eur": np_deliv_val,
-                        },
-                    },
-                    ensure_ascii=False,
-                )
-                ok_s, _ = profile.save_report(
-                    report_name=sim_save_name.strip() or "Simulācija",
-                    file_name="SIM::SCENARIO",
-                    res_obj=res,
-                    commentary=sim_payload_json,
-                )
-                if ok_s:
-                    st.toast("Simulācija saglabāta (pieejama sānjoslā zem 'Saglabātās simulācijas').")
-                    st.rerun()
-                else:
-                    st.error(f"Neizdevās saglabāt simulāciju: {profile.last_error}")
-
-
-# ------------------------------------------------------------------ DARBA PLŪSMA
-uploaded = st.file_uploader("PZA fails (CSV vai Excel)", type=["csv", "xlsx", "xlsm", "xls"])
-
-if uploaded is None:
-    if "result" in S and S.get("loaded_report_meta"):
-        meta = S.loaded_report_meta
-        title_str = f"{meta.get('report_name')} ({meta.get('periods_label')})"
-        render_results_and_simulation(S.result, report_title=title_str)
-    else:
-        st.info("Augšupielādējiet PZA failu vai izvēlieties saglabātu atskaiti.")
-    st.stop()
-
-ok_quota, quota_msg = profile.check_quota()
-if not ok_quota and not S.get("is_admin", False):
-    st.error(quota_msg)
-    st.stop()
-
-data = uploaded.getvalue()
-fid = hashlib.md5(data).hexdigest()
-if S.get("fid") != fid:
-    S.fid = fid
-    S.grids = load_grids(uploaded.name, data)
-    S.pop("structure", None)
-    S.pop("analysis", None)
-    S.pop("cls_df", None)
-    S.pop("result", None)
-    S.pop("manual_leaf_overrides", None)
-
-grids: dict[str, pd.DataFrame] = S.grids
-
-if "structure" not in S:
-    with st.spinner("Nolasa struktūru..."):
-        try:
-            sheet = pick_sheet(get_client(), MODEL, grids)
-            S.structure = request_structure(get_client(), MODEL, sheet, grids[sheet])
-            profile.log_api_usage(1800, 0.012)
-        except Exception as e:
-            st.error(f"Kļūda: {e}")
-            st.stop()
-
-stc: Structure = S.structure
-try:
-    ex = extract_lines(grids[stc.sheet], stc)
-    base_analysis = analyze(ex, stc)
-    overrides: dict[str, bool] = S.get("manual_leaf_overrides", {})
-    if overrides:
-        base_leaf_ids = {lf.id for lf in base_analysis.leaves}
-        new_leaves = []
-        for idx_l, ln in enumerate(base_analysis.ex.lines):
-            ln_id = getattr(ln, "id", f"r{ln.row}")
-            if stc.result_row is not None and ln.row == stc.result_row:
-                continue
-            is_leaf = overrides.get(ln_id, ln_id in base_leaf_ids)
-            if is_leaf:
-                new_leaves.append(ln)
-        base_analysis.leaves = new_leaves
-    S.analysis = base_analysis
-except Exception as e:
-    st.error(f"Kļūda datu ielasīšanā: {e}")
-    st.stop()
-
-an = S.analysis
-display_labels = build_display_labels(an.leaves)
-
-with st.expander("PZA rindu korekcija"):
-    leaf_id_set = {lf.id for lf in an.leaves}
-    diag_rows = []
-    for idx_l, ln in enumerate(an.ex.lines):
-        ln_id = getattr(ln, "id", f"r{getattr(ln, 'row', idx_l)}")
-        ln_row = getattr(ln, "row", idx_l)
-        is_res = stc.result_row is not None and ln_row == stc.result_row
-        first_v, tot_v = _safe_line_stats(getattr(ln, "vals", None))
-        diag_rows.append(
-            {
-                "id": ln_id,
-                "Rinda": ln_row,
-                "Iekļaut kā kontu": (ln_id in leaf_id_set) and not is_res,
-                "Nosaukums": getattr(ln, "label", ""),
-                "Sadaļa": getattr(ln, "path", ""),
-                "1. periods": round(first_v, 2),
-                "Kopā": round(tot_v, 2),
-                "Statuss": "Rezultāta rinda" if is_res else ("Konts" if ln_id in leaf_id_set else "Izlaists"),
-            }
-        )
-    diag_df = pd.DataFrame(diag_rows)
-    edited_diag = st.data_editor(
-        diag_df,
-        hide_index=True,
-        use_container_width=True,
-        disabled=["id", "Rinda", "Nosaukums", "Sadaļa", "1. periods", "Kopā", "Statuss"],
-        key="pza_diag_editor",
-    )
-    if st.button("Saglabāt rindu izmaiņas"):
-        new_overrides = {}
-        for _, r_d in edited_diag.iterrows():
-            new_overrides[r_d["id"]] = bool(r_d["Iekļaut kā kontu"])
-        S.manual_leaf_overrides = new_overrides
-        S.pop("cls_df", None)
-        S.pop("result", None)
-        st.rerun()
-
-st.header("1. Kontu klasifikācija")
-
-col_ig1, col_ig2 = st.columns([3, 1], vertical_alignment="center")
-with col_ig1:
-    ignore_memory = st.checkbox("Ignorēt iepriekšējo profilu atmiņu un klasificēt kontus pilnīgi no jauna (AI)", value=False)
-with col_ig2:
-    if "cls_df" in S and st.button("Pārlasīt kontus no jauna", use_container_width=True):
-        S.pop("cls_df", None)
-        S.pop("result", None)
-        st.rerun()
-
-if "cls_df" not in S:
-    if st.button("Klasificēt kontus", type="primary"):
-        with st.spinner("Klasificē..."):
-            try:
-                known, unknown = ({}, an.leaves) if ignore_memory else profile.lookup(an.leaves)
-                items = classify_with_claude(get_client(), MODEL, unknown) if unknown else []
-                if unknown:
-                    profile.log_api_usage(1500, 0.01)
-                by_id = {i["id"]: i for i in items}
-                rows = []
-                for lf in an.leaves:
-                    disp_lbl = display_labels.get(lf.id, lf.label)
-                    if lf.id in known:
-                        m = known[lf.id]
-                        grp = normalize_group_key(m["group"])
-                        rows.append(
-                            dict(
-                                id=lf.id,
-                                Konts=lf.label,
-                                Displeja_konts=disp_lbl,
-                                Sadaļa=getattr(lf, "path", ""),
-                                Grupa=grp,
-                                Ieņēmums=bool(grp.startswith("S_")),
-                                Jautājums="",
-                            )
-                        )
-                    else:
-                        i = by_id.get(lf.id, {"group": "OE_OTHER", "is_income": False, "question": ""})
-                        grp = normalize_group_key(i.get("group", "OE_OTHER"))
-                        rows.append(
-                            dict(
-                                id=lf.id,
-                                Konts=lf.label,
-                                Displeja_konts=disp_lbl,
-                                Sadaļa=getattr(lf, "path", ""),
-                                Grupa=grp,
-                                Ieņēmums=bool(grp.startswith("S_")),
-                                Jautājums=str(i.get("question") or "").strip(),
-                            )
-                        )
-                S.cls_df = sort_cls_df(pd.DataFrame(rows))
-                S.editor_v = 0
-                S.known_count = len(known)
-                S.unknown_count = len(unknown)
-                st.rerun()
-            except Exception as e:
-                st.error(f"Kļūda klasifikācijā: {e}")
-    if "cls_df" not in S:
+    if not fin_selected_months:
+        st.warning("Izvēlieties vismaz vienu mēnesi finanšu pārskata tabulai.")
         st.stop()
 
-cls_df: pd.DataFrame = S.cls_df.copy()
-cls_df["Grupa"] = cls_df["Grupa"].map(normalize_group_key)
-if "Displeja_konts" not in cls_df.columns:
-    cls_df["Displeja_konts"] = cls_df["id"].map(lambda x: display_labels.get(x, ""))
+    view_res = filter_result_by_months(res, fin_selected_months, all_months)
 
-ambiguous_rows = cls_df[cls_df["Jautājums"].astype(str).str.strip() != ""]
-
-if len(ambiguous_rows) > 0 and not S.get("clarifications_done", False):
-    st.subheader("Pozīciju precizēšana")
-    clarifications: dict[str, tuple[str, bool]] = {}
-    for _, r in ambiguous_rows.iterrows():
-        row_id = r["id"]
-        disp_name = r["Displeja_konts"]
-        agent_grp = normalize_group_key(r["Grupa"])
-        agent_sub_label = SUBGROUP_LABELS.get(agent_grp, agent_grp)
-        ctx_opts, default_idx = get_contextual_radio_options(agent_grp, r["Konts"], r.get("Sadaļa", ""))
-
-        st.markdown(f"**{disp_name}** *(Ieteikums: `{agent_sub_label}`)*")
-        st.write(r["Jautājums"])
-
-        choice = st.radio(
-            f"Klasifikācija '{disp_name}'",
-            options=ctx_opts,
-            index=default_idx,
-            key=f"radio_{row_id}",
-            label_visibility="collapsed",
+    top_btn1, top_btn2, top_btn3 = st.columns([1.3, 1.3, 1.4], vertical_alignment="center")
+    try:
+        xl_f, xl_v = io.BytesIO(), io.BytesIO()
+        build_excel(view_res, xl_f, formulas=True)
+        build_excel(view_res, xl_v, formulas=False)
+        top_btn1.download_button(
+            "Lejupielādēt Excel (formulām)",
+            xl_f.getvalue(),
+            "TOC_Finansu_Diagnostika.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
         )
-        clarifications[row_id] = resolve_radio_choice(choice, agent_grp, r["Konts"])
-        st.markdown("---")
+        top_btn2.download_button(
+            "Lejupielādēt Excel (vērtībām)",
+            xl_v.getvalue(),
+            "TOC_Finansu_Diagnostika_vertibas.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    except Exception:
+        xl_buf = io.BytesIO()
+        with pd.ExcelWriter(xl_buf, engine="openpyxl") as writer:
+            view_res.amounts.to_excel(writer, sheet_name="TOC_Summas")
+            view_res.kpi.to_excel(writer, sheet_name="KPI")
+        top_btn1.download_button(
+            "Lejupielādēt Excel",
+            xl_buf.getvalue(),
+            "TOC_Saglabata_Atskaite.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    with top_btn3:
+        use_kpi_colors = st.checkbox("Krāsu indikācija (Zaļš/Oranžs/Sarkans)", value=True)
 
-    if st.button("Apstiprināt", type="primary"):
-        for row_id, (new_group, is_inc) in clarifications.items():
-            mask = cls_df["id"] == row_id
-            cls_df.loc[mask, "Grupa"] = new_group
-            cls_df.loc[mask, "Ieņēmums"] = is_inc
-            cls_df.loc[mask, "Jautājums"] = ""
-        S.cls_df = sort_cls_df(cls_df)
-        S.clarifications_done = True
-        S.editor_v = S.get("editor_v", 0) + 1
-        st.rerun()
-    st.stop()
+    st.markdown(
+        render_unified_toc_tables_html(
+            view_res.amounts,
+            view_res.main,
+            view_res.kpi,
+            view_res.row_kinds,
+            fy_start_month=S.get("fy_start_month", 1),
+            show_cumulative=True,
+            kpi_conditional_format=use_kpi_colors,
+        ),
+        unsafe_allow_html=True,
+    )
 
-show_accounts_block = not st.checkbox("Paslēpt kontu sadalījumu (rādīt tikai pārskata tabulu)", value=bool("result" in S))
+    render_toc_lines_chart(view_res.amounts, fy_start_month=S.get("fy_start_month", 1))
 
-if show_accounts_block:
+    if getattr(res, "reconciliation", None) is not None and not res.reconciliation.empty:
+        with st.expander("Kontrole: Salīdzinājums ar PZA"):
+            st.dataframe(res.reconciliation.style.format(fmt_num), use_container_width=True)
+
+    st.markdown("---")
+    rec_c1, rec_c2 = st.columns([3, 1], vertical_alignment="center")
+    with rec_c1:
+        st.subheader(f"Vadības kopsavilkums un ieteikumi ({len(fin_selected_months)} mēn. periodam)")
+    with rec_c2:
+        regen_btn = st.button("Pieprasīt / atjaunot ieteikumus par izvēlēto periodu", type="primary", use_container_width=True)
+
+    cum_df_md, _, _ = compute_cumulative_toc_df(view_res.amounts, fy_start_month=S.get("fy_start_month", 1))
+    tables_md = (
+        f"Izvēlētais periods: {', '.join(fin_selected_months)}\n\n"
+        + view_res.amounts.round(0).to_markdown()
+        + "\n\n"
+        + view_res.kpi.round(3).to_markdown()
+        + "\n\nUzkrājošie rādītāji:\n"
+        + cum_df_md.round(0).to_markdown()
+    )
+
+    knowledge_context = f"TOC-FIN zināšanu bāze:\n{knowledge_file}\n\n" if knowledge_file else ""
+    COMMENT_SYSTEM = (
+        "Tu esi TOC-FIN finanšu konsultants. Raksti latviešu valodā, strukturēti, asi un uz lēmumiem vērsti par lietotāja izvēlēto periodu."
+        f"{knowledge_context}"
+    )
+
+    if regen_btn:
+        with st.spinner("Sagatavo vadības ieteikumus izvēlētajam periodam..."):
+            r = get_client().messages.create(
+                model=MODEL,
+                max_tokens=2500,
+                system=COMMENT_SYSTEM,
+                messages=[{"role": "user", "content": f"Tabulas:\n\n{tables_md}\n\nUzraksti analīzi un konkrētus ieteikumus šim periodam."}],
+            )
+            S.commentary = "".join(b.text for b in r.content if getattr(b, "type", "") == "text")
+            u_c = getattr(r, "usage", None)
+            tok_c = (getattr(u_c, "input_tokens", 800) + getattr(u_c, "output_tokens", 800)) if u_c else 1600
+            profile.log_api_usage(tok_c, tok_c * 0.000009)
+            if S.get("current_report_id") and len(fin_selected_months) == len(all_months):
+                profile.update_report_commentary(S.current_report_id, S.commentary)
+            st.rerun()
+
+    if S.get("commentary"):
+        st.markdown(S.commentary)
+    else:
+        st.caption("Nospiediet pogu **Pieprasīt / atjaunot ieteikumus par izvēlēto periodu**, lai saņemtu AI diagnostiku.")
+
+
+# ==============================================================================
+# POSMS 2: 🎯 SCENĀRIJU SIMULĀCIJA
+# ==============================================================================
+elif S.nav_page == "simulation":
+    st.header("Scenāriju simulācija un Jauns projekts")
+    if "result" not in S or S.result is None:
+        st.info("Vispirms ielādējiet vai izveidojiet finanšu atskaiti, lai veiktu simulāciju.")
+        st.stop()
+
+    res = strip_excluded_rows(S.result)
+    all_months = [c for c in res.amounts.columns if not ("YTD" in c or "AVG" in c)]
+    if not all_months:
+        all_months = list(res.amounts.columns)
+
+    months_by_year: dict[int, list[str]] = {}
+    for m_col in all_months:
+        _, yr = parse_period_month_year(m_col)
+        if yr:
+            months_by_year.setdefault(yr, []).append(m_col)
+
+    s_children = [r for r in res.amounts.index if res.row_kinds.get(r) == "S_CHILD"]
+    tvc_children = [r for r in res.amounts.index if res.row_kinds.get(r) == "TVC_CHILD"]
+    oe_children = [r for r in res.amounts.index if res.row_kinds.get(r) == "OE_CHILD"]
+
+    sim_preset_opts = [f"Visi mēneši ({len(all_months)} mēn.)"]
+    for yr in sorted(months_by_year.keys()):
+        sim_preset_opts.append(f"{yr}. gads ({len(months_by_year[yr])} mēn.)")
+    if len(all_months) >= 6:
+        sim_preset_opts.append("Pirmie 6 mēneši")
+        sim_preset_opts.append("Pēdējie 6 mēneši")
+    sim_preset_opts.append("Manuāla izvēle")
+
+    p_col1, p_col2, p_col3 = st.columns([1.2, 2.2, 1], vertical_alignment="bottom")
+    with p_col1:
+        preset = st.selectbox("Periods", options=sim_preset_opts, key="sim_preset_sel")
+
+    default_sel = all_months
+    for yr in sorted(months_by_year.keys()):
+        if preset.startswith(f"{yr}. gads"):
+            default_sel = months_by_year[yr]
+            break
+    if preset == "Pirmie 6 mēneši":
+        default_sel = all_months[:6]
+    elif preset == "Pēdējie 6 mēneši":
+        default_sel = all_months[-6:]
+
+    with p_col2:
+        selected_months = st.multiselect("Mēneši", options=all_months, default=default_sel, key=f"sim_m_{preset}")
+    with p_col3:
+        if st.button("Notīrīt visas izmaiņas (uz 0)", use_container_width=True):
+            for r_nm in s_children + tvc_children + oe_children:
+                S[f"sim_pct_{r_nm}"] = 0.0
+                S[f"sim_eur_{r_nm}"] = 0.0
+            S["np_enabled"] = False
+            S["np_s_eur"] = 0.0
+            S["np_mat_eur"] = 0.0
+            S["np_deliv_eur"] = 0.0
+            st.rerun()
+
+    if not selected_months:
+        st.warning("Izvēlieties vismaz vienu mēnesi.")
+        st.stop()
+
+    base_sub = res.amounts[selected_months].copy().astype(float)
+    base_sum = base_sub.sum(axis=1)
+
+    with st.expander("Aprakstīt vai ierunāt situāciju (AI automātiski saliks simulācijas skaitļus)", expanded=False):
+        d_col1, d_col2 = st.columns([2.2, 1], vertical_alignment="top")
+        with d_col1:
+            sim_text_prompt = st.text_area(
+                "Situācijas apraksts",
+                placeholder="Piemēram: Paceļam pārdošanu par 10%, mārketings +15 000 EUR, un palaižam jaunu produktu ar 50 000 EUR ieņēmumiem un 20 000 EUR materiālu izmaksām...",
+                height=85,
+            )
+        with d_col2:
+            if hasattr(st, "audio_input"):
+                st.audio_input("Balss ieraksts (pārlūka mikrofons)")
+            else:
+                st.text_input("Balss ieraksts (pārlūka mikrofons)", value="Izmantojiet diktofonu", disabled=True)
+
+        if st.button("Piemērot situāciju simulācijai", type="primary"):
+            if sim_text_prompt.strip():
+                with st.spinner("Analizē situāciju..."):
+                    try:
+                        parsed = parse_simulation_dialog_with_claude(
+                            sim_text_prompt.strip(), s_children, tvc_children, oe_children
+                        )
+                        for k_p, v_p in parsed.get("pct_changes", {}).items():
+                            if k_p in s_children + tvc_children + oe_children:
+                                S[f"sim_pct_{k_p}"] = float(v_p)
+                        for k_e, v_e in parsed.get("eur_changes", {}).items():
+                            if k_e in s_children + tvc_children + oe_children:
+                                S[f"sim_eur_{k_e}"] = float(v_e)
+                        np_d = parsed.get("new_product", {})
+                        if np_d.get("enabled"):
+                            S["np_enabled"] = True
+                            S["np_name"] = str(np_d.get("name") or "Jauns produkts / projekts")
+                            S["np_s_eur"] = float(np_d.get("s_eur") or 0.0)
+                            S["np_mat_eur"] = float(np_d.get("tvc_mat_eur") or 0.0)
+                            S["np_deliv_eur"] = float(np_d.get("tvc_deliv_eur") or 0.0)
+                        if parsed.get("summary"):
+                            st.success(parsed["summary"])
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Neizdevās apstrādāt aprakstu: {e}")
+
+    st.markdown("---")
+    st.markdown("#### 1. Esošās darbības izmaiņas (% un/vai € kopā izvēlētajā periodā)")
+
+    pct_changes: dict[str, float] = {}
+    eur_changes: dict[str, float] = {}
+
+    sc1, sc2, sc3 = st.columns(3)
+    with sc1:
+        st.markdown('<div class="sim-col-header-s">S — Ieņēmumi (Sales)</div>', unsafe_allow_html=True)
+        for sc_name in s_children:
+            if f"sim_pct_{sc_name}" not in S:
+                S[f"sim_pct_{sc_name}"] = 0.0
+            if f"sim_eur_{sc_name}" not in S:
+                S[f"sim_eur_{sc_name}"] = 0.0
+            with st.container(border=True):
+                st.markdown(f"**{sc_name}**  \n*Bāze: {fmt_num(base_sum.get(sc_name, 0))} €*")
+                c_p, c_e = st.columns(2)
+                pct_changes[sc_name] = c_p.number_input("Izmaiņa %", step=1.0, format="%.1f", key=f"sim_pct_{sc_name}")
+                eur_changes[sc_name] = c_e.number_input("Izmaiņa +/- €", step=500.0, format="%.0f", key=f"sim_eur_{sc_name}")
+
+    with sc2:
+        st.markdown('<div class="sim-col-header-tvc">TVC — Mainīgās izmaksas</div>', unsafe_allow_html=True)
+        for tc_name in tvc_children:
+            if f"sim_pct_{tc_name}" not in S:
+                S[f"sim_pct_{tc_name}"] = 0.0
+            if f"sim_eur_{tc_name}" not in S:
+                S[f"sim_eur_{tc_name}"] = 0.0
+            with st.container(border=True):
+                st.markdown(f"**{tc_name}**  \n*Bāze: {fmt_num(base_sum.get(tc_name, 0))} €*")
+                c_p, c_e = st.columns(2)
+                pct_changes[tc_name] = c_p.number_input("Izmaiņa %", step=1.0, format="%.1f", key=f"sim_pct_{tc_name}")
+                eur_changes[tc_name] = c_e.number_input("Izmaiņa +/- €", step=500.0, format="%.0f", key=f"sim_eur_{tc_name}")
+
+    with sc3:
+        st.markdown('<div class="sim-col-header-oe">Uzturēšanas izmaksas (OE)</div>', unsafe_allow_html=True)
+        for oc_name in oe_children:
+            if f"sim_pct_{oc_name}" not in S:
+                S[f"sim_pct_{oc_name}"] = 0.0
+            if f"sim_eur_{oc_name}" not in S:
+                S[f"sim_eur_{oc_name}"] = 0.0
+            with st.container(border=True):
+                st.markdown(f"**{oc_name}**  \n*Bāze: {fmt_num(base_sum.get(oc_name, 0))} €*")
+                c_p, c_e = st.columns(2)
+                pct_changes[oc_name] = c_p.number_input("Izmaiņa %", step=1.0, format="%.1f", key=f"sim_pct_{oc_name}")
+                eur_changes[oc_name] = c_e.number_input("Izmaiņa +/- €", step=500.0, format="%.0f", key=f"sim_eur_{oc_name}")
+
+    st.markdown("---")
+    st.markdown("#### 2. Jauns produkts / projekts (tiek pieskaitīts kopējai simulācijai)")
+    if "np_enabled" not in S:
+        S["np_enabled"] = False
+    if "np_name" not in S:
+        S["np_name"] = "Jauns produkts / projekts"
+    if "np_s_eur" not in S:
+        S["np_s_eur"] = 0.0
+    if "np_mat_eur" not in S:
+        S["np_mat_eur"] = 0.0
+    if "np_deliv_eur" not in S:
+        S["np_deliv_eur"] = 0.0
+
+    np_enable = st.checkbox("Iekļaut jaunu produktu / projektu kopējā simulācijā", key="np_enabled")
+    np_s_val, np_mat_val, np_deliv_val = 0.0, 0.0, 0.0
+
+    if np_enable:
+        with st.container(border=True):
+            np_c1, np_c2, np_c3, np_c4 = st.columns([1.4, 1, 1, 1])
+            with np_c1:
+                np_title = st.text_input("Produkta / projekta nosaukums", key="np_name")
+                np_input_mode = st.radio(
+                    "TVC ievades veids",
+                    options=["Summas (€)", "% no produkta S"],
+                    horizontal=True,
+                    key="np_mode_radio",
+                )
+            with np_c2:
+                np_s_val = st.number_input("Produkta S (Ieņēmumi, €)", min_value=0.0, step=1000.0, format="%.0f", key="np_s_eur")
+            with np_c3:
+                if np_input_mode == "Summas (€)":
+                    np_mat_val = st.number_input("Izejvielas un materiāli (€)", min_value=0.0, step=500.0, format="%.0f", key="np_mat_eur")
+                else:
+                    mat_pct = st.number_input("Izejvielas un materiāli (% no S)", min_value=0.0, max_value=100.0, value=30.0, step=1.0)
+                    np_mat_val = np_s_val * (mat_pct / 100.0)
+            with np_c4:
+                if np_input_mode == "Summas (€)":
+                    np_deliv_val = st.number_input("Preču piegādes izdevumi (€)", min_value=0.0, step=500.0, format="%.0f", key="np_deliv_eur")
+                else:
+                    deliv_pct = st.number_input("Preču piegādes izdevumi (% no S)", min_value=0.0, max_value=100.0, value=5.0, step=1.0)
+                    np_deliv_val = np_s_val * (deliv_pct / 100.0)
+
+            np_tvc_tot = np_mat_val + np_deliv_val
+            np_t_tot = np_s_val - np_tvc_tot
+            np_t_pct = (np_t_tot / np_s_val * 100.0) if np_s_val > 0 else 0.0
+            st.info(
+                f"**{np_title} struktūra:** S = **{fmt_num(np_s_val)} €** | "
+                f"TVC kopā = **{fmt_num(np_tvc_tot)} €** (Materiāli: {fmt_num(np_mat_val)} €, Piegāde: {fmt_num(np_deliv_val)} €) | "
+                f"Produkta Caurlaidība **T = {fmt_num(np_t_tot)} € ({np_t_pct:.0f}%)** *(Uzturēšanas izmaksas OE paliek kopējās uzņēmuma)*"
+            )
+
+    sim_sum = base_sum.copy()
+
+    for rname in s_children + tvc_children + oe_children:
+        if rname in sim_sum.index:
+            pct_v = pct_changes.get(rname, 0.0)
+            eur_v = eur_changes.get(rname, 0.0)
+            sim_sum.loc[rname] = base_sum.loc[rname] * (1.0 + pct_v / 100.0) + eur_v
+
+    if np_enable and (np_s_val != 0 or np_mat_val != 0 or np_deliv_val != 0):
+        s_target = GROUPS["S_REV"][0] if GROUPS["S_REV"][0] in sim_sum.index else (s_children[0] if s_children else None)
+        if s_target:
+            sim_sum.loc[s_target] += np_s_val
+
+        mat_target = GROUPS["TVC_MATERIALS"][0]
+        deliv_target = GROUPS["TVC_DELIVERY"][0]
+        if mat_target in sim_sum.index:
+            sim_sum.loc[mat_target] += np_mat_val
+        elif tvc_children:
+            sim_sum.loc[tvc_children[0]] += np_mat_val
+
+        if deliv_target in sim_sum.index:
+            sim_sum.loc[deliv_target] += np_deliv_val
+        elif tvc_children:
+            sim_sum.loc[tvc_children[-1]] += np_deliv_val
+
+    if s_children:
+        sim_sum.loc["S"] = sim_sum.loc[s_children].sum()
+    if tvc_children:
+        sim_sum.loc["TVC"] = sim_sum.loc[tvc_children].sum()
+    sim_sum.loc["T"] = sim_sum.loc["S"] - sim_sum.loc["TVC"]
+    if oe_children:
+        sim_sum.loc["OE"] = sim_sum.loc[oe_children].sum()
+    sim_sum.loc["NP"] = sim_sum.loc["T"] - sim_sum.loc["OE"]
+
+    diff_sum = sim_sum - base_sum
+
+    summary_amounts = pd.DataFrame(
+        {
+            "Bāze KOPĀ": base_sum,
+            "Simulācija KOPĀ": sim_sum,
+            "Δ Izmaiņa (€)": diff_sum,
+        },
+        index=res.amounts.index,
+    )
+
+    sim_main = {}
+    for c in summary_amounts.columns:
+        sim_main[c] = summary_amounts[c]
+        if c == "Δ Izmaiņa (€)":
+            sim_main[f"%|{c}"] = np.where(base_sum != 0, diff_sum / np.abs(base_sum), np.nan)
+        else:
+            s_col = summary_amounts.loc["S", c]
+            sim_main[f"%|{c}"] = summary_amounts[c] / s_col if s_col else np.nan
+    sim_main_df = pd.DataFrame(sim_main, index=summary_amounts.index)
+
+    def sim_kpi_for(col_vals: pd.Series) -> dict[str, float]:
+        S_, T_, OE_ = col_vals["S"], col_vals["T"], col_vals["OE"]
+        aw = col_vals.get(GROUPS["OE_ADMIN_WAGES"][0], 0.0)
+        ww = col_vals.get(GROUPS["OE_WORKER_WAGES"][0], 0.0)
+        div = lambda a, b: a / b if b else np.nan
+        return {
+            "PR = T/OE": div(T_, OE_),
+            "T% = T/S": div(T_, S_),
+            "Eiro Sales / Eiro algas kopā": div(S_, aw + ww),
+            "Eiro Sales / Eiro administrācijas algas": div(S_, aw),
+            "Eiro Sales / Eiro strādnieku algas": div(S_, ww),
+        }
+
+    sim_kpi_df = pd.DataFrame(
+        {
+            "Bāze KOPĀ": sim_kpi_for(summary_amounts["Bāze KOPĀ"]),
+            "Simulācija KOPĀ": sim_kpi_for(summary_amounts["Simulācija KOPĀ"]),
+        }
+    )
+
+    st.markdown("---")
+    m1, m2, m3, m4 = st.columns(4)
+    ds_val, dt_val, doe_val, dnp_val = diff_sum["S"], diff_sum["T"], diff_sum["OE"], diff_sum["NP"]
+
+    m1.metric("Simulētais S", f"{fmt_num(sim_sum['S'])} €", delta=f"{ds_val:+,.0f} €".replace(",", " "))
+    m2.metric("Simulētais T", f"{fmt_num(sim_sum['T'])} €", delta=f"{dt_val:+,.0f} €".replace(",", " "))
+    m3.metric("Simulētās Uzturēšanas izmaksas", f"{fmt_num(sim_sum['OE'])} €", delta=f"{doe_val:+,.0f} €".replace(",", " "), delta_color="inverse")
+    m4.metric("Simulētā Neto Peļņa (NP)", f"{fmt_num(sim_sum['NP'])} €", delta=f"{dnp_val:+,.0f} €".replace(",", " "))
+
+    st.subheader(f"Simulētā tabula ({len(selected_months)} mēn.)")
+    st.markdown(
+        render_unified_toc_tables_html(
+            summary_amounts,
+            sim_main_df,
+            sim_kpi_df,
+            res.row_kinds,
+            title_kpi="Simulētie produktivitātes rādītāji",
+            grey_cols={"Bāze KOPĀ"},
+            fy_start_month=S.get("fy_start_month", 1),
+            show_cumulative=False,
+            kpi_conditional_format=True,
+        ),
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("---")
+    sv_c1, sv_c2 = st.columns([2, 1], vertical_alignment="bottom")
+    with sv_c1:
+        sim_save_name = st.text_input(
+            "Simulācijas nosaukums saglabāšanai",
+            value=f"Simulācija ({datetime.now().strftime('%d.%m.%Y %H:%M')})",
+        )
+    with sv_c2:
+        if st.button("Saglabāt simulāciju arhīvā", type="primary", use_container_width=True):
+            sim_payload_json = json.dumps(
+                {
+                    "pct_changes": pct_changes,
+                    "eur_changes": eur_changes,
+                    "new_product": {
+                        "enabled": np_enable,
+                        "name": S.get("np_name", ""),
+                        "s_eur": np_s_val,
+                        "tvc_mat_eur": np_mat_val,
+                        "tvc_deliv_eur": np_deliv_val,
+                    },
+                },
+                ensure_ascii=False,
+            )
+            ok_s, _ = profile.save_report(
+                report_name=sim_save_name.strip() or "Simulācija",
+                file_name="SIM::SCENARIO",
+                res_obj=res,
+                commentary=sim_payload_json,
+            )
+            if ok_s:
+                st.toast("Simulācija saglabāta arhīvā!")
+                st.rerun()
+            else:
+                st.error(f"Neizdevās saglabāt simulāciju: {profile.last_error}")
+
+
+# ==============================================================================
+# POSMS 3: 🗂️ ATSKAITES UN SIMULĀCIJAS (ARHĪVS)
+# ==============================================================================
+elif S.nav_page == "archive":
+    st.header("Saglabātās atskaites un simulācijas")
+    st.caption("Šeit varat pārskatīt, atvērt vai dzēst iepriekš saglabātās finanšu atskaites un scenāriju simulācijas.")
+
+    arch_col1, arch_col2 = st.columns(2)
+
+    with arch_col1:
+        st.subheader(f"📊 Finanšu atskaites ({len(fin_reports)})")
+        if not fin_reports:
+            st.info("Nav saglabātu finanšu atskaišu.")
+        else:
+            for idx_r, rep in enumerate(fin_reports):
+                rid = rep["id"]
+                is_current = S.get("current_report_id") == rid
+                with st.container(border=True):
+                    rc1, rc2, rc3 = st.columns([2.2, 1, 0.8], vertical_alignment="center")
+                    with rc1:
+                        badge = " *(Aktīvā)*" if is_current else ""
+                        st.markdown(f"**{rep.get('report_name')}**{badge}")
+                        st.caption(
+                            f"Periods: {rep.get('periods_label') or '—'} | "
+                            f"Saglabāts: {str(rep.get('created_at', ''))[:16].replace('T', ' ')}"
+                        )
+                    with rc2:
+                        if st.button("Atvērt Pārskatā", key=f"arch_open_f_{rid}", type="primary", use_container_width=True):
+                            loaded = profile.load_report(rid)
+                            if loaded:
+                                loaded_res = LoadedReportResult(
+                                    amounts=loaded["amounts"],
+                                    main=loaded["main"],
+                                    kpi=loaded["kpi"],
+                                    row_kinds=loaded["row_kinds"],
+                                    reconciliation=loaded["reconciliation"],
+                                    by_group={},
+                                )
+                                S.result = strip_excluded_rows(loaded_res)
+                                S.loaded_report_meta = loaded
+                                S.current_report_id = loaded["id"]
+                                if loaded.get("commentary"):
+                                    S.commentary = loaded["commentary"]
+                                else:
+                                    S.pop("commentary", None)
+                                S.nav_page = "overview"
+                                st.rerun()
+                    with rc3:
+                        if st.button("Dzēst", key=f"arch_del_f_{rid}", use_container_width=True):
+                            S.confirm_delete_rep_id = rid
+
+                    if S.get("confirm_delete_rep_id") == rid:
+                        st.warning(f"Dzēst atskaiti **{rep.get('report_name')}**?")
+                        cd1, cd2 = st.columns(2)
+                        with cd1:
+                            if st.button("Jā, dzēst", key=f"yes_f_{rid}", type="primary", use_container_width=True):
+                                if profile.delete_report(rid):
+                                    S.pop("confirm_delete_rep_id", None)
+                                    if S.get("current_report_id") == rid:
+                                        S.pop("result", None)
+                                        S.pop("loaded_report_meta", None)
+                                        S.auto_loaded_latest = False
+                                    st.rerun()
+                        with cd2:
+                            if st.button("Atcelt", key=f"no_f_{rid}", use_container_width=True):
+                                S.pop("confirm_delete_rep_id", None)
+                                st.rerun()
+
+    with arch_col2:
+        st.subheader(f"🎯 Saglabātās simulācijas ({len(sim_reports)})")
+        if not sim_reports:
+            st.info("Nav saglabātu simulāciju.")
+        else:
+            for idx_s, srep in enumerate(sim_reports):
+                sid = srep["id"]
+                with st.container(border=True):
+                    sc1, sc2, sc3 = st.columns([2.2, 1, 0.8], vertical_alignment="center")
+                    with sc1:
+                        st.markdown(f"**{srep.get('report_name')}**")
+                        st.caption(
+                            f"Bāzes periods: {srep.get('periods_label') or '—'} | "
+                            f"Saglabāts: {str(srep.get('created_at', ''))[:16].replace('T', ' ')}"
+                        )
+                    with sc2:
+                        if st.button("Atvērt Simulācijā", key=f"arch_open_s_{sid}", type="primary", use_container_width=True):
+                            loaded_s = profile.load_report(sid)
+                            if loaded_s:
+                                loaded_sim_res = LoadedReportResult(
+                                    amounts=loaded_s["amounts"],
+                                    main=loaded_s["main"],
+                                    kpi=loaded_s["kpi"],
+                                    row_kinds=loaded_s["row_kinds"],
+                                    reconciliation=loaded_s["reconciliation"],
+                                    by_group={},
+                                )
+                                S.result = strip_excluded_rows(loaded_sim_res)
+                                S.loaded_report_meta = loaded_s
+                                try:
+                                    sim_state = json.loads(loaded_s.get("commentary") or "{}")
+                                    for k_s, v_s in sim_state.get("pct_changes", {}).items():
+                                        S[f"sim_pct_{k_s}"] = float(v_s)
+                                    for k_s, v_s in sim_state.get("eur_changes", {}).items():
+                                        S[f"sim_eur_{k_s}"] = float(v_s)
+                                    np_cfg = sim_state.get("new_product", {})
+                                    S["np_enabled"] = bool(np_cfg.get("enabled", False))
+                                    S["np_name"] = str(np_cfg.get("name", "Jauns produkts / projekts"))
+                                    S["np_s_eur"] = float(np_cfg.get("s_eur", 0.0))
+                                    S["np_mat_eur"] = float(np_cfg.get("tvc_mat_eur", 0.0))
+                                    S["np_deliv_eur"] = float(np_cfg.get("tvc_deliv_eur", 0.0))
+                                except Exception:
+                                    pass
+                                S.nav_page = "simulation"
+                                st.rerun()
+                    with sc3:
+                        if st.button("Dzēst", key=f"arch_del_s_{sid}", use_container_width=True):
+                            S.confirm_delete_sim_id = sid
+
+                    if S.get("confirm_delete_sim_id") == sid:
+                        st.warning(f"Dzēst simulāciju **{srep.get('report_name')}**?")
+                        cs1, cs2 = st.columns(2)
+                        with cs1:
+                            if st.button("Jā, dzēst", key=f"yes_s_{sid}", type="primary", use_container_width=True):
+                                if profile.delete_report(sid):
+                                    S.pop("confirm_delete_sim_id", None)
+                                    st.rerun()
+                        with cs2:
+                            if st.button("Atcelt", key=f"no_s_{sid}", use_container_width=True):
+                                S.pop("confirm_delete_sim_id", None)
+                                st.rerun()
+
+
+# ==============================================================================
+# POSMS 4: 📥 JAUNS PZA / KONTU KLASIFIKĀCIJA
+# ==============================================================================
+elif S.nav_page == "ingest":
+    st.header("Jauna PZA faila ielasīšana un kontu klasifikācija")
+    uploaded = st.file_uploader("Augšupielādējiet PZA failu (CSV vai Excel)", type=["csv", "xlsx", "xlsm", "xls"])
+
+    if uploaded is None:
+        st.info("Augšupielādējiet PZA failu, lai sāktu strukturēšanu un kontu klasifikāciju.")
+        st.stop()
+
+    ok_quota, quota_msg = profile.check_quota()
+    if not ok_quota and not S.get("is_admin", False):
+        st.error(quota_msg)
+        st.stop()
+
+    data = uploaded.getvalue()
+    fid = hashlib.md5(data).hexdigest()
+    if S.get("fid") != fid:
+        S.fid = fid
+        S.grids = load_grids(uploaded.name, data)
+        S.pop("structure", None)
+        S.pop("analysis", None)
+        S.pop("cls_df", None)
+        S.pop("manual_leaf_overrides", None)
+
+    grids: dict[str, pd.DataFrame] = S.grids
+
+    if "structure" not in S:
+        with st.spinner("Nolasa struktūru..."):
+            try:
+                sheet = pick_sheet(get_client(), MODEL, grids)
+                S.structure = request_structure(get_client(), MODEL, sheet, grids[sheet])
+                profile.log_api_usage(1800, 0.012)
+            except Exception as e:
+                st.error(f"Kļūda: {e}")
+                st.stop()
+
+    stc: Structure = S.structure
+    try:
+        ex = extract_lines(grids[stc.sheet], stc)
+        base_analysis = analyze(ex, stc)
+        overrides: dict[str, bool] = S.get("manual_leaf_overrides", {})
+        if overrides:
+            base_leaf_ids = {lf.id for lf in base_analysis.leaves}
+            new_leaves = []
+            for idx_l, ln in enumerate(base_analysis.ex.lines):
+                ln_id = getattr(ln, "id", f"r{ln.row}")
+                if stc.result_row is not None and ln.row == stc.result_row:
+                    continue
+                is_leaf = overrides.get(ln_id, ln_id in base_leaf_ids)
+                if is_leaf:
+                    new_leaves.append(ln)
+            base_analysis.leaves = new_leaves
+        S.analysis = base_analysis
+    except Exception as e:
+        st.error(f"Kļūda datu ielasīšanā: {e}")
+        st.stop()
+
+    an = S.analysis
+    display_labels = build_display_labels(an.leaves)
+
+    with st.expander("PZA rindu korekcija"):
+        leaf_id_set = {lf.id for lf in an.leaves}
+        diag_rows = []
+        for idx_l, ln in enumerate(an.ex.lines):
+            ln_id = getattr(ln, "id", f"r{getattr(ln, 'row', idx_l)}")
+            ln_row = getattr(ln, "row", idx_l)
+            is_res = stc.result_row is not None and ln_row == stc.result_row
+            first_v, tot_v = _safe_line_stats(getattr(ln, "vals", None))
+            diag_rows.append(
+                {
+                    "id": ln_id,
+                    "Rinda": ln_row,
+                    "Iekļaut kā kontu": (ln_id in leaf_id_set) and not is_res,
+                    "Nosaukums": getattr(ln, "label", ""),
+                    "Sadaļa": getattr(ln, "path", ""),
+                    "1. periods": round(first_v, 2),
+                    "Kopā": round(tot_v, 2),
+                    "Statuss": "Rezultāta rinda" if is_res else ("Konts" if ln_id in leaf_id_set else "Izlaists"),
+                }
+            )
+        diag_df = pd.DataFrame(diag_rows)
+        edited_diag = st.data_editor(
+            diag_df,
+            hide_index=True,
+            use_container_width=True,
+            disabled=["id", "Rinda", "Nosaukums", "Sadaļa", "1. periods", "Kopā", "Statuss"],
+            key="pza_diag_editor",
+        )
+        if st.button("Saglabāt rindu izmaiņas"):
+            new_overrides = {}
+            for _, r_d in edited_diag.iterrows():
+                new_overrides[r_d["id"]] = bool(r_d["Iekļaut kā kontu"])
+            S.manual_leaf_overrides = new_overrides
+            S.pop("cls_df", None)
+            st.rerun()
+
+    st.subheader("1. Kontu klasifikācija")
+
+    col_ig1, col_ig2 = st.columns([3, 1], vertical_alignment="center")
+    with col_ig1:
+        ignore_memory = st.checkbox("Ignorēt iepriekšējo profilu atmiņu un klasificēt kontus pilnīgi no jauna (AI)", value=False)
+    with col_ig2:
+        if "cls_df" in S and st.button("Pārlasīt kontus no jauna", use_container_width=True):
+            S.pop("cls_df", None)
+            st.rerun()
+
+    if "cls_df" not in S:
+        if st.button("Klasificēt kontus", type="primary"):
+            with st.spinner("Klasificē..."):
+                try:
+                    known, unknown = ({}, an.leaves) if ignore_memory else profile.lookup(an.leaves)
+                    items = classify_with_claude(get_client(), MODEL, unknown) if unknown else []
+                    if unknown:
+                        profile.log_api_usage(1500, 0.01)
+                    by_id = {i["id"]: i for i in items}
+                    rows = []
+                    for lf in an.leaves:
+                        disp_lbl = display_labels.get(lf.id, lf.label)
+                        if lf.id in known:
+                            m = known[lf.id]
+                            grp = normalize_group_key(m["group"])
+                            rows.append(
+                                dict(
+                                    id=lf.id,
+                                    Konts=lf.label,
+                                    Displeja_konts=disp_lbl,
+                                    Sadaļa=getattr(lf, "path", ""),
+                                    Grupa=grp,
+                                    Ieņēmums=bool(grp.startswith("S_")),
+                                    Jautājums="",
+                                )
+                            )
+                        else:
+                            i = by_id.get(lf.id, {"group": "OE_OTHER", "is_income": False, "question": ""})
+                            grp = normalize_group_key(i.get("group", "OE_OTHER"))
+                            rows.append(
+                                dict(
+                                    id=lf.id,
+                                    Konts=lf.label,
+                                    Displeja_konts=disp_lbl,
+                                    Sadaļa=getattr(lf, "path", ""),
+                                    Grupa=grp,
+                                    Ieņēmums=bool(grp.startswith("S_")),
+                                    Jautājums=str(i.get("question") or "").strip(),
+                                )
+                            )
+                    S.cls_df = sort_cls_df(pd.DataFrame(rows))
+                    S.editor_v = 0
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Kļūda klasifikācijā: {e}")
+        st.stop()
+
+    cls_df: pd.DataFrame = S.cls_df.copy()
+    cls_df["Grupa"] = cls_df["Grupa"].map(normalize_group_key)
+    if "Displeja_konts" not in cls_df.columns:
+        cls_df["Displeja_konts"] = cls_df["id"].map(lambda x: display_labels.get(x, ""))
+
+    ambiguous_rows = cls_df[cls_df["Jautājums"].astype(str).str.strip() != ""]
+
+    if len(ambiguous_rows) > 0 and not S.get("clarifications_done", False):
+        st.subheader("Pozīciju precizēšana")
+        clarifications: dict[str, tuple[str, bool]] = {}
+        for _, r in ambiguous_rows.iterrows():
+            row_id = r["id"]
+            disp_name = r["Displeja_konts"]
+            agent_grp = normalize_group_key(r["Grupa"])
+            agent_sub_label = SUBGROUP_LABELS.get(agent_grp, agent_grp)
+            ctx_opts, default_idx = get_contextual_radio_options(agent_grp, r["Konts"], r.get("Sadaļa", ""))
+
+            st.markdown(f"**{disp_name}** *(Ieteikums: `{agent_sub_label}`)*")
+            st.write(r["Jautājums"])
+
+            choice = st.radio(
+                f"Klasifikācija '{disp_name}'",
+                options=ctx_opts,
+                index=default_idx,
+                key=f"radio_{row_id}",
+                label_visibility="collapsed",
+            )
+            clarifications[row_id] = resolve_radio_choice(choice, agent_grp, r["Konts"])
+            st.markdown("---")
+
+        if st.button("Apstiprināt", type="primary"):
+            for row_id, (new_group, is_inc) in clarifications.items():
+                mask = cls_df["id"] == row_id
+                cls_df.loc[mask, "Grupa"] = new_group
+                cls_df.loc[mask, "Ieņēmums"] = is_inc
+                cls_df.loc[mask, "Jautājums"] = ""
+            S.cls_df = sort_cls_df(cls_df)
+            S.clarifications_done = True
+            S.editor_v = S.get("editor_v", 0) + 1
+            st.rerun()
+        st.stop()
+
     hdr_col1, hdr_col2 = st.columns([4, 1], vertical_alignment="bottom")
     with hdr_col1:
         st.subheader("Kontu sadalījums")
@@ -2293,51 +2162,236 @@ if show_accounts_block:
         S.editor_v = S.get("editor_v", 0) + 1
         st.rerun()
 
-st.header("2. Aprēķins un analīze")
+    st.subheader("2. Aprēķins un saglabāšana")
 
-default_rep_name = f"{Path(uploaded.name).stem} ({datetime.now().strftime('%d.%m.%Y')})"
-col_rn, col_btn = st.columns([2, 1], vertical_alignment="bottom")
-with col_rn:
-    report_custom_name = st.text_input("Atskaites nosaukums", value=default_rep_name, label_visibility="collapsed")
-with col_btn:
-    run_calc = st.button("Apstiprināt un aprēķināt", type="primary", use_container_width=True)
+    default_rep_name = f"{Path(uploaded.name).stem} ({datetime.now().strftime('%d.%m.%Y')})"
+    col_rn, col_btn = st.columns([2, 1], vertical_alignment="bottom")
+    with col_rn:
+        report_custom_name = st.text_input("Atskaites nosaukums", value=default_rep_name)
+    with col_btn:
+        run_calc = st.button("Apstiprināt, saglabāt un atvērt Pārskatā", type="primary", use_container_width=True)
 
-if run_calc:
-    cls_sorted = sort_cls_df(cls_df)
-    S.cls_df = cls_sorted
-    S.editor_v = S.get("editor_v", 0) + 1
+    if run_calc:
+        cls_sorted = sort_cls_df(cls_df)
+        S.cls_df = cls_sorted
+        S.editor_v = S.get("editor_v", 0) + 1
 
-    mapping = {
-        r["id"]: {
-            "group": normalize_group_key(r["Grupa"]),
-            "is_income": bool(str(r["Grupa"]).startswith("S_")),
+        mapping = {
+            r["id"]: {
+                "group": normalize_group_key(r["Grupa"]),
+                "is_income": bool(str(r["Grupa"]).startswith("S_")),
+            }
+            for _, r in cls_sorted.iterrows()
         }
-        for _, r in cls_sorted.iterrows()
-    }
-    pos = next((l.pos for l in an.ex.lines if l.row == stc.result_row), None)
-    reported = an.ex.lines[pos].vals if pos is not None else None
+        pos = next((l.pos for l in an.ex.lines if l.row == stc.result_row), None)
+        reported = an.ex.lines[pos].vals if pos is not None else None
 
-    res = compute_toc_with_dynamic_subgroups(an.leaves, mapping, an.ex.period_cols, reported)
-    S.result = res
-    S.pop("loaded_report_meta", None)
+        res = compute_toc_with_dynamic_subgroups(an.leaves, mapping, an.ex.period_cols, reported)
+        S.result = res
 
-    if profile.is_connected:
-        ok_map, _ = profile.save(an.leaves, mapping)
-        ok_rep, rep_id = profile.save_report(
-            report_name=report_custom_name.strip() or default_rep_name,
-            file_name=uploaded.name,
-            res_obj=res,
-            commentary="",
+        if profile.is_connected:
+            ok_map, _ = profile.save(an.leaves, mapping)
+            ok_rep, rep_id = profile.save_report(
+                report_name=report_custom_name.strip() or default_rep_name,
+                file_name=uploaded.name,
+                res_obj=res,
+                commentary="",
+            )
+            profile.log_api_usage(0, 0.0)
+            S.current_report_id = rep_id
+            S.loaded_report_meta = {
+                "id": rep_id,
+                "report_name": report_custom_name.strip() or default_rep_name,
+                "periods_label": f"{len(an.ex.period_cols)} periodi",
+            }
+            if ok_map and ok_rep:
+                st.toast("Atskaite saglabāta!")
+
+        S.pop("commentary", None)
+        S.nav_page = "overview"
+        st.rerun()
+
+
+# ==============================================================================
+# POSMS 5: ⚙️ PROFILS UN UZSTĀDĪJUMI
+# ==============================================================================
+elif S.nav_page == "settings":
+    st.header(f"Profils un Uzstādījumi ({S.active_profile})")
+
+    set_col1, set_col2 = st.columns([1.2, 1.8])
+    with set_col1:
+        with st.container(border=True):
+            st.subheader("Finanšu gada sākums")
+            st.caption("Nosaka, kurā datumā uzkrājošie rādītāji sāk jaunu finanšu gadu.")
+            fy_c1, fy_c2 = st.columns([1, 1.6])
+            with fy_c1:
+                selected_fy_day = st.selectbox(
+                    "Diena",
+                    options=list(range(1, 32)),
+                    index=int(S.get("fy_start_day", 1)) - 1,
+                )
+            with fy_c2:
+                selected_fy_month = st.selectbox(
+                    "Mēnesis",
+                    options=list(MONTH_NAMES_LV.keys()),
+                    format_func=lambda m: MONTH_NAMES_LV[m],
+                    index=list(MONTH_NAMES_LV.keys()).index(S.get("fy_start_month", 1)),
+                )
+            S.fy_start_day = selected_fy_day
+            S.fy_start_month = selected_fy_month
+
+        with st.container(border=True):
+            st.subheader("Profila informācija")
+            ok_q, q_info = profile.check_quota()
+            st.write(f"**Uzņēmums / Profils:** {S.active_profile}")
+            st.write(f"**Saglabātie konti atmiņā:** {saved_acc_count}")
+            st.write(f"**Saglabātās atskaites:** {len(fin_reports)}")
+            st.write(f"**Saglabātās simulācijas:** {len(sim_reports)}")
+            if q_info:
+                st.write(f"**Mēneša kvota:** {q_info}")
+
+    with set_col2:
+        with st.container(border=True):
+            st.subheader("Pievienot jaunu apakšgrupu")
+            st.caption("Izveidojiet papildu izmaksu vai ieņēmumu rindu (piem., Pārējās administrācijas izmaksas).")
+            ns1, ns2, ns3 = st.columns([2, 1.5, 1], vertical_alignment="bottom")
+            with ns1:
+                custom_sub_lbl = st.text_input("Jaunās apakšgrupas nosaukums", placeholder="piem., Pārējās administrācijas izmaksas", key="ed_new_sub_lbl")
+            with ns2:
+                custom_sub_main = st.selectbox("Lielā grupa", options=["Uzturēšanas izmaksas (OE)", "TVC (Mainīgās izmaksas)", "S (Ieņēmumi)"], key="ed_new_sub_main")
+            with ns3:
+                if st.button("Pievienot", use_container_width=True, key="ed_btn_add_sub"):
+                    if custom_sub_lbl.strip():
+                        m_c = "S" if custom_sub_main.startswith("S") else ("TVC" if custom_sub_main.startswith("TVC") else "OE")
+                        new_k = f"{m_c}_CUSTOM_{hashlib.md5(custom_sub_lbl.strip().encode()).hexdigest()[:6].upper()}"
+                        S.setdefault("custom_subgroups", {})[new_k] = (custom_sub_lbl.strip(), m_c)
+                        register_custom_subgroup(new_k, custom_sub_lbl.strip(), m_c)
+                        st.toast(f"Apakšgrupa '{custom_sub_lbl.strip()}' pievienota.")
+                        st.rerun()
+
+    st.markdown("---")
+    st.subheader("Saglabāto kontu klasifikācija")
+
+    if "cls_df" in S and S.cls_df is not None and "analysis" in S and S.analysis is not None:
+        cls_df_edit: pd.DataFrame = S.cls_df.copy()
+        cls_df_edit["Grupa"] = cls_df_edit["Grupa"].map(normalize_group_key)
+
+        ed_view_df = pd.DataFrame(
+            {
+                "Konts": cls_df_edit["Displeja_konts"].tolist(),
+                "Lielā grupa": [get_main_cat(g) for g in cls_df_edit["Grupa"]],
+                "Apakšgrupa (Rinda atskaitē)": [SUBGROUP_LABELS[normalize_group_key(g)] for g in cls_df_edit["Grupa"]],
+            }
         )
-        profile.log_api_usage(0, 0.0)
-        S.current_report_id = rep_id
-        if ok_map and ok_rep:
-            st.toast("Atskaite saglabāta.")
-        elif not ok_rep:
-            st.warning(f"Kļūda saglabājot tabulu: {profile.last_error}")
+        ed_h = min((len(ed_view_df) + 1) * 36 + 14, 750)
+        edited_ses = st.data_editor(
+            ed_view_df,
+            hide_index=True,
+            use_container_width=True,
+            height=ed_h,
+            disabled=["Konts"],
+            key=f"direct_ses_editor_{S.get('editor_v', 0)}",
+            column_config={
+                "Konts": st.column_config.TextColumn("Konta nosaukums", width="large"),
+                "Lielā grupa": st.column_config.SelectboxColumn("Lielā grupa", options=MAIN_GROUP_OPTIONS, required=True, width="medium"),
+                "Apakšgrupa (Rinda atskaitē)": st.column_config.SelectboxColumn("Apakšgrupa / Rinda atskaitē", options=list(SUBGROUP_LABELS.values()), required=True, width="large"),
+            },
+        )
 
-    S.pop("commentary", None)
-    st.rerun()
+        new_grps = []
+        ch_flag = False
+        for idx_p in range(len(cls_df_edit)):
+            o_g = normalize_group_key(cls_df_edit.iloc[idx_p]["Grupa"])
+            o_m = get_main_cat(o_g)
+            o_s = SUBGROUP_LABELS[o_g]
+            n_m = edited_ses.iloc[idx_p]["Lielā grupa"]
+            n_s = edited_ses.iloc[idx_p]["Apakšgrupa (Rinda atskaitē)"]
+            if n_s != o_s and n_s in LABEL_TO_KEY:
+                new_grps.append(LABEL_TO_KEY[n_s])
+                ch_flag = True
+            elif n_m != o_m:
+                new_grps.append(
+                    "S_REV" if n_m.startswith("S") else ("TVC_MATERIALS" if n_m.startswith("TVC") else ("EXCLUDED" if n_m.startswith("Izslēgt") else "OE_OTHER"))
+                )
+                ch_flag = True
+            else:
+                new_grps.append(o_g)
 
-if "result" in S:
-    render_results_and_simulation(S.result)
+        if ch_flag:
+            cls_df_edit["Grupa"] = new_grps
+            cls_df_edit["Ieņēmums"] = cls_df_edit["Grupa"].str.startswith("S_")
+            S.cls_df = cls_df_edit
+            S.editor_v = S.get("editor_v", 0) + 1
+            st.rerun()
+
+        if st.button("Saglabāt izmaiņas un pārrēķināt aktīvo pārskatu", type="primary"):
+            an = S.analysis
+            stc = S.structure
+            cls_sorted = sort_cls_df(S.cls_df)
+            S.cls_df = cls_sorted
+            mapping = {
+                r["id"]: {
+                    "group": normalize_group_key(r["Grupa"]),
+                    "is_income": bool(str(r["Grupa"]).startswith("S_")),
+                }
+                for _, r in cls_sorted.iterrows()
+            }
+            pos = next((l.pos for l in an.ex.lines if l.row == stc.result_row), None)
+            reported = an.ex.lines[pos].vals if pos is not None else None
+            S.result = compute_toc_with_dynamic_subgroups(an.leaves, mapping, an.ex.period_cols, reported)
+            profile.save(an.leaves, mapping)
+            st.toast("Konti atjaunināti un tabula pārrēķināta.")
+            S.nav_page = "overview"
+            st.rerun()
+    else:
+        saved_maps = profile.list_saved_mappings()
+        if not saved_maps:
+            st.info("Nav saglabātu kontu.")
+        else:
+            db_df = pd.DataFrame(saved_maps)
+            db_df["toc_group"] = db_df["toc_group"].map(normalize_group_key)
+            db_view = pd.DataFrame(
+                {
+                    "id": db_df["id"],
+                    "Sadaļa": db_df["path_label"],
+                    "Konts": db_df["account_label"],
+                    "Lielā grupa": [get_main_cat(g) for g in db_df["toc_group"]],
+                    "Apakšgrupa (Rinda atskaitē)": [SUBGROUP_LABELS[normalize_group_key(g)] for g in db_df["toc_group"]],
+                }
+            )
+            db_h = min((len(db_view) + 1) * 36 + 14, 750)
+            edited_db = st.data_editor(
+                db_view,
+                hide_index=True,
+                use_container_width=True,
+                height=db_h,
+                disabled=["id", "Sadaļa", "Konts"],
+                key="db_mappings_editor",
+                column_config={
+                    "id": None,
+                    "Sadaļa": st.column_config.TextColumn("Sadaļa", width="medium"),
+                    "Konts": st.column_config.TextColumn("Konta nosaukums", width="large"),
+                    "Lielā grupa": st.column_config.SelectboxColumn("Lielā grupa", options=MAIN_GROUP_OPTIONS, required=True, width="medium"),
+                    "Apakšgrupa (Rinda atskaitē)": st.column_config.SelectboxColumn("Apakšgrupa", options=list(SUBGROUP_LABELS.values()), required=True, width="large"),
+                },
+            )
+            if st.button("Saglabāt kontu izmaiņas datubāzē", type="primary"):
+                updates_to_save = []
+                for idx_r in range(len(db_df)):
+                    orig_g = normalize_group_key(db_df.iloc[idx_r]["toc_group"])
+                    orig_m = get_main_cat(orig_g)
+                    orig_s = SUBGROUP_LABELS[orig_g]
+                    new_m = edited_db.iloc[idx_r]["Lielā grupa"]
+                    new_s = edited_db.iloc[idx_r]["Apakšgrupa (Rinda atskaitē)"]
+                    if new_s != orig_s and new_s in LABEL_TO_KEY:
+                        final_g = LABEL_TO_KEY[new_s]
+                    elif new_m != orig_m:
+                        final_g = "S_REV" if new_m.startswith("S") else ("TVC_MATERIALS" if new_m.startswith("TVC") else ("EXCLUDED" if new_m.startswith("Izslēgt") else "OE_OTHER"))
+                    else:
+                        final_g = orig_g
+                    updates_to_save.append({"id": int(db_df.iloc[idx_r]["id"]), "toc_group": final_g})
+                if profile.update_saved_mappings_direct(updates_to_save):
+                    st.success("Klasifikācija saglabāta.")
+                    st.rerun()
+                else:
+                    st.error(f"Kļūda: {profile.last_error}")
