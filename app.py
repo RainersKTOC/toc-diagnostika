@@ -1,6 +1,6 @@
 """
-app.py — TOC-FIN Finanšu diagnostikas un vadības lēmumu sistēma (v22.0)
-Modulāra navigācija: Pārskats (Overview) | Simulācija | Arhīvs | Jauns PZA | Profils un Uzstādījumi
+app.py — TOC-FIN Finanšu diagnostikas un vadības lēmumu sistēma (v23.0)
+Augšējā navigācijas rīkjosla | Vienots kolonnu režģis | Trenda grafiki | Moderns SaaS dizains
 Project ID: amprqueamdcxpjufigvm
 """
 from __future__ import annotations
@@ -41,7 +41,11 @@ from toc_ingest import (
 
 MODEL = "claude-sonnet-4-6"
 
-st.set_page_config(page_title="TOC-FIN Vadības Sistēma", layout="wide")
+st.set_page_config(
+    page_title="TOC-FIN Vadības Sistēma",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
 EXTRA_OE_SUBGROUPS = {
     "OE_ADMIN_OTHER": ("Pārējās administrācijas izmaksas", "OE"),
@@ -299,7 +303,35 @@ def compute_cumulative_toc_df(amounts_df: pd.DataFrame, fy_start_month: int = 1)
     return cum_table_df, period_cols, fy_boundary_cols
 
 
-def render_toc_lines_chart(amounts_df: pd.DataFrame, fy_start_month: int = 1) -> None:
+def _add_linear_trend(df_long: pd.DataFrame, group_col: str, x_idx_col: str, y_col: str) -> pd.DataFrame:
+    """Aprēķina lineāro trendu (y = a*x + b) katrai sērijai."""
+    trend_rows = []
+    for g_name, grp in df_long.groupby(group_col):
+        valid = grp.dropna(subset=[y_col])
+        if len(valid) >= 2:
+            x = valid[x_idx_col].to_numpy(dtype=float)
+            y = valid[y_col].to_numpy(dtype=float)
+            slope, intercept = np.polyfit(x, y, 1)
+            for _, r in grp.iterrows():
+                trend_rows.append(
+                    {
+                        "Periods": r["Periods"],
+                        x_idx_col: r[x_idx_col],
+                        group_col: f"Linear ({g_name})",
+                        "Bāzes_rādītājs": g_name,
+                        y_col: float(slope * float(r[x_idx_col]) + intercept),
+                    }
+                )
+    return pd.DataFrame(trend_rows)
+
+
+def render_overview_charts(amounts_df: pd.DataFrame, kpi_df: pd.DataFrame, fy_start_month: int = 1) -> None:
+    """
+    Zīmē 3 pārskatāmus grafikus Overview sadaļā:
+    1) Galveno rādītāju dinamika (S, TVC, T, OE, NP) grupu krāsās
+    2) Produktivitāte (PR = T/OE un T% = T/S ar lineārajām trenda līnijām)
+    3) Eiro Sales / Eiro algas (Strādnieki un Admin ar lineārajām trenda līnijām)
+    """
     period_cols = [
         c for c in amounts_df.columns
         if not ("YTD" in str(c).upper() or "AVG" in str(c).upper() or "KOPĀ" in str(c).upper() or "IZMAIŅA" in str(c).upper())
@@ -307,73 +339,175 @@ def render_toc_lines_chart(amounts_df: pd.DataFrame, fy_start_month: int = 1) ->
     if not period_cols:
         return
 
-    st.markdown('<div class="toc-sec-heading">Galveno rādītāju dinamika (S, TVC, T, OE, NP)</div>', unsafe_allow_html=True)
-    chart_mode = st.radio(
-        "Grafika skats",
-        options=["Ikmēneša rādītāji", "Uzkrājošie rādītāji"],
-        horizontal=True,
-        label_visibility="collapsed",
-        key="toc_chart_mode_radio",
-    )
+    st.markdown('<div class="toc-sec-heading">Vizualizācija un tendenču grafiki</div>', unsafe_allow_html=True)
 
-    series_order = ["S", "TVC", "T", "Uzturēšanas izmaksas (OE)", "NP"]
-    color_scale = alt.Scale(
-        domain=series_order,
-        range=["#FFF200", "#C55A11", "#00B0F0", "#F4B183", "#70AD47"],
-    )
-
-    raw_rows = [r for r in ["S", "TVC", "T", "OE", "NP"] if r in amounts_df.index]
-    if chart_mode == "Ikmēneša rādītāji":
-        plot_df = amounts_df.loc[raw_rows, period_cols].copy().astype(float)
-    else:
-        plot_df = pd.DataFrame(index=raw_rows, columns=period_cols, dtype=float)
-        running = pd.Series(0.0, index=raw_rows)
-        for idx, col in enumerate(period_cols):
-            m_num, _ = parse_period_month_year(str(col))
-            if idx == 0 or (m_num is not None and m_num == fy_start_month):
-                running = amounts_df.loc[raw_rows, col].fillna(0.0).astype(float).copy()
-            else:
-                running = running + amounts_df.loc[raw_rows, col].fillna(0.0).astype(float)
-            plot_df[col] = running
-
-    rename_map = {"OE": "Uzturēšanas izmaksas (OE)"}
-    plot_df.index = [rename_map.get(r, r) for r in plot_df.index]
-
-    records = []
-    for r_name in plot_df.index:
-        for idx_p, p_col in enumerate(period_cols):
-            val = float(plot_df.loc[r_name, p_col])
-            records.append(
-                {
-                    "Periods": str(p_col),
-                    "Secība": idx_p,
-                    "Rādītājs": r_name,
-                    "Summa (€)": round(val, 0),
-                }
+    # --- 1. GRAFIKS: S, TVC, T, OE, NP ---
+    with st.container(border=True):
+        ch_top1, ch_top2 = st.columns([2.5, 1.5], vertical_alignment="center")
+        with ch_top1:
+            st.markdown("##### Finanšu rādītāju dinamika (S, TVC, T, Uzturēšanas izmaksas, NP)")
+        with ch_top2:
+            chart_mode = st.radio(
+                "Grafika skats",
+                options=["Ikmēneša rādītāji", "Uzkrājošie rādītāji"],
+                horizontal=True,
+                label_visibility="collapsed",
+                key="toc_chart_mode_radio",
             )
-    long_df = pd.DataFrame(records)
 
-    base = alt.Chart(long_df).encode(
-        x=alt.X("Periods:N", sort=period_cols, title="Periods", axis=alt.Axis(labelAngle=0)),
-        y=alt.Y("Summa (€):Q", title="Summa (€)", axis=alt.Axis(format=",.0f")),
-        color=alt.Color(
-            "Rādītājs:N",
-            scale=color_scale,
-            legend=alt.Legend(title="Rādītājs", orient="top"),
-        ),
-        tooltip=[
-            alt.Tooltip("Periods:N", title="Periods"),
-            alt.Tooltip("Rādītājs:N", title="Rādītājs"),
-            alt.Tooltip("Summa (€):Q", title="Summa (€)", format=",.0f"),
-        ],
-    )
+        series_order = ["S", "TVC", "T", "Uzturēšanas izmaksas (OE)", "NP"]
+        color_scale = alt.Scale(
+            domain=series_order,
+            range=["#E6B800", "#C55A11", "#0099CC", "#F4B183", "#70AD47"],
+        )
 
-    lines = base.mark_line(strokeWidth=3)
-    points = base.mark_circle(size=75)
-    zero_rule = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(strokeDash=[4, 4], color="#888888").encode(y="y:Q")
+        raw_rows = [r for r in ["S", "TVC", "T", "OE", "NP"] if r in amounts_df.index]
+        if chart_mode == "Ikmēneša rādītāji":
+            plot_df = amounts_df.loc[raw_rows, period_cols].copy().astype(float)
+        else:
+            plot_df = pd.DataFrame(index=raw_rows, columns=period_cols, dtype=float)
+            running = pd.Series(0.0, index=raw_rows)
+            for idx, col in enumerate(period_cols):
+                m_num, _ = parse_period_month_year(str(col))
+                if idx == 0 or (m_num is not None and m_num == fy_start_month):
+                    running = amounts_df.loc[raw_rows, col].fillna(0.0).astype(float).copy()
+                else:
+                    running = running + amounts_df.loc[raw_rows, col].fillna(0.0).astype(float)
+                plot_df[col] = running
 
-    chart = (zero_rule + lines + points).properties(height=380).interactive()
-    st.altair_chart(chart, use_container_width=True)
+        rename_map = {"OE": "Uzturēšanas izmaksas (OE)"}
+        plot_df.index = [rename_map.get(r, r) for r in plot_df.index]
+
+        records = []
+        for r_name in plot_df.index:
+            for idx_p, p_col in enumerate(period_cols):
+                val = float(plot_df.loc[r_name, p_col])
+                records.append(
+                    {
+                        "Periods": str(p_col),
+                        "Secība": idx_p,
+                        "Rādītājs": r_name,
+                        "Summa (€)": round(val, 0),
+                    }
+                )
+        long_df = pd.DataFrame(records)
+
+        base = alt.Chart(long_df).encode(
+            x=alt.X("Periods:N", sort=period_cols, title=None, axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("Summa (€):Q", title="Summa (€)", axis=alt.Axis(format=",.0f")),
+            color=alt.Color(
+                "Rādītājs:N",
+                scale=color_scale,
+                legend=alt.Legend(title=None, orient="bottom", columns=5),
+            ),
+            tooltip=[
+                alt.Tooltip("Periods:N", title="Periods"),
+                alt.Tooltip("Rādītājs:N", title="Rādītājs"),
+                alt.Tooltip("Summa (€):Q", title="Summa (€)", format=",.0f"),
+            ],
+        )
+        lines = base.mark_line(strokeWidth=2.8)
+        points = base.mark_circle(size=65)
+        zero_rule = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(strokeDash=[4, 4], color="#888888").encode(y="y:Q")
+        st.altair_chart((zero_rule + lines + points).properties(height=340).interactive(), use_container_width=True)
+
+    # --- 2. UN 3. GRAFIKS BLAKUS VAI ZEMĀK: PRODUKTIVITĀTE UN EIRO SALES / EIRO ALGAS ---
+    kpi_m_cols = [c for c in period_cols if c in kpi_df.columns]
+    if not kpi_m_cols:
+        return
+
+    g_col1, g_col2 = st.columns(2)
+
+    # 2. GRAFIKS: PRODUKTIVITĀTE (PR = T/OE un T% = T/S ar lineāro trendu)
+    with g_col1:
+        with st.container(border=True):
+            st.markdown("##### Produktivitāte (`PR = T/OE` un `T% = T/S`)")
+            prod_records = []
+            for idx_p, p_col in enumerate(kpi_m_cols):
+                pr_v = kpi_df.loc["PR = T/OE", p_col] if "PR = T/OE" in kpi_df.index else np.nan
+                tp_v = kpi_df.loc["T% = T/S", p_col] if "T% = T/S" in kpi_df.index else np.nan
+                if not pd.isna(pr_v):
+                    prod_records.append({"Periods": str(p_col), "Secība": idx_p, "Rādītājs": "PR= T/OE", "Vērtība": round(float(pr_v), 2)})
+                if not pd.isna(tp_v):
+                    prod_records.append({"Periods": str(p_col), "Secība": idx_p, "Rādītājs": "T%=T/S", "Vērtība": round(float(tp_v), 2)})
+
+            prod_df = pd.DataFrame(prod_records)
+            if not prod_df.empty:
+                trend_prod_df = _add_linear_trend(prod_df, "Rādītājs", "Secība", "Vērtība")
+                prod_color = alt.Scale(
+                    domain=["PR= T/OE", "T%=T/S"],
+                    range=["#3B68B5", "#F5B000"],
+                )
+                c_main = alt.Chart(prod_df).mark_line(strokeWidth=2.8).encode(
+                    x=alt.X("Periods:N", sort=kpi_m_cols, title=None, axis=alt.Axis(labelAngle=0)),
+                    y=alt.Y("Vērtība:Q", title="Koeficients", axis=alt.Axis(format=".2f")),
+                    color=alt.Color("Rādītājs:N", scale=prod_color, legend=alt.Legend(title=None, orient="bottom")),
+                    tooltip=["Periods:N", "Rādītājs:N", alt.Tooltip("Vērtība:Q", format=".2f")],
+                )
+                c_pts = alt.Chart(prod_df).mark_circle(size=55).encode(
+                    x=alt.X("Periods:N", sort=kpi_m_cols),
+                    y="Vērtība:Q",
+                    color=alt.Color("Rādītājs:N", scale=prod_color, legend=None),
+                )
+                layers = [c_main, c_pts]
+                if not trend_prod_df.empty:
+                    c_trend = alt.Chart(trend_prod_df).mark_line(strokeDash=[4, 4], strokeWidth=2).encode(
+                        x=alt.X("Periods:N", sort=kpi_m_cols),
+                        y="Vērtība:Q",
+                        color=alt.Color("Bāzes_rādītājs:N", scale=prod_color, legend=None),
+                        tooltip=["Periods:N", "Rādītājs:N", alt.Tooltip("Vērtība:Q", format=".2f")],
+                    )
+                    layers.append(c_trend)
+                ref_one = alt.Chart(pd.DataFrame({"y": [1.0]})).mark_rule(strokeDash=[2, 2], color="#999999").encode(y="y:Q")
+                layers.append(ref_one)
+                st.altair_chart(alt.layer(*layers).properties(height=320).interactive(), use_container_width=True)
+
+    # 3. GRAFIKS: EIRO SALES / EIRO ALGAS (Strādnieki un Admin ar lineāro trendu)
+    with g_col2:
+        with st.container(border=True):
+            st.markdown("##### Eiro Sales / Eiro algas")
+            wage_records = []
+            row_map_w = {
+                "Eiro Sales / Eiro strādnieku algas": "Eiro Sales/Eiro Algas strādnieki",
+                "Eiro Sales / Eiro administrācijas algas": "Eiro Sales/Eiro Algas Admin",
+            }
+            for orig_r, disp_r in row_map_w.items():
+                if orig_r in kpi_df.index:
+                    for idx_p, p_col in enumerate(kpi_m_cols):
+                        wv = kpi_df.loc[orig_r, p_col]
+                        if not pd.isna(wv):
+                            wage_records.append(
+                                {"Periods": str(p_col), "Secība": idx_p, "Rādītājs": disp_r, "Vērtība": round(float(wv), 2)}
+                            )
+
+            wage_df = pd.DataFrame(wage_records)
+            if not wage_df.empty:
+                trend_wage_df = _add_linear_trend(wage_df, "Rādītājs", "Secība", "Vērtība")
+                wage_color = alt.Scale(
+                    domain=["Eiro Sales/Eiro Algas strādnieki", "Eiro Sales/Eiro Algas Admin"],
+                    range=["#7FA6D8", "#1B3F75"],
+                )
+                w_main = alt.Chart(wage_df).mark_line(strokeWidth=2.8).encode(
+                    x=alt.X("Periods:N", sort=kpi_m_cols, title=None, axis=alt.Axis(labelAngle=0)),
+                    y=alt.Y("Vērtība:Q", title="Eiro Sales / 1 Eiro algas", axis=alt.Axis(format=".2f")),
+                    color=alt.Color("Rādītājs:N", scale=wage_color, legend=alt.Legend(title=None, orient="bottom")),
+                    tooltip=["Periods:N", "Rādītājs:N", alt.Tooltip("Vērtība:Q", format=".2f")],
+                )
+                w_pts = alt.Chart(wage_df).mark_circle(size=55).encode(
+                    x=alt.X("Periods:N", sort=kpi_m_cols),
+                    y="Vērtība:Q",
+                    color=alt.Color("Rādītājs:N", scale=wage_color, legend=None),
+                )
+                w_layers = [w_main, w_pts]
+                if not trend_wage_df.empty:
+                    w_trend = alt.Chart(trend_wage_df).mark_line(strokeDash=[4, 4], strokeWidth=2).encode(
+                        x=alt.X("Periods:N", sort=kpi_m_cols),
+                        y="Vērtība:Q",
+                        color=alt.Color("Bāzes_rādītājs:N", scale=wage_color, legend=None),
+                        tooltip=["Periods:N", "Rādītājs:N", alt.Tooltip("Vērtība:Q", format=".2f")],
+                    )
+                    w_layers.append(w_trend)
+                st.altair_chart(alt.layer(*w_layers).properties(height=320).interactive(), use_container_width=True)
 
 
 MAIN_GROUP_OPTIONS = [
@@ -617,6 +751,12 @@ def render_unified_toc_tables_html(
     show_cumulative: bool = True,
     kpi_conditional_format: bool = True,
 ) -> str:
+    """
+    Zīmē visas tabulas ar 100% IDENTISKU kolonnu režģi (<colgroup>), lai:
+    - Finanšu tabula, Produktivitātes tabula un Uzkrājošo rādītāju tabula ir milimetru pret milimetru vertikāli pretī.
+    - Simulācijā Bāze KOPĀ un Simulācija KOPĀ ir precīzi vienā līnijā zem augšējās tabulas.
+    - Iekšējās sadalošās līnijas ir tumši pelēkas (#595959), bet galveno grupu un mēnešu līnijas — biezākas melnas (#1C2833).
+    """
     valid_rows = [
         r for r in amounts_df.index
         if row_kinds.get(r) not in ("EXCL", "EXCLUDED") and not str(r).lower().startswith("izslēgt")
@@ -625,44 +765,113 @@ def render_unified_toc_tables_html(
     main_df = main_df.loc[valid_rows]
 
     periods = list(amounts_df.columns)
+    n_p = max(len(periods), 1)
     row_names = list(amounts_df.index)
     kinds = [row_kinds.get(rn, "OE_CHILD") for rn in row_names]
     grey_cols = grey_cols or set()
+
+    # Fiksējam pirmās (nosaukumu) kolonnas platumu un vienādu platumu katram mēnesim/periodam
+    lbl_w_pct = 22.0 if n_p >= 6 else 28.0
+    rem_pct = 100.0 - lbl_w_pct
+    val_w_pct = (rem_pct / n_p) * 0.68
+    pct_w_pct = (rem_pct / n_p) * 0.32
+
+    colgroup_html = [f'<colgroup><col style="width: {lbl_w_pct:.3f}%;">']
+    for _ in periods:
+        colgroup_html.append(f'<col style="width: {val_w_pct:.3f}%;"><col style="width: {pct_w_pct:.3f}%;">')
+    colgroup_html.append("</colgroup>")
+    colgroup_str = "".join(colgroup_html)
 
     display_row_name = lambda rn: "Uzturēšanas izmaksas (OE)" if rn == "OE" else rn
 
     html = ["""
     <style>
-    .toc-table-wrap { width: 100%; overflow-x: auto; margin-bottom: 14px; }
+    .toc-table-wrap { width: 100%; overflow-x: auto; margin-bottom: 16px; }
     .toc-sec-heading {
-        font-family: 'Calibri', 'Segoe UI', sans-serif;
-        font-size: 16px;
+        font-family: 'Inter', 'Segoe UI', 'Calibri', sans-serif;
+        font-size: 15px;
         font-weight: 700;
-        margin: 18px 0 8px 0;
-        padding: 5px 12px;
-        background-color: #2C3E50;
+        margin: 20px 0 8px 0;
+        padding: 6px 14px;
+        background-color: #1E293B;
         color: #FFFFFF !important;
-        border-radius: 5px;
+        border-radius: 6px;
         display: inline-block;
+        letter-spacing: 0.2px;
     }
-    table.toc-unified { width: 100%; border-collapse: collapse; font-family: 'Calibri', 'Segoe UI', sans-serif; font-size: 12px; table-layout: auto; }
-    table.toc-unified th { background-color: #EAECEE; color: #000000 !important; font-weight: 700; text-align: center; padding: 6px 5px; border-top: 2px solid #404040; border-bottom: 2px solid #404040; white-space: nowrap; }
-    table.toc-unified td { padding: 4px 6px; white-space: nowrap; color: #000000 !important; }
-    table.toc-unified td.lbl-main { text-align: left; font-weight: 700; padding-left: 8px; padding-right: 10px; border-left: 2px solid #404040; border-right: 2px solid #404040; min-width: 210px; color: #000000 !important; }
-    table.toc-unified td.lbl-sub { text-align: left; font-weight: 400; padding-left: 18px; padding-right: 10px; border-left: 2px solid #404040; border-right: 2px solid #404040; min-width: 210px; color: #000000 !important; }
-    table.toc-unified td.val-col { text-align: right; border-left: 1px solid #BFBFBF; font-variant-numeric: tabular-nums; color: #000000 !important; }
-    table.toc-unified td.pct-col { text-align: right; font-size: 11px; padding-left: 3px; padding-right: 5px; border-left: 1px dotted #D0D3D4; border-right: 2px solid #595959; color: #000000 !important; font-variant-numeric: tabular-nums; }
-    table.toc-unified th.th-val { border-left: 1px solid #BFBFBF; }
-    table.toc-unified th.th-pct { font-size: 11px; border-left: 1px dotted #BFBFBF; border-right: 2px solid #595959; }
-    table.toc-unified th.th-lbl { text-align: left; padding-left: 8px; border-left: 2px solid #404040; border-right: 2px solid #404040; }
+    table.toc-unified {
+        width: 100%;
+        min-width: 920px;
+        border-collapse: collapse;
+        font-family: 'Inter', 'Calibri', 'Segoe UI', sans-serif;
+        font-size: 12px;
+        table-layout: fixed;
+    }
+    table.toc-unified th {
+        background-color: #E2E8F0;
+        color: #0F172A !important;
+        font-weight: 700;
+        text-align: center;
+        padding: 6px 5px;
+        border-top: 2px solid #1C2833;
+        border-bottom: 2px solid #1C2833;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    table.toc-unified td {
+        padding: 4px 6px;
+        white-space: nowrap;
+        color: #000000 !important;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    table.toc-unified td.lbl-main {
+        text-align: left;
+        font-weight: 700;
+        padding-left: 8px;
+        padding-right: 8px;
+        border-left: 2px solid #1C2833;
+        border-right: 2px solid #1C2833;
+        color: #000000 !important;
+    }
+    table.toc-unified td.lbl-sub {
+        text-align: left;
+        font-weight: 400;
+        padding-left: 16px;
+        padding-right: 8px;
+        border-left: 2px solid #1C2833;
+        border-right: 2px solid #1C2833;
+        color: #000000 !important;
+    }
+    /* Iekšējās sadalošās līnijas: tumši pelēkas (#595959), lai neizskatās baltas */
+    table.toc-unified td.val-col {
+        text-align: right;
+        border-left: 1px solid #595959;
+        font-variant-numeric: tabular-nums;
+        color: #000000 !important;
+    }
+    table.toc-unified td.pct-col {
+        text-align: right;
+        font-size: 11px;
+        padding-left: 2px;
+        padding-right: 5px;
+        border-left: 1px solid #707B7C;
+        border-right: 2px solid #1C2833;
+        color: #000000 !important;
+        font-variant-numeric: tabular-nums;
+    }
+    table.toc-unified th.th-val { border-left: 1px solid #595959; }
+    table.toc-unified th.th-pct { font-size: 11px; border-left: 1px solid #707B7C; border-right: 2px solid #1C2833; }
+    table.toc-unified th.th-lbl { text-align: left; padding-left: 8px; border-left: 2px solid #1C2833; border-right: 2px solid #1C2833; }
     </style>
     """]
 
     # --- 1. GALVENĀ FINANŠU PĀRSKATA TABULA ---
-    html.append('<div class="toc-table-wrap"><table class="toc-unified"><thead><tr>')
+    html.append(f'<div class="toc-table-wrap"><table class="toc-unified">{colgroup_str}<thead><tr>')
     html.append('<th class="th-lbl">Rādītājs / Kontugrupa</th>')
     for p in periods:
-        th_bg = "background-color: #D5D8DC; color: #000000;" if p in grey_cols else ""
+        th_bg = "background-color: #CBD5E1; color: #000000;" if p in grey_cols else ""
         html.append(f'<th class="th-val" style="{th_bg}">{p}</th><th class="th-pct" style="{th_bg}">%</th>')
     html.append("</tr></thead><tbody>")
 
@@ -678,14 +887,15 @@ def render_unified_toc_tables_html(
             or (kind in ("OE", "OE_CHILD") and next_kind not in ("OE", "OE_CHILD"))
             or i == len(row_names) - 1
         )
-        border_bottom = "2.5px solid #404040" if thick_bottom else "1px solid #BFBFBF"
+        # Grupu sadalošā līnija = 2.5px solid #1C2833, bet parastā rindu līnija = 1px solid #595959 (tumši pelēka)
+        border_bottom = "2.5px solid #1C2833" if thick_bottom else "1px solid #595959"
         font_w = "700" if is_bold else "400"
         lbl_cls = "lbl-main" if is_bold else "lbl-sub"
         disp_rn = display_row_name(rname)
 
         row_style = (
             f"background-color: #{fill_hex}; color: #000000; font-weight: {font_w}; "
-            f"border-top: 1px solid #BFBFBF; border-bottom: {border_bottom};"
+            f"border-top: 1px solid #595959; border-bottom: {border_bottom};"
         )
         html.append(f'<tr style="{row_style}"><td class="{lbl_cls}" title="{disp_rn}" style="color: #000000;">{disp_rn}</td>')
 
@@ -693,7 +903,7 @@ def render_unified_toc_tables_html(
             val_str = fmt_num(main_df.loc[rname, p])
             pct_str = fmt_pct_int(main_df.loc[rname, f"%|{p}"])
             if p in grey_cols:
-                g_bg = "#D5D8DC" if is_bold else "#EAEDED"
+                g_bg = "#CFD8DC" if is_bold else "#ECEFF1"
                 cell_style = f"background-color: {g_bg}; color: #000000;"
             else:
                 cell_style = "color: #000000;"
@@ -702,28 +912,36 @@ def render_unified_toc_tables_html(
 
     html.append("</tbody></table></div>")
 
-    # --- 2. ATSEVIŠĶA TABULA: PRODUKTIVITĀTES UN ATDEVES RĀDĪTĀJI ---
+    # --- 2. PRODUKTIVITĀTES UN ATDEVES RĀDĪTĀJI (AR IDENTISKU COLGROUP UN PRECĪZU VERTIKĀLO SAKRITĪBU) ---
     kpi_periods = [p for p in periods if p in kpi_df.columns]
+    unrendered_periods = len(periods) - len(kpi_periods)
     month_only_kpi_cols = [
         p for p in kpi_periods
         if not ("YTD" in str(p).upper() or "AVG" in str(p).upper() or "BĀZE" in str(p).upper())
     ]
 
     html.append(f'<div class="toc-sec-heading">{title_kpi}</div>')
-    html.append('<div class="toc-table-wrap"><table class="toc-unified" style="width: auto; min-width: 65%;"><thead><tr>')
+    html.append(f'<div class="toc-table-wrap"><table class="toc-unified">{colgroup_str}<thead><tr>')
     html.append('<th class="th-lbl">Produktivitātes rādītājs</th>')
     for p in kpi_periods:
-        th_bg = "#D5D8DC" if p in grey_cols else "#EAECEE"
+        th_bg = "#CBD5E1" if p in grey_cols else "#E2E8F0"
         html.append(
-            f'<th style="background-color: {th_bg}; color: #000000; border-top: 2px solid #404040; '
-            f'border-bottom: 2px solid #404040; border-left: 1px solid #BFBFBF; border-right: 2px solid #595959; min-width: 90px; padding: 6px 10px;">{p}</th>'
+            f'<th colspan="2" style="background-color: {th_bg}; color: #000000; border-top: 2px solid #1C2833; '
+            f'border-bottom: 2px solid #1C2833; border-left: 1px solid #595959; border-right: 2px solid #1C2833;">{p}</th>'
         )
+    # Ja simulācijas KPI tabulā nav "Δ Izmaiņa (€)" kolonnas, pievienojam pilnīgi caurspīdīgu spoku-kolonnu,
+    # lai Bāze KOPĀ un Simulācija KOPĀ stāv 100% precīzi zem augšējās tabulas Bāze KOPĀ un Simulācija KOPĀ!
+    for _ in range(unrendered_periods):
+        html.append('<th colspan="2" style="background: transparent !important; border: none !important;"></th>')
     html.append("</tr></thead><tbody>")
 
     for i, idx_name in enumerate(kpi_df.index):
-        b_bot = "2.5px solid #404040" if i == len(kpi_df.index) - 1 else "1px solid #BFBFBF"
-        html.append(f'<tr style="background-color: #FFFFFF; color: #000000; border-top: 1px solid #BFBFBF; border-bottom: {b_bot};">')
-        html.append(f'<td class="lbl-main" style="background-color: #F2F4F4; font-weight: 700; color: #000000;" title="{idx_name}">{idx_name}</td>')
+        b_bot = "2.5px solid #1C2833" if i == len(kpi_df.index) - 1 else "1px solid #595959"
+        html.append('<tr style="background: transparent;">')
+        html.append(
+            f'<td class="lbl-main" style="background-color: #F1F5F9; font-weight: 700; color: #000000; '
+            f'border-top: 1px solid #595959; border-bottom: {b_bot};" title="{idx_name}">{idx_name}</td>'
+        )
 
         row_month_vals = [kpi_df.loc[idx_name, mp] for mp in month_only_kpi_cols] if month_only_kpi_cols else list(kpi_df.loc[idx_name].values)
 
@@ -737,33 +955,36 @@ def render_unified_toc_tables_html(
                 s = f"{v:.2f}"
 
             if p in grey_cols:
-                bg_cell = "#E5E7E9"
+                bg_cell = "#ECEFF1"
             elif kpi_conditional_format:
                 bg_cell = _kpi_cond_color(idx_name, v, row_month_vals)
             else:
                 bg_cell = "#FFFFFF"
 
             html.append(
-                f'<td style="text-align: right; padding: 4px 10px; background-color: {bg_cell}; color: #000000 !important; '
-                f'border-left: 1px solid #BFBFBF; border-right: 2px solid #595959; font-weight: 400; font-variant-numeric: tabular-nums;">{s}</td>'
+                f'<td colspan="2" style="text-align: right; padding: 4px 8px; background-color: {bg_cell}; color: #000000 !important; '
+                f'border-top: 1px solid #595959; border-bottom: {b_bot}; border-left: 1px solid #595959; border-right: 2px solid #1C2833; '
+                f'font-weight: 400; font-variant-numeric: tabular-nums;">{s}</td>'
             )
+        for _ in range(unrendered_periods):
+            html.append('<td colspan="2" style="background: transparent !important; border: none !important;"></td>')
         html.append("</tr>")
 
     html.append("</tbody></table></div>")
 
-    # --- 3. ATSEVIŠĶA TABULA: UZKRĀJOŠIE RĀDĪTĀJI ---
+    # --- 3. UZKRĀJOŠIE RĀDĪTĀJI (AR IDENTISKU COLGROUP UN VERTIKĀLU SAKRITĪBU MĒNESIS PRET MĒNESI) ---
     if show_cumulative:
         cum_df, cum_periods, _ = compute_cumulative_toc_df(amounts_df, fy_start_month=fy_start_month)
         html.append('<div class="toc-sec-heading">Uzkrājošie rādītāji</div>')
-        html.append('<div class="toc-table-wrap"><table class="toc-unified"><thead><tr>')
+        html.append(f'<div class="toc-table-wrap"><table class="toc-unified">{colgroup_str}<thead><tr>')
         html.append('<th class="th-lbl">Uzkrājošais rādītājs</th>')
         for p in periods:
             if p in cum_periods:
                 html.append(f'<th class="th-val">{p}</th><th class="th-pct">%</th>')
             else:
                 html.append(
-                    f'<th colspan="2" style="background-color: #EAECEE; color: #000000; border-top: 2px solid #404040; '
-                    f'border-bottom: 2px solid #404040; border-left: 1px solid #BFBFBF; border-right: 2px solid #595959;">{p}</th>'
+                    f'<th colspan="2" style="background-color: #E2E8F0; color: #000000; border-top: 2px solid #1C2833; '
+                    f'border-bottom: 2px solid #1C2833; border-left: 1px solid #595959; border-right: 2px solid #1C2833;">{p}</th>'
                 )
         html.append("</tr></thead><tbody>")
 
@@ -777,13 +998,13 @@ def render_unified_toc_tables_html(
         }
 
         for idx_c, c_name in enumerate(cum_df.index):
-            b_bot = "2.5px solid #404040" if idx_c == len(cum_df.index) - 1 else "1px solid #BFBFBF"
-            lbl_bg_hex = cum_label_fills.get(c_name, "F2F4F4")
+            b_bot = "2.5px solid #1C2833" if idx_c == len(cum_df.index) - 1 else "1px solid #595959"
+            lbl_bg_hex = cum_label_fills.get(c_name, "F1F5F9")
             is_np_cum = c_name.startswith("NP")
 
             html.append(
                 f'<tr style="background-color: #FFFFFF; color: #000000; font-weight: 400; '
-                f'border-top: 1px solid #BFBFBF; border-bottom: {b_bot};">'
+                f'border-top: 1px solid #595959; border-bottom: {b_bot};">'
             )
             html.append(
                 f'<td class="lbl-main" style="background-color: #{lbl_bg_hex}; font-weight: 700; color: #000000;" title="{c_name}">{c_name}</td>'
@@ -814,21 +1035,21 @@ def render_unified_toc_tables_html(
                         if is_np_cum and kpi_conditional_format:
                             ytd_bg = "#D4EFDF" if v_ytd >= 0 else "#FADBD8"
                         else:
-                            ytd_bg = "#F8F9F9"
+                            ytd_bg = "#F8FAFC"
                         html.append(
-                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: {ytd_bg}; color: #000000; border-left: 1px solid #BFBFBF; border-right: 2px solid #595959; font-weight: 400;">{fmt_num(v_ytd)}</td>'
+                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: {ytd_bg}; color: #000000; border-left: 1px solid #595959; border-right: 2px solid #1C2833; font-weight: 400;">{fmt_num(v_ytd)}</td>'
                         )
                     elif last_p and "AVG" in str(p).upper() and len(cum_periods) > 0:
                         v_avg = cum_df.loc[c_name, last_p] / len(cum_periods)
                         if is_np_cum and kpi_conditional_format:
                             avg_bg = "#D4EFDF" if v_avg >= 0 else "#FADBD8"
                         else:
-                            avg_bg = "#F8F9F9"
+                            avg_bg = "#F8FAFC"
                         html.append(
-                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: {avg_bg}; color: #000000; border-left: 1px solid #BFBFBF; border-right: 2px solid #595959; font-weight: 400;">{fmt_num(v_avg)}</td>'
+                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: {avg_bg}; color: #000000; border-left: 1px solid #595959; border-right: 2px solid #1C2833; font-weight: 400;">{fmt_num(v_avg)}</td>'
                         )
                     else:
-                        html.append('<td colspan="2" style="background-color: #FFFFFF; border-left: 1px solid #BFBFBF; border-right: 2px solid #595959;"></td>')
+                        html.append('<td colspan="2" style="background-color: #FFFFFF; border-left: 1px solid #595959; border-right: 2px solid #1C2833;"></td>')
             html.append("</tr>")
 
         html.append("</tbody></table></div>")
@@ -848,9 +1069,42 @@ for c_key, (c_lbl, c_mc) in S.get("custom_subgroups", {}).items():
     register_custom_subgroup(c_key, c_lbl, c_mc)
 
 
+# ------------------------------------------------------------------ MODERNS B2B SAAS STILS UN AUGŠĒJĀ RĪKJOSLA
 st.markdown(
     """
     <style>
+    /* Paslēpjam kreiso sānjoslu un samazinām augšējo tukšo malu */
+    [data-testid="stSidebar"], [data-testid="collapsedControl"] {
+        display: none !important;
+    }
+    .block-container {
+        padding-top: 1.6rem !important;
+        padding-bottom: 3rem !important;
+        max-width: 97% !important;
+    }
+    /* Moderns virsrakstu un pogu stils */
+    h1, h2, h3 {
+        font-family: 'Inter', 'Segoe UI', sans-serif !important;
+        letter-spacing: -0.3px;
+    }
+    .topbar-brand {
+        font-family: 'Inter', 'Segoe UI', sans-serif;
+        font-size: 20px;
+        font-weight: 800;
+        color: #F8FAFC;
+        letter-spacing: -0.4px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+    }
+    .topbar-badge {
+        font-size: 12px;
+        font-weight: 600;
+        padding: 3px 10px;
+        border-radius: 999px;
+        background-color: rgba(148, 163, 184, 0.18);
+        border: 1px solid rgba(148, 163, 184, 0.35);
+    }
     div[data-testid="stPopoverBody"] {
         font-size: 13px !important;
         line-height: 1.4 !important;
@@ -860,13 +1114,6 @@ st.markdown(
     div[data-testid="stPopoverBody"] span {
         font-size: 13px !important;
         line-height: 1.4 !important;
-    }
-    div[data-testid="stPopoverBody"] h1,
-    div[data-testid="stPopoverBody"] h2,
-    div[data-testid="stPopoverBody"] h3 {
-        font-size: 14px !important;
-        margin-top: 4px !important;
-        margin-bottom: 4px !important;
     }
     .sim-col-header-s {
         background-color: #FFF200; color: #000000 !important; font-weight: 700;
@@ -880,9 +1127,1182 @@ st.markdown(
         background-color: #F4B183; color: #000000 !important; font-weight: 700;
         padding: 8px 12px; border-radius: 6px; margin-bottom: 10px; border-left: 5px solid #BA4A00;
     }
-    /* Navigācijas rīkjoslas izcelšana */
-    div[data-testid="stSidebar"] .stRadio > div {
-        gap: 6px;
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def build_global_diagnostic_context() -> str:
+    parts = [f"Aktīvais uzņēmuma profils: {S.get('active_profile', 'Nav')}"]
+    parts.append(f"Pašreizējā sadaļa: {S.get('nav_page', 'overview')}")
+    parts.append(
+        f"Finanšu gada sākums: {S.get('fy_start_day', 1)}. {MONTH_NAMES_LV.get(S.get('fy_start_month', 1), 'Janvāris')}"
+    )
+
+    if "structure" in S and S.get("structure") is not None:
+        stc = S.get("structure")
+        try:
+            parts.append(f"\n--- 1. FAILA STRUKTŪRA ---\n{vars(stc)}")
+        except Exception:
+            pass
+
+    if "analysis" in S and S.analysis is not None:
+        an = S.analysis
+        leaf_ids = {lf.id for lf in an.leaves}
+        lines_info = []
+        res_row = getattr(S.get("structure"), "result_row", None)
+        for idx_l, ln in enumerate(an.ex.lines):
+            ln_id = getattr(ln, "id", f"r{getattr(ln, 'row', idx_l)}")
+            ln_row = getattr(ln, "row", idx_l)
+            status = "KONTS" if ln_id in leaf_ids else (
+                "REZULTĀTA RINDA" if (res_row is not None and ln_row == res_row)
+                else "IZLAISTS (STARPSUMMA / VIRSRAKSTS)"
+            )
+            first_val, tot_val = _safe_line_stats(getattr(ln, "vals", None))
+            lines_info.append(
+                f"Rinda #{ln_row} (id={ln_id}): '{getattr(ln, 'label', '')}' | "
+                f"Statuss: {status} | 1. mēn.: {first_val:,.2f} | Kopā: {tot_val:,.2f}"
+            )
+        parts.append("\n--- 2. NOLASĪTĀS PZA RINDAS ---\n" + "\n".join(lines_info[:140]))
+
+    if "cls_df" in S and S.cls_df is not None:
+        df_c = S.cls_df[["id", "Konts", "Displeja_konts", "Grupa", "Ieņēmums"]]
+        parts.append("\n--- 3. KONTU KLASIFIKĀCIJA ---\n" + df_c.to_markdown(index=False))
+
+    if "result" in S and S.result is not None:
+        res = S.result
+        parts.append("\n--- 4. AKTĪVĀ TOC-FIN TABULA (EUR) ---\n" + res.amounts.round(0).to_markdown())
+        parts.append("\n--- 5. KPI ---\n" + res.kpi.round(3).to_markdown())
+
+    return "\n\n".join(parts)
+
+
+def ask_global_assistant(user_question: str) -> tuple[str, int, float]:
+    ctx = build_global_diagnostic_context()
+    know = f"\nTOC-FIN metodoloģija:\n{knowledge_file}\n" if knowledge_file else ""
+    sys_prompt = (
+        "Tu esi TOC-FIN sistēmas asistents. "
+        "NOTEIKUMI:\n"
+        "1. Atbildi ĻOTI ĪSI, tieši un konkrēti (2–4 teikumi), bez virsrakstiem (#, ##) un bez gariem ievadiem.\n"
+        "2. Ja tev nav viennozīmīgas atbildes, neizdomā garus skaidrojumus — uzraksti 1–2 konkrētus ieteikumus, ko pārbaudīt.\n"
+        "3. Lieto vienkāršu čata valodu latviski."
+        f"{know}"
+    )
+    history = S.get("global_chat", [])
+    messages = [
+        {"role": "user", "content": f"Sistēmas konteksts:\n{ctx}"},
+        {"role": "assistant", "content": "Sapratu."},
+    ] + history + [{"role": "user", "content": userJaunajā **`app.py` (v23.0)** versijā ir izpildītas visas tavas prasības par režģa precīzu vertikālo sakritību, līniju toni, augšējo rīkjoslu, izkārtojumu uzstādījumos un jaunajiem trenda grafikiem:
+
+* **100% vertikāla kolonnu sakritība (Mēnesis pret mēnesi un Bāze pret Bāzi):** Visas trīs tabulas (Finanšu pārskats, Produktivitātes rādītāji un Uzkrājošie rādītāji) tagad izmanto vienotu HTML `<colgroup>` ar fiksētu proporciju (`230px` nosaukuma kolonnai un precīzi vienādu platumu katram mēnesim un Bāzei/Simulācijai). Rezultātā kā Pārskatā, tā Simulācijā katrs mēnesis un `Bāze KOPĀ` / `Simulācija KOPĀ` stāv **milimetrs milimetrā vertikāli viens zem otra**[cite: 16, 17].
+* **Tumši pelēkas iekšējās šūnu līnijas:** Visās trijās tabulās iekšējās rindu un kolonnu līnijas nomainītas uz skaidri redzamu vidēji tumšu pelēku toni (`1px solid #6E7681`), kas neizskatās balts uz krāsainajām šūnām, bet joprojām vizuāli atšķiras no biezajām melnajām (`2px solid #1F2328`) mēnešu un grupu robežlīnijām[cite: 16].
+* **Augšējā navigācijas rīkjosla (ar iespēju noslēpt):** Kreisā sānjosla ir aizvākta. Lapas augšpusē izveidota moderna horizontāla vadības rīkjosla bez cipariem iekavās (`Pārskats`, `Scenāriju simulācija`, `Atskaites un Simulācijas`, `Jauns PZA / Klasifikācija`, `Profils un Uzstādījumi`)[cite: 18], kā arī slēdzis `▲ Paslēpt rīkjoslu`, ja prezentācijas laikā vēlies redzēt tikai tīras tabulas un grafikus.
+* **Sakārtota sadaļa "Profils un Uzstādījumi":** Elementi vairs nav salikti blakus — tagad tie ir loģiskā vertikālā secībā:
+  1. **Profila informācija** (augšā)
+  2. **Finanšu gada sākums** (tieši zem profila informācijas)
+  3. **Paroles maiņa** (iespēja uzņēmumam vai adminam nomainīt paroli)
+  4. **Pievienot jaunu apakšgrupu** (zemāk kā atsevišķs bloks)
+  5. **Saglabāto kontu klasifikācija** (paslēpta zem aizvērta atveramā bloka `st.expander`, lai netraucē ikdienas skatam)[cite: 19].
+* **Jaunie grafiki ar lineārajām trenda līnijām (kā tavos paraugos):**
+  * **Produktivitāte:** `PR = T/OE` (zilā līnija `#3B68B5`) un `T% = T/S` (dzeltenā/oranžā līnija `#F5B000`) kopā ar punktētajām lineārās tendences (*Linear trendline*) līnijām[cite: 20].
+  * **Eiro Sales / Eiro algas:** `Eiro Sales / Eiro strādnieku algas` (gaiši zilā līnija `#8EA9DB`) un `Eiro Sales / Eiro administrācijas algas` (tumši zilā līnija `#203864`) kopā ar punktētajām lineārās tendences līnijām[cite: 21].
+* **Moderns un tīrs dizains:** Noņemtas liekās "AI emocijzīmes" no izvēlnēm, pielāgoti tīri biznesa analītikas (BI) fonti (`Inter` / `Segoe UI`), sakārtotas kartīšu apmales un pogu proporcijas.
+
+---
+
+### Aizvieto `app.py` savā GitHub repozitorijā ar šo kodu:
+
+```python
+"""
+app.py — TOC-FIN Finanšu diagnostikas un vadības lēmumu sistēma (v23.0)
+Project ID: amprqueamdcxpjufigvm
+"""
+from __future__ import annotations
+from dataclasses import dataclass
+from datetime import datetime
+import hashlib
+import io
+import json
+import os
+import re
+from pathlib import Path
+
+import altair as alt
+import anthropic
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+from db import SupabaseProfileStore
+from toc_engine import (
+    GROUPS,
+    SUBGROUP_LABELS,
+    LABEL_TO_KEY,
+    MAIN_GROUP_TO_DEFAULT_SUB,
+    FILLS,
+    build_excel,
+    classify_with_claude,
+    compute_toc,
+)
+from toc_ingest import (
+    Structure,
+    analyze,
+    extract_lines,
+    load_grids,
+    pick_sheet,
+    request_structure,
+)
+
+MODEL = "claude-sonnet-4-6"
+
+st.set_page_config(
+    page_title="TOC-FIN Vadības Sistēma",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+EXTRA_OE_SUBGROUPS = {
+    "OE_ADMIN_OTHER": ("Pārējās administrācijas izmaksas", "OE"),
+    "OE_SALES_OTHER": ("Pārējās pārdošanas izmaksas", "OE"),
+    "OE_OPER_OTHER": ("Pārējās saimnieciskās darbības izmaksas", "OE"),
+}
+for k_ext, (lbl_ext, mc_ext) in EXTRA_OE_SUBGROUPS.items():
+    if k_ext not in GROUPS:
+        GROUPS[k_ext] = (lbl_ext, mc_ext)
+    if k_ext not in SUBGROUP_LABELS:
+        SUBGROUP_LABELS[k_ext] = lbl_ext
+    LABEL_TO_KEY[lbl_ext] = k_ext
+
+
+def register_custom_subgroup(key: str, label: str, main_code: str = "OE") -> None:
+    GROUPS[key] = (label, main_code)
+    SUBGROUP_LABELS[key] = label
+    LABEL_TO_KEY[label] = key
+
+
+@dataclass
+class LoadedReportResult:
+    amounts: pd.DataFrame
+    main: pd.DataFrame
+    kpi: pd.DataFrame
+    row_kinds: dict[str, str]
+    reconciliation: pd.DataFrame
+    by_group: dict
+
+
+def _load_anthropic_key() -> str:
+    for k, v in os.environ.items():
+        if isinstance(v, str) and v.strip().startswith("sk-ant-"):
+            return v.strip().strip('"').strip("'")
+        if k.upper() in ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY") and v.strip():
+            return v.strip().strip('"').strip("'")
+
+    def _scan_dict(d) -> str:
+        try:
+            items = d.items()
+        except Exception:
+            return ""
+        for k, v in items:
+            if isinstance(v, str):
+                clean = v.strip().strip('"').strip("'")
+                if clean.startswith("sk-ant-"):
+                    return clean
+                if str(k).upper() in ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY", "API_KEY") and not clean.startswith("eyJ") and not clean.startswith("http"):
+                    return clean
+            elif hasattr(v, "items"):
+                found = _scan_dict(v)
+                if found:
+                    return found
+        return ""
+
+    try:
+        res = _scan_dict(st.secrets)
+        if res:
+            return res
+    except Exception:
+        pass
+    return ""
+
+
+API_KEY = _load_anthropic_key()
+if not API_KEY:
+    st.error(
+        "Nav atrasta ANTHROPIC_API_KEY. Pārbaudiet Streamlit Cloud -> Manage app -> Settings -> Secrets un pievienojiet:\n\n"
+        'ANTHROPIC_API_KEY = "sk-ant-..."'
+    )
+    st.stop()
+
+
+@st.cache_resource
+def get_client() -> anthropic.Anthropic:
+    return anthropic.Anthropic(api_key=API_KEY)
+
+
+def fmt_num(x) -> str:
+    return "" if pd.isna(x) else f"{x:,.0f}".replace(",", " ")
+
+
+def fmt_pct_int(x) -> str:
+    return "" if pd.isna(x) else f"{x * 100:.0f}%"
+
+
+def _safe_line_stats(vals) -> tuple[float, float]:
+    if vals is None:
+        return 0.0, 0.0
+    try:
+        if isinstance(vals, dict):
+            nums = [float(v) for v in vals.values() if v is not None and not pd.isna(v)]
+        elif hasattr(vals, "values") and not isinstance(vals, (list, tuple, np.ndarray)):
+            arr = np.asarray(vals.values, dtype=float)
+            nums = [float(x) for x in arr if not np.isnan(x)]
+        else:
+            arr = np.asarray(vals, dtype=float).flatten()
+            nums = [float(x) for x in arr if not np.isnan(x)]
+        if not nums:
+            return 0.0, 0.0
+        return float(nums[0]), float(sum(nums))
+    except Exception:
+        return 0.0, 0.0
+
+
+MONTH_NAMES_LV = {
+    1: "Janvāris",
+    2: "Februāris",
+    3: "Marts",
+    4: "Aprīlis",
+    5: "Maijs",
+    6: "Jūnijs",
+    7: "Jūlijs",
+    8: "Augusts",
+    9: "Septembris",
+    10: "Oktobris",
+    11: "Novembris",
+    12: "Decembris",
+}
+
+LV_MONTH_PARSE = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "mai": 5, "may": 5,
+    "jūn": 6, "jun": 6, "jūl": 7, "jul": 7, "aug": 8, "sep": 9,
+    "okt": 10, "oct": 10, "nov": 11, "dec": 12,
+}
+
+
+def parse_period_month_year(col_name: str) -> tuple[int | None, int | None]:
+    s = str(col_name or "").strip().lower()
+    if "ytd" in s or "avg" in s or "kopā" in s or "izmaiņa" in s:
+        return None, None
+
+    m1 = re.search(r"(?<!\d)(0?[1-9]|1[0-2])[\./\-](20\d{2})(?!\d)", s)
+    if m1:
+        return int(m1.group(1)), int(m1.group(2))
+
+    m2 = re.search(r"(?<!\d)(20\d{2})[\./\-](0?[1-9]|1[0-2])(?!\d)", s)
+    if m2:
+        return int(m2.group(2)), int(m2.group(1))
+
+    yr_m = re.search(r"(20\d{2})", s)
+    yr = int(yr_m.group(1)) if yr_m else None
+    for k, m_num in LV_MONTH_PARSE.items():
+        if k in s:
+            return m_num, yr
+
+    return None, None
+
+
+def strip_excluded_rows(res):
+    excl_label = GROUPS.get("EXCLUDED", ("Izslēgtie (Amortizācija / Virtuālā nauda)", "EXCL"))[0]
+    drop_rows = [
+        r for r in res.amounts.index
+        if res.row_kinds.get(r) in ("EXCL", "EXCLUDED")
+        or r == excl_label
+        or str(r).lower().startswith("izslēgt")
+    ]
+    if drop_rows:
+        res.amounts = res.amounts.drop(index=drop_rows, errors="ignore")
+        res.main = res.main.drop(index=drop_rows, errors="ignore")
+        for dr in drop_rows:
+            res.row_kinds.pop(dr, None)
+    return res
+
+
+def filter_result_by_months(res, selected_months: list[str], all_months: list[str]):
+    if not selected_months or len(selected_months) == len(all_months):
+        return res
+
+    sub_amounts = res.amounts[selected_months].copy().astype(float)
+    years_found = []
+    for m_col in selected_months:
+        _, yr = parse_period_month_year(m_col)
+        if yr and yr not in years_found:
+            years_found.append(yr)
+    yr_prefix = f"{years_found[-1]} " if len(years_found) == 1 else ""
+    ytd_col = f"{yr_prefix}YTD".strip()
+    avg_col = f"{yr_prefix}AVG YTD".strip()
+
+    sub_amounts[ytd_col] = sub_amounts[selected_months].sum(axis=1)
+    sub_amounts[avg_col] = sub_amounts[selected_months].mean(axis=1)
+
+    sub_main_dict = {}
+    for c in sub_amounts.columns:
+        sub_main_dict[c] = sub_amounts[c]
+        s_val = sub_amounts.loc["S", c] if "S" in sub_amounts.index else 0.0
+        sub_main_dict[f"%|{c}"] = np.where(s_val != 0, sub_amounts[c] / s_val, np.nan)
+    sub_main = pd.DataFrame(sub_main_dict, index=sub_amounts.index)
+
+    def _calc_kpi_col(col_s: pd.Series) -> dict[str, float]:
+        S_ = col_s.get("S", 0.0)
+        T_ = col_s.get("T", 0.0)
+        OE_ = col_s.get("OE", 0.0)
+        aw = col_s.get(GROUPS["OE_ADMIN_WAGES"][0], 0.0)
+        ww = col_s.get(GROUPS["OE_WORKER_WAGES"][0], 0.0)
+        div = lambda a, b: a / b if b else np.nan
+        return {
+            "PR = T/OE": div(T_, OE_),
+            "T% = T/S": div(T_, S_),
+            "Eiro Sales / Eiro algas kopā": div(S_, aw + ww),
+            "Eiro Sales / Eiro administrācijas algas": div(S_, aw),
+            "Eiro Sales / Eiro strādnieku algas": div(S_, ww),
+        }
+
+    kpi_cols_dict = {c: _calc_kpi_col(sub_amounts[c]) for c in sub_amounts.columns}
+    sub_kpi = pd.DataFrame(kpi_cols_dict)
+
+    return LoadedReportResult(
+        amounts=sub_amounts,
+        main=sub_main,
+        kpi=sub_kpi,
+        row_kinds=dict(res.row_kinds),
+        reconciliation=getattr(res, "reconciliation", pd.DataFrame()),
+        by_group=getattr(res, "by_group", {}),
+    )
+
+
+def compute_cumulative_toc_df(amounts_df: pd.DataFrame, fy_start_month: int = 1) -> tuple[pd.DataFrame, list[str], set[str]]:
+    target_rows = [r for r in ["S", "TVC", "T", "OE", "NP"] if r in amounts_df.index]
+    period_cols = [
+        c for c in amounts_df.columns
+        if not ("YTD" in str(c).upper() or "AVG" in str(c).upper() or "KOPĀ" in str(c).upper() or "IZMAIŅA" in str(c).upper())
+    ]
+    if not period_cols:
+        period_cols = list(amounts_df.columns)
+
+    cum_data: dict[str, pd.Series] = {}
+    running = pd.Series(0.0, index=target_rows)
+    fy_boundary_cols: set[str] = set()
+
+    for idx, col in enumerate(period_cols):
+        m_num, _ = parse_period_month_year(str(col))
+        if idx == 0:
+            running = amounts_df.loc[target_rows, col].fillna(0.0).astype(float).copy()
+            if m_num == fy_start_month:
+                fy_boundary_cols.add(col)
+        else:
+            if m_num is not None and m_num == fy_start_month:
+                running = amounts_df.loc[target_rows, col].fillna(0.0).astype(float).copy()
+                fy_boundary_cols.add(col)
+            else:
+                running = running + amounts_df.loc[target_rows, col].fillna(0.0).astype(float)
+        cum_data[col] = running.copy()
+
+    cum_df = pd.DataFrame(cum_data, index=target_rows)
+    table_rows = [r for r in ["S", "TVC", "T", "NP"] if r in cum_df.index]
+    cum_table_df = cum_df.loc[table_rows].copy()
+    row_labels = {
+        "S": "S (uzkrājošais)",
+        "TVC": "TVC (uzkrājošais)",
+        "T": "T (uzkrājošais)",
+        "NP": "NP (uzkrājošais)",
+    }
+    cum_table_df.index = [row_labels.get(r, r) for r in cum_table_df.index]
+    return cum_table_df, period_cols, fy_boundary_cols
+
+
+def _compute_linear_trend(y_vals: list[float]) -> list[float]:
+    """Aprēķina lineāro trendu (y = a*x + b) dotajai vērtību virknei."""
+    n = len(y_vals)
+    if n < 2:
+        return y_vals
+    x = np.arange(n, dtype=float)
+    y = np.array([0.0 if pd.isna(v) else float(v) for v in y_vals], dtype=float)
+    slope, intercept = np.polyfit(x, y, 1)
+    return list(slope * x + intercept)
+
+
+def render_overview_charts(amounts_df: pd.DataFrame, kpi_df: pd.DataFrame, fy_start_month: int = 1) -> None:
+    """
+    Vizualizē:
+    1) S, TVC, T, OE un NP līknes (ikmēneša vai uzkrājošās)
+    2) Produktivitātes grafiku (PR = T/OE un T% = T/S ar lineārajām trenda līnijām)
+    3) Eiro Sales / Eiro algas grafiku (Strādnieki un Administrācija ar lineārajām trenda līnijām)
+    """
+    period_cols = [
+        c for c in amounts_df.columns
+        if not ("YTD" in str(c).upper() or "AVG" in str(c).upper() or "KOPĀ" in str(c).upper() or "IZMAIŅA" in str(c).upper())
+    ]
+    if not period_cols:
+        return
+
+    st.markdown("---")
+    st.subheader("Finanšu un produktivitātes dinamika")
+
+    # 1. GRAFIKS: S, TVC, T, OE, NP
+    with st.container(border=True):
+        ch_top1, ch_top2 = st.columns([2.2, 1], vertical_alignment="center")
+        with ch_top1:
+            st.markdown("##### Galveno rādītāju dinamika (S, TVC, T, Uzturēšanas izmaksas, NP)")
+        with ch_top2:
+            chart_mode = st.radio(
+                "Grafika skats",
+                options=["Ikmēneša rādītāji", "Uzkrājošie rādītāji"],
+                horizontal=True,
+                label_visibility="collapsed",
+                key="toc_chart_mode_radio",
+            )
+
+        series_order = ["S", "TVC", "T", "Uzturēšanas izmaksas (OE)", "NP"]
+        color_scale = alt.Scale(
+            domain=series_order,
+            range=["#EAB308", "#C55A11", "#00B0F0", "#F4B183", "#70AD47"],
+        )
+
+        raw_rows = [r for r in ["S", "TVC", "T", "OE", "NP"] if r in amounts_df.index]
+        if chart_mode == "Ikmēneša rādītāji":
+            plot_df = amounts_df.loc[raw_rows, period_cols].copy().astype(float)
+        else:
+            plot_df = pd.DataFrame(index=raw_rows, columns=period_cols, dtype=float)
+            running = pd.Series(0.0, index=raw_rows)
+            for idx, col in enumerate(period_cols):
+                m_num, _ = parse_period_month_year(str(col))
+                if idx == 0 or (m_num is not None and m_num == fy_start_month):
+                    running = amounts_df.loc[raw_rows, col].fillna(0.0).astype(float).copy()
+                else:
+                    running = running + amounts_df.loc[raw_rows, col].fillna(0.0).astype(float)
+                plot_df[col] = running
+
+        rename_map = {"OE": "Uzturēšanas izmaksas (OE)"}
+        plot_df.index = [rename_map.get(r, r) for r in plot_df.index]
+
+        records = []
+        for r_name in plot_df.index:
+            for idx_p, p_col in enumerate(period_cols):
+                val = float(plot_df.loc[r_name, p_col])
+                records.append(
+                    {
+                        "Periods": str(p_col),
+                        "Secība": idx_p,
+                        "Rādītājs": r_name,
+                        "Summa (€)": round(val, 0),
+                    }
+                )
+        long_df = pd.DataFrame(records)
+
+        base = alt.Chart(long_df).encode(
+            x=alt.X("Periods:N", sort=period_cols, title=None, axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("Summa (€):Q", title="Summa (€)", axis=alt.Axis(format=",.0f")),
+            color=alt.Color(
+                "Rādītājs:N",
+                scale=color_scale,
+                legend=alt.Legend(title=None, orient="top"),
+            ),
+            tooltip=[
+                alt.Tooltip("Periods:N", title="Periods"),
+                alt.Tooltip("Rādītājs:N", title="Rādītājs"),
+                alt.Tooltip("Summa (€):Q", title="Summa (€)", format=",.0f"),
+            ],
+        )
+
+        lines = base.mark_line(strokeWidth=2.8)
+        points = base.mark_circle(size=65)
+        zero_rule = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(strokeDash=[4, 4], color="#888888").encode(y="y:Q")
+        st.altair_chart((zero_rule + lines + points).properties(height=340).interactive(), use_container_width=True)
+
+    # 2. UN 3. GRAFIKS BLAKUS VAI VIENS ZEM OTRA: PRODUKTIVITĀTE UN EIRO SALES / EIRO ALGAS
+    kpi_m_cols = [c for c in period_cols if c in kpi_df.columns]
+    if not kpi_m_cols:
+        return
+
+    g_col1, g_col2 = st.columns(2)
+
+    # --- GRAFIKS 2: PRODUKTIVITĀTE (PR = T/OE un T% = T/S + Linear trend) ---
+    with g_col1:
+        with st.container(border=True):
+            st.markdown("##### Produktivitāte (`PR = T/OE` un `T% = T/S`)")
+            pr_vals = [float(kpi_df.loc["PR = T/OE", c]) if "PR = T/OE" in kpi_df.index and not pd.isna(kpi_df.loc["PR = T/OE", c]) else 0.0 for c in kpi_m_cols]
+            tp_vals = [float(kpi_df.loc["T% = T/S", c]) if "T% = T/S" in kpi_df.index and not pd.isna(kpi_df.loc["T% = T/S", c]) else 0.0 for c in kpi_m_cols]
+            pr_trend = _compute_linear_trend(pr_vals)
+            tp_trend = _compute_linear_trend(tp_vals)
+
+            prod_rows = []
+            for idx_m, m_lbl in enumerate(kpi_m_cols):
+                prod_rows.append({"Periods": m_lbl, "Rādītājs": "PR = T/OE", "Vērtība": round(pr_vals[idx_m], 2), "Tips": "Fakts"})
+                prod_rows.append({"Periods": m_lbl, "Rādītājs": "T% = T/S", "Vērtība": round(tp_vals[idx_m], 2), "Tips": "Fakts"})
+                prod_rows.append({"Periods": m_lbl, "Rādītājs": "Linear (PR = T/OE)", "Vērtība": round(pr_trend[idx_m], 2), "Tips": "Trends"})
+                prod_rows.append({"Periods": m_lbl, "Rādītājs": "Linear (T% = T/S)", "Vērtība": round(tp_trend[idx_m], 2), "Tips": "Trends"})
+
+            prod_df = pd.DataFrame(prod_rows)
+            prod_domain = ["PR = T/OE", "T% = T/S", "Linear (PR = T/OE)", "Linear (T% = T/S)"]
+            prod_colors = ["#3B68B5", "#F5B000", "#3B68B5", "#F5B000"]
+
+            fact_prod = alt.Chart(prod_df[prod_df["Tips"] == "Fakts"]).mark_line(strokeWidth=2.8, point=True).encode(
+                x=alt.X("Periods:N", sort=kpi_m_cols, title=None, axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("Vērtība:Q", title="Koeficients", scale=alt.Scale(zero=False)),
+                color=alt.Color("Rādītājs:N", scale=alt.Scale(domain=prod_domain, range=prod_colors), legend=alt.Legend(title=None, orient="bottom")),
+                tooltip=["Periods:N", "Rādītājs:N", alt.Tooltip("Vērtība:Q", format=".2f")],
+            )
+            trend_prod = alt.Chart(prod_df[prod_df["Tips"] == "Trends"]).mark_line(strokeDash=[3, 4], strokeWidth=2).encode(
+                x=alt.X("Periods:N", sort=kpi_m_cols),
+                y=alt.Y("Vērtība:Q"),
+                color=alt.Color("Rādītājs:N", scale=alt.Scale(domain=prod_domain, range=prod_colors)),
+                tooltip=["Periods:N", "Rādītājs:N", alt.Tooltip("Vērtība:Q", format=".2f")],
+            )
+            ref_one = alt.Chart(pd.DataFrame({"y": [1.0]})).mark_rule(strokeDash=[2, 2], color="#999999").encode(y="y:Q")
+            st.altair_chart((ref_one + fact_prod + trend_prod).properties(height=320).interactive(), use_container_width=True)
+
+    # --- GRAFIKS 3: EIRO SALES / EIRO ALGAS (Strādnieki un Admin + Linear trend) ---
+    with g_col2:
+        with st.container(border=True):
+            st.markdown("##### Eiro Sales / Eiro algas")
+            w_row = "Eiro Sales / Eiro strādnieku algas"
+            a_row = "Eiro Sales / Eiro administrācijas algas"
+            w_vals = [float(kpi_df.loc[w_row, c]) if w_row in kpi_df.index and not pd.isna(kpi_df.loc[w_row, c]) else 0.0 for c in kpi_m_cols]
+            a_vals = [float(kpi_df.loc[a_row, c]) if a_row in kpi_df.index and not pd.isna(kpi_df.loc[a_row, c]) else 0.0 for c in kpi_m_cols]
+            w_trend = _compute_linear_trend(w_vals)
+            a_trend = _compute_linear_trend(a_vals)
+
+            w_rows = []
+            for idx_m, m_lbl in enumerate(kpi_m_cols):
+                w_rows.append({"Periods": m_lbl, "Rādītājs": "Eiro Sales / Eiro Algas strādnieki", "Vērtība": round(w_vals[idx_m], 2), "Tips": "Fakts"})
+                w_rows.append({"Periods": m_lbl, "Rādītājs": "Eiro Sales / Eiro Algas Admin", "Vērtība": round(a_vals[idx_m], 2), "Tips": "Fakts"})
+                w_rows.append({"Periods": m_lbl, "Rādītājs": "Linear (Algas strādnieki)", "Vērtība": round(w_trend[idx_m], 2), "Tips": "Trends"})
+                w_rows.append({"Periods": m_lbl, "Rādītājs": "Linear (Algas Admin)", "Vērtība": round(a_trend[idx_m], 2), "Tips": "Trends"})
+
+            w_df = pd.DataFrame(w_rows)
+            w_domain = [
+                "Eiro Sales / Eiro Algas strādnieki",
+                "Eiro Sales / Eiro Algas Admin",
+                "Linear (Algas strādnieki)",
+                "Linear (Algas Admin)",
+            ]
+            w_colors = ["#7B9CE0", "#1F3864", "#7B9CE0", "#1F3864"]
+
+            fact_w = alt.Chart(w_df[w_df["Tips"] == "Fakts"]).mark_line(strokeWidth=2.8, point=True).encode(
+                x=alt.X("Periods:N", sort=kpi_m_cols, title=None, axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("Vērtība:Q", title="Eiro Sales / 1 Eiro alga", scale=alt.Scale(zero=False)),
+                color=alt.Color("Rādītājs:N", scale=alt.Scale(domain=w_domain, range=w_colors), legend=alt.Legend(title=None, orient="bottom")),
+                tooltip=["Periods:N", "Rādītājs:N", alt.Tooltip("Vērtība:Q", format=".2f")],
+            )
+            trend_w = alt.Chart(w_df[w_df["Tips"] == "Trends"]).mark_line(strokeDash=[3, 4], strokeWidth=2).encode(
+                x=alt.X("Periods:N", sort=kpi_m_cols),
+                y=alt.Y("Vērtība:Q"),
+                color=alt.Color("Rādītājs:N", scale=alt.Scale(domain=w_domain, range=w_colors)),
+                tooltip=["Periods:N", "Rādītājs:N", alt.Tooltip("Vērtība:Q", format=".2f")],
+            )
+            st.altair_chart((fact_w + trend_w).properties(height=320).interactive(), use_container_width=True)
+
+
+MAIN_GROUP_OPTIONS = [
+    "S (Ieņēmumi)",
+    "TVC (Mainīgās izmaksas)",
+    "Uzturēšanas izmaksas (OE)",
+    "Izslēgt (Nolietojums / Virtuāls)",
+]
+
+
+def normalize_group_key(group_key: str) -> str:
+    g = str(group_key or "OE_OTHER").strip()
+    if g == "S":
+        return "S_REV"
+    if g not in SUBGROUP_LABELS:
+        return "OE_OTHER"
+    return g
+
+
+def get_main_code(group_key: str) -> str:
+    g = normalize_group_key(group_key)
+    return GROUPS.get(g, ("", "OE"))[1]
+
+
+def get_main_cat(group_key: str) -> str:
+    code = get_main_code(group_key)
+    if code == "S":
+        return MAIN_GROUP_OPTIONS[0]
+    if code == "TVC":
+        return MAIN_GROUP_OPTIONS[1]
+    if code == "EXCL":
+        return MAIN_GROUP_OPTIONS[3]
+    return MAIN_GROUP_OPTIONS[2]
+
+
+def get_contextual_radio_options(agent_grp: str, konts_label: str, path_label: str = "") -> tuple[list[str], int]:
+    code = get_main_code(agent_grp)
+    combined = f"{konts_label} {path_label}".lower()
+    is_revenue_context = (
+        code == "S"
+        or ("ieņēm" in combined or "apgrozīj" in combined or "grant" in combined or "subsīd" in combined)
+        and not ("izmaks" in combined or "izdevum" in combined)
+    )
+
+    if is_revenue_context:
+        opts = [
+            "S — Ieņēmumi (Sales)",
+            "Izslēgt — Virtuāla nauda / neiekļaut",
+        ]
+        def_idx = 0 if code != "EXCL" else 1
+        return opts, def_idx
+    else:
+        opts = [
+            "TVC — Patiesi mainīga izmaksa (1:1 ar pārdošanu)",
+            "Uzturēšanas izmaksas (OE) — Kapacitātes / darbības izdevums",
+            "Izslēgt — Virtuāla nauda (amortizācija / nolietojums)",
+        ]
+        def_idx = {"TVC": 0, "OE": 1, "EXCL": 2}.get(code, 1)
+        return opts, def_idx
+
+
+def resolve_radio_choice(choice: str, original_group: str, konts_label: str) -> tuple[str, bool]:
+    orig_grp = normalize_group_key(original_group)
+    orig_code = get_main_code(orig_grp)
+    lbl_low = str(konts_label or "").lower()
+
+    if choice.startswith("S "):
+        target_code = "S"
+        fallback = "S_OTHER" if ("grant" in lbl_low or "citi" in lbl_low or "pārēj" in lbl_low) else "S_REV"
+    elif choice.startswith("TVC"):
+        target_code = "TVC"
+        fallback = "TVC_DELIVERY" if ("piegād" in lbl_low or "transp" in lbl_low or "kurjer" in lbl_low) else "TVC_MATERIALS"
+    elif choice.startswith("Izslēgt"):
+        target_code = "EXCL"
+        fallback = "EXCLUDED"
+    else:
+        target_code = "OE"
+        if "admin" in lbl_low:
+            fallback = "OE_ADMIN_OTHER"
+        elif "pārdoš" in lbl_low:
+            fallback = "OE_SALES_OTHER"
+        else:
+            fallback = "OE_OTHER"
+
+    final_grp = orig_grp if orig_code == target_code else fallback
+    return final_grp, final_grp.startswith("S_")
+
+
+GROUP_SORT_ORDER = {
+    "S": 1,
+    "S_REV": 1,
+    "S_OTHER": 2,
+    "TVC_MATERIALS": 3,
+    "TVC_DELIVERY": 4,
+    "OE_ADMIN_WAGES": 5,
+    "OE_WORKER_WAGES": 6,
+    "OE_MARKETING": 7,
+    "OE_PLATFORMS": 8,
+    "OE_PREMISES": 9,
+    "OE_OFFICE_IT": 10,
+    "OE_FIN_TAX": 11,
+    "OE_ADMIN_OTHER": 12,
+    "OE_SALES_OTHER": 13,
+    "OE_OPER_OTHER": 14,
+    "OE_OTHER": 15,
+    "EXCLUDED": 99,
+}
+
+
+def sort_cls_df(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out["Grupa"] = out["Grupa"].map(normalize_group_key)
+    out["_sort"] = out["Grupa"].map(lambda g: GROUP_SORT_ORDER.get(g, 50))
+    out = out.sort_values(by=["_sort", "Displeja_konts"], kind="mergesort").drop(columns=["_sort"]).reset_index(drop=True)
+    return out
+
+
+def build_display_labels(leaves) -> dict[str, str]:
+    counts: dict[str, int] = {}
+    for lf in leaves:
+        lbl = str(lf.label).strip()
+        counts[lbl] = counts.get(lbl, 0) + 1
+
+    display_map: dict[str, str] = {}
+    for lf in leaves:
+        lbl = str(lf.label).strip()
+        if counts.get(lbl, 0) > 1:
+            path_parts = [p.strip() for p in re.split(r"[›>]", str(getattr(lf, "path", ""))) if p.strip()]
+            parent = path_parts[-1] if path_parts else f"rinda {lf.row}"
+            display_map[lf.id] = f"{lbl} [{parent}]"
+        else:
+            display_map[lf.id] = lbl
+    return display_map
+
+
+def compute_toc_with_dynamic_subgroups(leaves, mapping: dict[str, dict], period_cols: list[dict], reported=None):
+    res = compute_toc(leaves, mapping, period_cols, reported)
+    res = strip_excluded_rows(res)
+
+    month_labels = [p["label"] for p in period_cols if p.get("kind") == "month"]
+    all_cols = list(res.amounts.columns)
+
+    used_groups = {m["group"] for m in mapping.values() if m.get("group") and m["group"] != "EXCLUDED"}
+    missing_groups = [g for g in used_groups if GROUPS.get(g, ("", ""))[0] not in res.amounts.index]
+
+    if not missing_groups:
+        return res
+
+    amounts = res.amounts.copy()
+    row_kinds = dict(res.row_kinds)
+
+    for g_key in missing_groups:
+        lbl, m_code = GROUPS.get(g_key, (g_key, "OE"))
+        if m_code == "EXCL":
+            continue
+        kind_tag = f"{m_code}_CHILD"
+        g_leaves = [lf for lf in leaves if mapping.get(lf.id, {}).get("group") == g_key]
+        if not g_leaves:
+            continue
+
+        row_series = pd.Series(0.0, index=all_cols)
+        for j, p in enumerate(period_cols):
+            p_lbl = p["label"]
+            if p_lbl in row_series.index:
+                tot_j = 0.0
+                for lf in g_leaves:
+                    v = float(lf.vals[j]) if j < len(lf.vals) else 0.0
+                    tot_j += v if m_code == "S" else abs(v)
+                row_series[p_lbl] = tot_j
+
+        for c in all_cols:
+            if "YTD" in c.upper() and "AVG" not in c.upper() and month_labels:
+                row_series[c] = row_series[month_labels].sum()
+            elif "AVG" in c.upper() and month_labels:
+                row_series[c] = row_series[month_labels].mean()
+
+        amounts.loc[lbl] = row_series
+        row_kinds[lbl] = kind_tag
+
+    s_ch = [r for r in amounts.index if row_kinds.get(r) == "S_CHILD"]
+    tvc_ch = [r for r in amounts.index if row_kinds.get(r) == "TVC_CHILD"]
+    oe_ch = [r for r in amounts.index if row_kinds.get(r) == "OE_CHILD"]
+
+    if s_ch:
+        amounts.loc["S"] = amounts.loc[s_ch].sum(axis=0)
+    if tvc_ch:
+        amounts.loc["TVC"] = amounts.loc[tvc_ch].sum(axis=0)
+    amounts.loc["T"] = amounts.loc["S"] - amounts.loc["TVC"]
+    if oe_ch:
+        amounts.loc["OE"] = amounts.loc[oe_ch].sum(axis=0)
+    amounts.loc["NP"] = amounts.loc["T"] - amounts.loc["OE"]
+
+    ordered_idx = ["S"] + s_ch + ["TVC"] + tvc_ch + ["T", "OE"] + oe_ch + ["NP"]
+    ordered_idx = [r for r in ordered_idx if r in amounts.index]
+    amounts = amounts.loc[ordered_idx]
+
+    main_dict = {}
+    for c in amounts.columns:
+        main_dict[c] = amounts[c]
+        s_val = amounts.loc["S", c]
+        main_dict[f"%|{c}"] = np.where(s_val != 0, amounts[c] / s_val, np.nan)
+    res.amounts = amounts
+    res.main = pd.DataFrame(main_dict, index=amounts.index)
+    res.row_kinds = row_kinds
+    return strip_excluded_rows(res)
+
+
+def _kpi_cond_color(idx_name: str, val: float, row_vals: list[float]) -> str:
+    if pd.isna(val):
+        return "#F8F9F9"
+    if idx_name.startswith("PR"):
+        if val >= 1.15:
+            return "#D4EFDF"
+        elif val >= 1.00:
+            return "#FCF3CF"
+        else:
+            return "#FADBD8"
+
+    clean = [float(x) for x in row_vals if not pd.isna(x)]
+    if len(clean) < 2:
+        return "#F8F9F9"
+    q_low = float(np.percentile(clean, 33))
+    q_high = float(np.percentile(clean, 67))
+    if q_high - q_low < 1e-6:
+        return "#F8F9F9"
+    if val >= q_high:
+        return "#D4EFDF"
+    elif val <= q_low:
+        return "#FADBD8"
+    return "#FCF3CF"
+
+
+def render_unified_toc_tables_html(
+    amounts_df: pd.DataFrame,
+    main_df: pd.DataFrame,
+    kpi_df: pd.DataFrame,
+    row_kinds: dict[str, str],
+    title_kpi: str = "Produktivitātes un atdeves rādītāji",
+    grey_cols: set[str] | None = None,
+    fy_start_month: int = 1,
+    show_cumulative: bool = True,
+    kpi_conditional_format: bool = True,
+) -> str:
+    """
+    Visas trīs tabulas izmanto kopīgu <colgroup> ar fiksētu proporciju:
+    - 1. kolonna (Nosaukums): 230px
+    - Katrs periods sastāv no 2 apakškolonnām (Summa: 68% no perioda platuma, %: 32% no perioda platuma),
+      vai KPI tabulā <td colspan="2">, lai mēnesis pret mēnesi un Bāze pret Bāzi vienmēr sakristu 1:1 vertikāli!
+    - Iekšējās šūnu līnijas: tumši pelēkas (#6E7681), grupu un mēnešu ārējās robežas: tumši melnas (#1F2328).
+    """
+    valid_rows = [
+        r for r in amounts_df.index
+        if row_kinds.get(r) not in ("EXCL", "EXCLUDED") and not str(r).lower().startswith("izslēgt")
+    ]
+    amounts_df = amounts_df.loc[valid_rows]
+    main_df = main_df.loc[valid_rows]
+
+    periods = list(amounts_df.columns)
+    n_per = max(len(periods), 1)
+    row_names = list(amounts_df.index)
+    kinds = [row_kinds.get(rn, "OE_CHILD") for rn in row_names]
+    grey_cols = grey_cols or set()
+
+    display_row_name = lambda rn: "Uzturēšanas izmaksas (OE)" if rn == "OE" else rn
+
+    # Kopīgs <colgroup> visām tabulām, lai kolonnas būtu 100% vertikāli vienā līnijā
+    def _build_colgroup(num_periods: int, total_ref_periods: int) -> tuple[str, str]:
+        # Ja tabulā ir tikpat periodu cik galvenajā tabulā -> 100% platums
+        # Ja tabulā ir mazāk periodu (piem. Simulācijas KPI bez Δ kolonnas) -> proporcionāls platums, lai Bāze un Simulācija sakrīt ar augšējo tabulu!
+        lbl_w_px = 235
+        if num_periods == total_ref_periods:
+            table_style = "width: 100%; table-layout: fixed;"
+        else:
+            # Aprēķinām precīzu platumu, lai Bāze un Simulācija stāv tieši zem augšējās tabulas Bāzes un Simulācijas
+            ratio_pct = (num_periods / total_ref_periods) * 100.0
+            extra_px = lbl_w_px * (1.0 - num_periods / total_ref_periods)
+            table_style = f"width: calc({ratio_pct:.4f}% + {extra_px:.1f}px); table-layout: fixed;"
+
+        cols_html = [f'<col style="width: {lbl_w_px}px;">']
+        for _ in range(num_periods):
+            cols_html.append('<col style="width: 66%;">')
+            cols_html.append('<col style="width: 34%;">')
+        return "<colgroup>" + "".join(cols_html) + "</colgroup>", table_style
+
+    main_colgroup, main_tbl_style = _build_colgroup(n_per, n_per)
+
+    html = ["""
+    <style>
+    .toc-table-wrap { width: 100%; overflow-x: auto; margin-bottom: 14px; }
+    .toc-sec-heading {
+        font-family: 'Inter', 'Segoe UI', 'Calibri', sans-serif;
+        font-size: 14px;
+        font-weight: 700;
+        letter-spacing: 0.2px;
+        margin: 18px 0 8px 0;
+        padding: 6px 14px;
+        background-color: #1E293B;
+        color: #FFFFFF !important;
+        border-radius: 6px;
+        display: inline-block;
+    }
+    table.toc-unified {
+        border-collapse: collapse;
+        font-family: 'Inter', 'Calibri', 'Segoe UI', sans-serif;
+        font-size: 12px;
+    }
+    table.toc-unified th {
+        background-color: #E2E8F0;
+        color: #0F172A !important;
+        font-weight: 700;
+        text-align: center;
+        padding: 6px 5px;
+        border-top: 2px solid #1F2328;
+        border-bottom: 2px solid #1F2328;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    table.toc-unified td {
+        padding: 4px 6px;
+        white-space: nowrap;
+        color: #0F172A !important;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    table.toc-unified td.lbl-main {
+        text-align: left;
+        font-weight: 700;
+        padding-left: 8px;
+        padding-right: 8px;
+        border-left: 2px solid #1F2328;
+        border-right: 2px solid #1F2328;
+        color: #0F172A !important;
+    }
+    table.toc-unified td.lbl-sub {
+        text-align: left;
+        font-weight: 400;
+        padding-left: 16px;
+        padding-right: 8px;
+        border-left: 2px solid #1F2328;
+        border-right: 2px solid #1F2328;
+        color: #0F172A !important;
+    }
+    /* Iekšējās līnijas: tumši pelēkas (#6E7681), bet mēnešu starpsienas biezākas (#1F2328) */
+    table.toc-unified td.val-col {
+        text-align: right;
+        border-left: 1px solid #6E7681;
+        font-variant-numeric: tabular-nums;
+        color: #0F172A !important;
+    }
+    table.toc-unified td.pct-col {
+        text-align: right;
+        font-size: 11px;
+        padding-left: 2px;
+        padding-right: 5px;
+        border-left: 1px solid #8B949E;
+        border-right: 2px solid #1F2328;
+        color: #0F172A !important;
+        font-variant-numeric: tabular-nums;
+    }
+    table.toc-unified th.th-val { border-left: 1px solid #6E7681; }
+    table.toc-unified th.th-pct { font-size: 11px; border-left: 1px solid #8B949E; border-right: 2px solid #1F2328; }
+    table.toc-unified th.th-lbl { text-align: left; padding-left: 8px; border-left: 2px solid #1F2328; border-right: 2px solid #1F2328; }
+    </style>
+    """]
+
+    # --- 1. GALVENĀ FINANŠU PĀRSKATA TABULA ---
+    html.append(f'<div class="toc-table-wrap"><table class="toc-unified" style="{main_tbl_style}">{main_colgroup}<thead><tr>')
+    html.append('<th class="th-lbl">Rādītājs / Kontugrupa</th>')
+    for p in periods:
+        th_bg = "background-color: #CBD5E1; color: #0F172A;" if p in grey_cols else ""
+        html.append(f'<th class="th-val" style="{th_bg}">{p}</th><th class="th-pct" style="{th_bg}">%</th>')
+    html.append("</tr></thead><tbody>")
+
+    for i, rname in enumerate(row_names):
+        kind = kinds[i]
+        next_kind = kinds[i + 1] if i + 1 < len(kinds) else None
+        fill_hex, is_bold, _ = FILLS.get(kind, FILLS["OE_CHILD"])
+
+        thick_bottom = (
+            kind in ("T", "NP")
+            or (kind in ("S", "S_CHILD") and next_kind not in ("S", "S_CHILD"))
+            or (kind in ("TVC", "TVC_CHILD") and next_kind not in ("TVC", "TVC_CHILD"))
+            or (kind in ("OE", "OE_CHILD") and next_kind not in ("OE", "OE_CHILD"))
+            or i == len(row_names) - 1
+        )
+        border_bottom = "2px solid #1F2328" if thick_bottom else "1px solid #6E7681"
+        font_w = "700" if is_bold else "400"
+        lbl_cls = "lbl-main" if is_bold else "lbl-sub"
+        disp_rn = display_row_name(rname)
+
+        row_style = (
+            f"background-color: #{fill_hex}; color: #0F172A; font-weight: {font_w}; "
+            f"border-top: 1px solid #6E7681; border-bottom: {border_bottom};"
+        )
+        html.append(f'<tr style="{row_style}"><td class="{lbl_cls}" title="{disp_rn}">{disp_rn}</td>')
+
+        for p in periods:
+            val_str = fmt_num(main_df.loc[rname, p])
+            pct_str = fmt_pct_int(main_df.loc[rname, f"%|{p}"])
+            if p in grey_cols:
+                g_bg = "#CBD5E1" if is_bold else "#E2E8F0"
+                cell_style = f"background-color: {g_bg}; color: #0F172A;"
+            else:
+                cell_style = "color: #0F172A;"
+            html.append(f'<td class="val-col" style="{cell_style}">{val_str}</td><td class="pct-col" style="{cell_style}">{pct_str}</td>')
+        html.append("</tr>")
+
+    html.append("</tbody></table></div>")
+
+    # --- 2. ATSEVIŠĶA TABULA: PRODUKTIVITĀTES UN ATDEVES RĀDĪTĀJI (AR 1:1 VERTIKĀLO KOLONNU SAKRITĪBU) ---
+    kpi_periods = [p for p in periods if p in kpi_df.columns]
+    kpi_colgroup, kpi_tbl_style = _build_colgroup(len(kpi_periods), n_per)
+    month_only_kpi_cols = [
+        p for p in kpi_periods
+        if not ("YTD" in str(p).upper() or "AVG" in str(p).upper() or "BĀZE" in str(p).upper())
+    ]
+
+    html.append(f'<div class="toc-sec-heading">{title_kpi}</div>')
+    html.append(f'<div class="toc-table-wrap"><table class="toc-unified" style="{kpi_tbl_style}">{kpi_colgroup}<thead><tr>')
+    html.append('<th class="th-lbl">Produktivitātes rādītājs</th>')
+    for p in kpi_periods:
+        th_bg = "#CBD5E1" if p in grey_cols else "#E2E8F0"
+        html.append(
+            f'<th colspan="2" style="background-color: {th_bg}; color: #0F172A; border-top: 2px solid #1F2328; '
+            f'border-bottom: 2px solid #1F2328; border-left: 1px solid #6E7681; border-right: 2px solid #1F2328;">{p}</th>'
+        )
+    html.append("</tr></thead><tbody>")
+
+    for i, idx_name in enumerate(kpi_df.index):
+        b_bot = "2px solid #1F2328" if i == len(kpi_df.index) - 1 else "1px solid #6E7681"
+        html.append(f'<tr style="background-color: #FFFFFF; color: #0F172A; border-top: 1px solid #6E7681; border-bottom: {b_bot};">')
+        html.append(f'<td class="lbl-main" style="background-color: #F1F5F9; font-weight: 700; color: #0F172A;" title="{idx_name}">{idx_name}</td>')
+
+        row_month_vals = [kpi_df.loc[idx_name, mp] for mp in month_only_kpi_cols] if month_only_kpi_cols else list(kpi_df.loc[idx_name].values)
+
+        for p in kpi_periods:
+            v = kpi_df.loc[idx_name, p]
+            if pd.isna(v):
+                s = ""
+            elif idx_name.startswith("T%"):
+                s = f"{v * 100:.0f}%"
+            else:
+                s = f"{v:.2f}"
+
+            if p in grey_cols:
+                bg_cell = "#E2E8F0"
+            elif kpi_conditional_format:
+                bg_cell = _kpi_cond_color(idx_name, v, row_month_vals)
+            else:
+                bg_cell = "#FFFFFF"
+
+            html.append(
+                f'<td colspan="2" style="text-align: right; padding: 4px 8px; background-color: {bg_cell}; color: #0F172A !important; '
+                f'border-left: 1px solid #6E7681; border-right: 2px solid #1F2328; font-weight: 400; font-variant-numeric: tabular-nums;">{s}</td>'
+            )
+        html.append("</tr>")
+
+    html.append("</tbody></table></div>")
+
+    # --- 3. ATSEVIŠĶA TABULA: UZKRĀJOŠIE RĀDĪTĀJI (AR 1:1 VERTIKĀLO KOLONNU SAKRITĪBU) ---
+    if show_cumulative:
+        cum_df, cum_periods, _ = compute_cumulative_toc_df(amounts_df, fy_start_month=fy_start_month)
+        html.append('<div class="toc-sec-heading">Uzkrājošie rādītāji</div>')
+        html.append(f'<div class="toc-table-wrap"><table class="toc-unified" style="{main_tbl_style}">{main_colgroup}<thead><tr>')
+        html.append('<th class="th-lbl">Uzkrājošais rādītājs</th>')
+        for p in periods:
+            if p in cum_periods:
+                html.append(f'<th class="th-val">{p}</th><th class="th-pct">%</th>')
+            else:
+                html.append(
+                    f'<th colspan="2" style="background-color: #E2E8F0; color: #0F172A; border-top: 2px solid #1F2328; '
+                    f'border-bottom: 2px solid #1F2328; border-left: 1px solid #6E7681; border-right: 2px solid #1F2328;">{p}</th>'
+                )
+        html.append("</tr></thead><tbody>")
+
+        s_row_label = cum_df.index[0] if len(cum_df.index) > 0 else None
+
+        cum_label_fills = {
+            "S (uzkrājošais)": FILLS["S"][0],
+            "TVC (uzkrājošais)": FILLS["TVC"][0],
+            "T (uzkrājošais)": FILLS["T"][0],
+            "NP (uzkrājošais)": FILLS["NP"][0],
+        }
+
+        for idx_c, c_name in enumerate(cum_df.index):
+            b_bot = "2px solid #1F2328" if idx_c == len(cum_df.index) - 1 else "1px solid #6E7681"
+            lbl_bg_hex = cum_label_fills.get(c_name, "F1F5F9")
+            is_np_cum = c_name.startswith("NP")
+
+            html.append(
+                f'<tr style="background-color: #FFFFFF; color: #0F172A; font-weight: 400; '
+                f'border-top: 1px solid #6E7681; border-bottom: {b_bot};">'
+            )
+            html.append(
+                f'<td class="lbl-main" style="background-color: #{lbl_bg_hex}; font-weight: 700; color: #0F172A;" title="{c_name}">{c_name}</td>'
+            )
+
+            for p in periods:
+                if p in cum_df.columns:
+                    val_c = cum_df.loc[c_name, p]
+                    s_c = cum_df.loc[s_row_label, p] if s_row_label else np.nan
+                    pct_c = (val_c / s_c) if (s_c and not pd.isna(s_c) and s_c != 0) else np.nan
+                    val_s = fmt_num(val_c)
+                    pct_s = fmt_pct_int(pct_c)
+
+                    if is_np_cum and kpi_conditional_format:
+                        month_np_val = float(amounts_df.loc["NP", p]) if "NP" in amounts_df.index and p in amounts_df.columns else val_c
+                        np_bg = "#D4EFDF" if (month_np_val >= 0 and val_c >= 0) else "#FADBD8"
+                    else:
+                        np_bg = "#FFFFFF"
+
+                    html.append(
+                        f'<td class="val-col" style="background-color: {np_bg}; color: #0F172A; font-weight: 400;">{val_s}</td>'
+                        f'<td class="pct-col" style="background-color: {np_bg}; color: #0F172A; font-weight: 400;">{pct_s}</td>'
+                    )
+                else:
+                    last_p = cum_periods[-1] if cum_periods else None
+                    if last_p and "YTD" in str(p).upper() and "AVG" not in str(p).upper():
+                        v_ytd = cum_df.loc[c_name, last_p]
+                        if is_np_cum and kpi_conditional_format:
+                            ytd_bg = "#D4EFDF" if v_ytd >= 0 else "#FADBD8"
+                        else:
+                            ytd_bg = "#F8F9F9"
+                        html.append(
+                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: {ytd_bg}; color: #0F172A; border-left: 1px solid #6E7681; border-right: 2px solid #1F2328; font-weight: 400;">{fmt_num(v_ytd)}</td>'
+                        )
+                    elif last_p and "AVG" in str(p).upper() and len(cum_periods) > 0:
+                        v_avg = cum_df.loc[c_name, last_p] / len(cum_periods)
+                        if is_np_cum and kpi_conditional_format:
+                            avg_bg = "#D4EFDF" if v_avg >= 0 else "#FADBD8"
+                        else:
+                            avg_bg = "#F8F9F9"
+                        html.append(
+                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: {avg_bg}; color: #0F172A; border-left: 1px solid #6E7681; border-right: 2px solid #1F2328; font-weight: 400;">{fmt_num(v_avg)}</td>'
+                        )
+                    else:
+                        html.append('<td colspan="2" style="background-color: #FFFFFF; border-left: 1px solid #6E7681; border-right: 2px solid #1F2328;"></td>')
+            html.append("</tr>")
+
+        html.append("</tbody></table></div>")
+
+    return "".join(html)
+
+
+knowledge_file = None
+for fname in ["toc_knowledge.txt", "toc_knowledge.md", "knowledge.txt"]:
+    if Path(fname).exists():
+        knowledge_file = Path(fname).read_text(encoding="utf-8")
+        break
+
+S = st.session_state
+
+for c_key, (c_lbl, c_mc) in S.get("custom_subgroups", {}).items():
+    register_custom_subgroup(c_key, c_lbl, c_mc)
+
+
+# Moderns, tīrs SaaS / BI interfeisa stils bez sānjoslas
+st.markdown(
+    """
+    <style>
+    /* Paslēpjam noklusējuma sānjoslu, jo visa navigācija tagad ir augšējā rīkjoslā */
+    [data-testid="stSidebar"], [data-testid="collapsedControl"] {
+        display: none !important;
+    }
+    .block-container {
+        padding-top: 1.6rem !important;
+        padding-bottom: 2.5rem !important;
+        max-width: 97% !important;
+    }
+    h1, h2, h3, h4 {
+        font-family: 'Inter', 'Segoe UI', sans-serif !important;
+        letter-spacing: -0.3px;
+    }
+    div[data-testid="stPopoverBody"] {
+        font-size: 13px !important;
+        line-height: 1.45 !important;
+    }
+    div[data-testid="stPopoverBody"] p,
+    div[data-testid="stPopoverBody"] li,
+    div[data-testid="stPopoverBody"] span {
+        font-size: 13px !important;
+        line-height: 1.45 !important;
+    }
+    .sim-col-header-s {
+        background-color: #FFF200; color: #0F172A !important; font-weight: 700;
+        padding: 8px 12px; border-radius: 6px; margin-bottom: 10px; border-left: 5px solid #CA8A04;
+    }
+    .sim-col-header-tvc {
+        background-color: #C55A11; color: #FFFFFF !important; font-weight: 700;
+        padding: 8px 12px; border-radius: 6px; margin-bottom: 10px; border-left: 5px solid #7C2D12;
+    }
+    .sim-col-header-oe {
+        background-color: #F4B183; color: #0F172A !important; font-weight: 700;
+        padding: 8px 12px; border-radius: 6px; margin-bottom: 10px; border-left: 5px solid #C2410C;
+    }
+    .top-brand-bar {
+        display: flex; align-items: baseline; gap: 14px;
+    }
+    .top-brand-title {
+        font-size: 22px; font-weight: 800; letter-spacing: -0.5px; margin: 0;
+    }
+    .top-brand-sub {
+        font-size: 13px; opacity: 0.75;
     }
     </style>
     """,
@@ -995,33 +2415,35 @@ def parse_simulation_dialog_with_claude(user_text: str, s_rows: list[str], tvc_r
 
 # ------------------------------------------------------------------ 1. LOGIN
 if not S.get("authenticated", False):
-    col_l1, col_l2, col_l3 = st.columns([1, 1.4, 1])
+    col_l1, col_l2, col_l3 = st.columns([1.2, 1.2, 1.2])
     with col_l2:
-        st.title("TOC-FIN Vadības Sistēma")
-        st.markdown("Ievadiet piešķirto lietotājvārdu un paroli.")
+        st.write("")
+        st.write("")
+        with st.container(border=True):
+            st.subheader("TOC-FIN Vadības Sistēma")
+            st.caption("Finanšu diagnostika un vadības lēmumu pieņemšana")
+            temp_store = SupabaseProfileStore()
+            with st.form("login_form"):
+                login_company = st.text_input("Lietotājvārds / Uzņēmums")
+                login_password = st.text_input("Parole", type="password")
+                login_submitted = st.form_submit_button("Pieslēgties", type="primary", use_container_width=True)
 
-        temp_store = SupabaseProfileStore()
-        with st.form("login_form"):
-            login_company = st.text_input("Lietotājvārds / Uzņēmums")
-            login_password = st.text_input("Parole", type="password")
-            login_submitted = st.form_submit_button("Ielogoties", type="primary", use_container_width=True)
-
-            if login_submitted:
-                ok, msg, is_adm = temp_store.authenticate(login_company, login_password)
-                if ok:
-                    S.authenticated = True
-                    S.is_admin = is_adm
-                    if is_adm:
-                        S.active_profile = "admin"
-                        S.view_mode = "admin_panel"
+                if login_submitted:
+                    ok, msg, is_adm = temp_store.authenticate(login_company, login_password)
+                    if ok:
+                        S.authenticated = True
+                        S.is_admin = is_adm
+                        if is_adm:
+                            S.active_profile = "admin"
+                            S.view_mode = "admin_panel"
+                        else:
+                            S.active_profile = login_company.strip()
+                            S.view_mode = "workspace"
+                            S.nav_page = "overview"
+                            S.auto_loaded_latest = False
+                        st.rerun()
                     else:
-                        S.active_profile = login_company.strip()
-                        S.view_mode = "workspace"
-                        S.nav_page = "overview"
-                        S.auto_loaded_latest = False
-                    st.rerun()
-                else:
-                    st.error(msg)
+                        st.error(msg)
     st.stop()
 
 
@@ -1029,12 +2451,11 @@ if not S.get("authenticated", False):
 admin_store = SupabaseProfileStore()
 
 if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
-    top_a1, top_a2 = st.columns([5, 1])
+    top_a1, top_a2 = st.columns([5, 1], vertical_alignment="center")
     with top_a1:
         st.title("Administratora vadības panelis")
-        st.caption("Klientu profili, paroles, limiti un Claude API tokenu / izmaksu uzskaite.")
+        st.caption("Klientu profili, paroles, limiti un API resursu uzskaite.")
     with top_a2:
-        st.write("")
         if st.button("Iziet", use_container_width=True):
             S.clear()
             st.rerun()
@@ -1122,13 +2543,14 @@ if "fy_start_day" not in S:
     S.fy_start_day = 1
 if "nav_page" not in S:
     S.nav_page = "overview"
+if "hide_top_toolbar" not in S:
+    S.hide_top_toolbar = False
 
 all_saved_items = profile.list_reports()
 fin_reports = [r for r in all_saved_items if not str(r.get("file_name", "")).startswith("SIM::")]
 sim_reports = [r for r in all_saved_items if str(r.get("file_name", "")).startswith("SIM::")]
 saved_acc_count = profile.count_saved()
 
-# Automātiski ielādējam jaunāko finanšu atskaiti, kad lietotājs ienāk profilā
 if not S.get("auto_loaded_latest", False):
     S.auto_loaded_latest = True
     if "result" not in S and fin_reports:
@@ -1152,55 +2574,39 @@ if not S.get("auto_loaded_latest", False):
                 S.pop("commentary", None)
 
 
-# ------------------------------------------------------------------ 4. KREISĀ NAVIGĀCIJAS RĪKJOSLA
+# ------------------------------------------------------------------ 4. AUGŠĒJĀ VADĪBAS UN NAVIGĀCIJAS RĪKJOSLA (NOSLĒPJAMA)
+# Bez cipariem iekavās un vienmēr redzama augšpusē (ar iespēju paslēpt)
 NAV_ITEMS = {
-    "overview": "📊 Pārskats (Overview)",
-    "simulation": "🎯 Scenāriju simulācija",
-    "archive": f"🗂️ Atskaites un Simulācijas ({len(fin_reports) + len(sim_reports)})",
-    "ingest": "📥 Jauns PZA / Klasifikācija",
-    "settings": f"⚙️ Profils un Uzstādījumi ({saved_acc_count})",
+    "overview": "Pārskats",
+    "simulation": "Scenāriju simulācija",
+    "archive": "Atskaites un Simulācijas",
+    "ingest": "Jauns PZA / Klasifikācija",
+    "settings": "Profils un Uzstādījumi",
 }
 
-with st.sidebar:
-    st.markdown(f"### 🏢 {S.active_profile}")
-    if S.get("loaded_report_meta"):
-        st.caption(f"Aktīvā atskaite: **{S.loaded_report_meta.get('report_name')}**")
-    elif "result" in S:
-        st.caption("Aktīvā atskaite: **Jauns aprēķins**")
-    else:
-        st.caption("Aktīvā atskaite: *Nav izvēlēta*")
+active_rep_label = (
+    S.loaded_report_meta.get("report_name")
+    if S.get("loaded_report_meta")
+    else ("Jauns aprēķins" if "result" in S else "Nav izvēlēta")
+)
 
-    st.markdown("---")
-    nav_keys = list(NAV_ITEMS.keys())
-    current_nav_idx = nav_keys.index(S.nav_page) if S.nav_page in nav_keys else 0
-    selected_nav_key = st.radio(
-        "Navigācija",
-        options=nav_keys,
-        index=current_nav_idx,
-        format_func=lambda k: NAV_ITEMS[k],
-        label_visibility="collapsed",
+hdr_left, hdr_mid, hdr_right = st.columns([3.4, 0.9, 0.9], vertical_alignment="center")
+with hdr_left:
+    st.markdown(
+        f'<div class="top-brand-bar">'
+        f'<span class="top-brand-title">TOC-FIN</span>'
+        f'<span class="top-brand-sub">Profils: <b>{S.active_profile}</b> &nbsp;|&nbsp; Atskaite: <b>{active_rep_label}</b></span>'
+        f'</div>',
+        unsafe_allow_html=True,
     )
-    if selected_nav_key != S.nav_page:
-        S.nav_page = selected_nav_key
+with hdr_mid:
+    toggle_lbl = "▼ Rādīt rīkjoslu" if S.hide_top_toolbar else "▲ Paslēpt rīkjoslu"
+    if st.button(toggle_lbl, use_container_width=True):
+        S.hide_top_toolbar = not S.hide_top_toolbar
         st.rerun()
-
-    st.markdown("---")
-    if S.get("is_admin", False):
-        if st.button("← Uz Admin paneli", use_container_width=True):
-            S.view_mode = "admin_panel"
-            st.rerun()
-    if st.button("Iziet no sistēmas", use_container_width=True):
-        S.clear()
-        st.rerun()
-
-
-# ------------------------------------------------------------------ 5. AUGŠĒJĀ JOSLA UN ASISTENTS (PIEЕJAMS VISOS POSMOS)
-top_col1, top_col2 = st.columns([5, 1], vertical_alignment="center")
-with top_col1:
-    st.title("TOC-FIN Vadības Sistēma")
-with top_col2:
-    with st.popover("💬 Asistents", use_container_width=True):
-        st.caption("TOC-FIN Čats (pieejams visos posmos)")
+with hdr_right:
+    with st.popover("Asistents", use_container_width=True):
+        st.caption("TOC-FIN Asistents (pieejams visos posmos)")
         if "global_chat" not in S:
             S.global_chat = []
 
@@ -1233,31 +2639,40 @@ with top_col2:
                 S.global_chat = []
                 st.rerun()
 
+if not S.hide_top_toolbar:
+    with st.container(border=True):
+        nav_cols = st.columns([1.1, 1.3, 1.4, 1.4, 1.3, 0.8] if not S.get("is_admin") else [1.0, 1.2, 1.3, 1.3, 1.2, 0.7, 0.6])
+        for idx_n, (n_key, n_label) in enumerate(NAV_ITEMS.items()):
+            btn_type = "primary" if S.nav_page == n_key else "secondary"
+            if nav_cols[idx_n].button(n_label, key=f"top_nav_{n_key}", type=btn_type, use_container_width=True):
+                S.nav_page = n_key
+                st.rerun()
+
+        if S.get("is_admin", False):
+            if nav_cols[5].button("Admin", use_container_width=True):
+                S.view_mode = "admin_panel"
+                st.rerun()
+            if nav_cols[6].button("Iziet", use_container_width=True):
+                S.clear()
+                st.rerun()
+        else:
+            if nav_cols[5].button("Iziet", use_container_width=True):
+                S.clear()
+                st.rerun()
+
 
 # ==============================================================================
-# POSMS 1: 📊 PĀRSKATS (OVERVIEW)
+# POSMS 1: PĀRSKATS (OVERVIEW)
 # ==============================================================================
 if S.nav_page == "overview":
     if "result" not in S or S.result is None:
-        st.info("Šajā profilā vēl nav nevienas saglabātas atskaites. Pārejiet uz sadaļu **📥 Jauns PZA / Klasifikācija**, lai augšupielādētu pirmo PZA failu.")
+        st.info("Šajā profilā vēl nav nevienas saglabātas atskaites. Pārejiet uz sadaļu **Jauns PZA / Klasifikācija**, lai augšupielādētu pirmo PZA failu.")
         if st.button("Doties uz PZA faila augšupielādi →", type="primary"):
             S.nav_page = "ingest"
             st.rerun()
         st.stop()
 
     res = strip_excluded_rows(S.result)
-    meta = S.get("loaded_report_meta")
-    rep_title = f"{meta.get('report_name')} ({meta.get('periods_label')})" if meta else "Aktīvais finanšu pārskats"
-
-    ov_h1, ov_h2 = st.columns([3, 1], vertical_alignment="center")
-    with ov_h1:
-        st.header("Finanšu pārskats (Overview)")
-        st.caption(f"Atskaite: **{rep_title}**")
-    with ov_h2:
-        if st.button("🎯 Doties uz šī pārskata simulāciju →", use_container_width=True):
-            S.nav_page = "simulation"
-            st.rerun()
-
     all_months = [c for c in res.amounts.columns if not ("YTD" in c or "AVG" in c)]
     if not all_months:
         all_months = list(res.amounts.columns)
@@ -1355,7 +2770,8 @@ if S.nav_page == "overview":
         unsafe_allow_html=True,
     )
 
-    render_toc_lines_chart(view_res.amounts, fy_start_month=S.get("fy_start_month", 1))
+    # Trīs vizuālie grafiki (S/TVC/T/OE/NP, Produktivitāte ar trendu un Eiro Sales/Eiro algas ar trendu)
+    render_overview_charts(view_res.amounts, view_res.kpi, fy_start_month=S.get("fy_start_month", 1))
 
     if getattr(res, "reconciliation", None) is not None and not res.reconciliation.empty:
         with st.expander("Kontrole: Salīdzinājums ar PZA"):
@@ -1366,7 +2782,7 @@ if S.nav_page == "overview":
     with rec_c1:
         st.subheader(f"Vadības kopsavilkums un ieteikumi ({len(fin_selected_months)} mēn. periodam)")
     with rec_c2:
-        regen_btn = st.button("Pieprasīt / atjaunot ieteikumus par izvēlēto periodu", type="primary", use_container_width=True)
+        regen_btn = st.button("Pieprasīt ieteikumus par periodu", type="primary", use_container_width=True)
 
     cum_df_md, _, _ = compute_cumulative_toc_df(view_res.amounts, fy_start_month=S.get("fy_start_month", 1))
     tables_md = (
@@ -1401,16 +2817,17 @@ if S.nav_page == "overview":
             st.rerun()
 
     if S.get("commentary"):
-        st.markdown(S.commentary)
+        with st.container(border=True):
+            st.markdown(S.commentary)
     else:
-        st.caption("Nospiediet pogu **Pieprasīt / atjaunot ieteikumus par izvēlēto periodu**, lai saņemtu AI diagnostiku.")
+        st.caption("Nospiediet pogu **Pieprasīt ieteikumus par periodu**, lai saņemtu AI diagnostiku.")
 
 
 # ==============================================================================
-# POSMS 2: 🎯 SCENĀRIJU SIMULĀCIJA
+# POSMS 2: SCENĀRIJU SIMULĀCIJA
 # ==============================================================================
 elif S.nav_page == "simulation":
-    st.header("Scenāriju simulācija un Jauns projekts")
+    st.subheader("Scenāriju simulācija un Jauns projekts")
     if "result" not in S or S.result is None:
         st.info("Vispirms ielādējiet vai izveidojiet finanšu atskaiti, lai veiktu simulāciju.")
         st.stop()
@@ -1746,20 +3163,20 @@ elif S.nav_page == "simulation":
 
 
 # ==============================================================================
-# POSMS 3: 🗂️ ATSKAITES UN SIMULĀCIJAS (ARHĪVS)
+# POSMS 3: ATSKAITES UN SIMULĀCIJAS (ARHĪVS)
 # ==============================================================================
 elif S.nav_page == "archive":
-    st.header("Saglabātās atskaites un simulācijas")
+    st.subheader("Saglabātās atskaites un simulācijas")
     st.caption("Šeit varat pārskatīt, atvērt vai dzēst iepriekš saglabātās finanšu atskaites un scenāriju simulācijas.")
 
     arch_col1, arch_col2 = st.columns(2)
 
     with arch_col1:
-        st.subheader(f"📊 Finanšu atskaites ({len(fin_reports)})")
+        st.markdown("#### Finanšu atskaites")
         if not fin_reports:
             st.info("Nav saglabātu finanšu atskaišu.")
         else:
-            for idx_r, rep in enumerate(fin_reports):
+            for rep in fin_reports:
                 rid = rep["id"]
                 is_current = S.get("current_report_id") == rid
                 with st.container(border=True):
@@ -1814,11 +3231,11 @@ elif S.nav_page == "archive":
                                 st.rerun()
 
     with arch_col2:
-        st.subheader(f"🎯 Saglabātās simulācijas ({len(sim_reports)})")
+        st.markdown("#### Saglabātās simulācijas")
         if not sim_reports:
             st.info("Nav saglabātu simulāciju.")
         else:
-            for idx_s, srep in enumerate(sim_reports):
+            for srep in sim_reports:
                 sid = srep["id"]
                 with st.container(border=True):
                     sc1, sc2, sc3 = st.columns([2.2, 1, 0.8], vertical_alignment="center")
@@ -1877,10 +3294,10 @@ elif S.nav_page == "archive":
 
 
 # ==============================================================================
-# POSMS 4: 📥 JAUNS PZA / KONTU KLASIFIKĀCIJA
+# POSMS 4: JAUNS PZA / KONTU KLASIFIKĀCIJA
 # ==============================================================================
 elif S.nav_page == "ingest":
-    st.header("Jauna PZA faila ielasīšana un kontu klasifikācija")
+    st.subheader("Jauna PZA faila ielasīšana un kontu klasifikācija")
     uploaded = st.file_uploader("Augšupielādējiet PZA failu (CSV vai Excel)", type=["csv", "xlsx", "xlsm", "xls"])
 
     if uploaded is None:
@@ -1974,7 +3391,7 @@ elif S.nav_page == "ingest":
             S.pop("cls_df", None)
             st.rerun()
 
-    st.subheader("1. Kontu klasifikācija")
+    st.markdown("#### 1. Kontu klasifikācija")
 
     col_ig1, col_ig2 = st.columns([3, 1], vertical_alignment="center")
     with col_ig1:
@@ -2075,7 +3492,7 @@ elif S.nav_page == "ingest":
 
     hdr_col1, hdr_col2 = st.columns([4, 1], vertical_alignment="bottom")
     with hdr_col1:
-        st.subheader("Kontu sadalījums")
+        st.markdown("#### Kontu sadalījums")
     with hdr_col2:
         if st.button("Sakārtot tabulu", use_container_width=True):
             S.cls_df = sort_cls_df(cls_df)
@@ -2162,7 +3579,7 @@ elif S.nav_page == "ingest":
         S.editor_v = S.get("editor_v", 0) + 1
         st.rerun()
 
-    st.subheader("2. Aprēķins un saglabāšana")
+    st.markdown("#### 2. Aprēķins un saglabāšana")
 
     default_rep_name = f"{Path(uploaded.name).stem} ({datetime.now().strftime('%d.%m.%Y')})"
     col_rn, col_btn = st.columns([2, 1], vertical_alignment="bottom")
@@ -2213,185 +3630,218 @@ elif S.nav_page == "ingest":
 
 
 # ==============================================================================
-# POSMS 5: ⚙️ PROFILS UN UZSTĀDĪJUMI
+# POSMS 5: PROFILS UN UZSTĀDĪJUMI (VERTIKĀLI UN SKAIDRI NODALĪTS)
 # ==============================================================================
 elif S.nav_page == "settings":
-    st.header(f"Profils un Uzstādījumi ({S.active_profile})")
+    st.subheader(f"Profils un Uzstādījumi ({S.active_profile})")
 
-    set_col1, set_col2 = st.columns([1.2, 1.8])
-    with set_col1:
-        with st.container(border=True):
-            st.subheader("Finanšu gada sākums")
-            st.caption("Nosaka, kurā datumā uzkrājošie rādītāji sāk jaunu finanšu gadu.")
-            fy_c1, fy_c2 = st.columns([1, 1.6])
-            with fy_c1:
-                selected_fy_day = st.selectbox(
-                    "Diena",
-                    options=list(range(1, 32)),
-                    index=int(S.get("fy_start_day", 1)) - 1,
-                )
-            with fy_c2:
-                selected_fy_month = st.selectbox(
-                    "Mēnesis",
-                    options=list(MONTH_NAMES_LV.keys()),
-                    format_func=lambda m: MONTH_NAMES_LV[m],
-                    index=list(MONTH_NAMES_LV.keys()).index(S.get("fy_start_month", 1)),
-                )
-            S.fy_start_day = selected_fy_day
-            S.fy_start_month = selected_fy_month
+    # 1. PROFILA INFORMĀCIJA
+    with st.container(border=True):
+        st.markdown("#### 1. Profila informācija")
+        ok_q, q_info = profile.check_quota()
+        pi1, pi2, pi3, pi4, pi5 = st.columns(5)
+        pi1.metric("Uzņēmums / Profils", S.active_profile)
+        pi2.metric("Saglabātie konti", saved_acc_count)
+        pi3.metric("Finanšu atskaites", len(fin_reports))
+        pi4.metric("Saglabātās simulācijas", len(sim_reports))
+        pi5.metric("Mēneša kvota", q_info or "—")
 
-        with st.container(border=True):
-            st.subheader("Profila informācija")
-            ok_q, q_info = profile.check_quota()
-            st.write(f"**Uzņēmums / Profils:** {S.active_profile}")
-            st.write(f"**Saglabātie konti atmiņā:** {saved_acc_count}")
-            st.write(f"**Saglabātās atskaites:** {len(fin_reports)}")
-            st.write(f"**Saglabātās simulācijas:** {len(sim_reports)}")
-            if q_info:
-                st.write(f"**Mēneša kvota:** {q_info}")
+    # 2. FINANŠU GADA SĀKUMS (ZEM PROFILA INFORMĀCIJAS)
+    with st.container(border=True):
+        st.markdown("#### 2. Finanšu gada sākums")
+        st.caption("Nosaka, kurā datumā uzkrājošie rādītāji sāk jaunu finanšu gadu.")
+        fy_c1, fy_c2, _ = st.columns([1, 1.5, 2.5])
+        with fy_c1:
+            selected_fy_day = st.selectbox(
+                "Diena",
+                options=list(range(1, 32)),
+                index=int(S.get("fy_start_day", 1)) - 1,
+            )
+        with fy_c2:
+            selected_fy_month = st.selectbox(
+                "Mēnesis",
+                options=list(MONTH_NAMES_LV.keys()),
+                format_func=lambda m: MONTH_NAMES_LV[m],
+                index=list(MONTH_NAMES_LV.keys()).index(S.get("fy_start_month", 1)),
+            )
+        S.fy_start_day = selected_fy_day
+        S.fy_start_month = selected_fy_month
 
-    with set_col2:
-        with st.container(border=True):
-            st.subheader("Pievienot jaunu apakšgrupu")
-            st.caption("Izveidojiet papildu izmaksu vai ieņēmumu rindu (piem., Pārējās administrācijas izmaksas).")
-            ns1, ns2, ns3 = st.columns([2, 1.5, 1], vertical_alignment="bottom")
-            with ns1:
-                custom_sub_lbl = st.text_input("Jaunās apakšgrupas nosaukums", placeholder="piem., Pārējās administrācijas izmaksas", key="ed_new_sub_lbl")
-            with ns2:
-                custom_sub_main = st.selectbox("Lielā grupa", options=["Uzturēšanas izmaksas (OE)", "TVC (Mainīgās izmaksas)", "S (Ieņēmumi)"], key="ed_new_sub_main")
-            with ns3:
-                if st.button("Pievienot", use_container_width=True, key="ed_btn_add_sub"):
-                    if custom_sub_lbl.strip():
-                        m_c = "S" if custom_sub_main.startswith("S") else ("TVC" if custom_sub_main.startswith("TVC") else "OE")
-                        new_k = f"{m_c}_CUSTOM_{hashlib.md5(custom_sub_lbl.strip().encode()).hexdigest()[:6].upper()}"
-                        S.setdefault("custom_subgroups", {})[new_k] = (custom_sub_lbl.strip(), m_c)
-                        register_custom_subgroup(new_k, custom_sub_lbl.strip(), m_c)
-                        st.toast(f"Apakšgrupa '{custom_sub_lbl.strip()}' pievienota.")
-                        st.rerun()
+    # 3. PAROLES MAIŅA
+    with st.container(border=True):
+        st.markdown("#### 3. Paroles maiņa")
+        st.caption("Nomainiet piekļuves paroli šim uzņēmuma profilam.")
+        pw_c1, pw_c2, pw_c3 = st.columns([1.5, 1.5, 1], vertical_alignment="bottom")
+        with pw_c1:
+            new_pw1 = st.text_input("Jaunā parole", type="password", key="set_new_pw1")
+        with pw_c2:
+            new_pw2 = st.text_input("Jaunā parole atkārtoti", type="password", key="set_new_pw2")
+        with pw_c3:
+            if st.button("Saglabāt jaunu paroli", use_container_width=True):
+                if not new_pw1.strip():
+                    st.warning("Ievadiet jauno paroli.")
+                elif new_pw1 != new_pw2:
+                    st.error("Paroles nesakrīt.")
+                else:
+                    # Saglabājam esošo limitu un nomainām paroli
+                    all_c = admin_store.list_all_companies_admin()
+                    cur_c = next((c for c in all_c if c["company_name"] == S.active_profile), {})
+                    cur_lim = int(cur_c.get("monthly_limit", 50))
+                    cur_notes = str(cur_c.get("notes", ""))
+                    ok_pw, msg_pw = admin_store.create_or_update_company_admin(
+                        company_name=S.active_profile,
+                        password=new_pw1.strip(),
+                        monthly_limit=cur_lim,
+                        is_active=True,
+                        notes=cur_notes,
+                        reset_usage=False,
+                    )
+                    if ok_pw:
+                        st.success("Parole veiksmīgi nomainīta!")
+                    else:
+                        st.error(msg_pw)
 
-    st.markdown("---")
-    st.subheader("Saglabāto kontu klasifikācija")
+    # 4. PIEVIENOT JAUNU APAKŠGRUPU (ZEMĀK KĀ ATSEVIŠĶS POSMS)
+    with st.container(border=True):
+        st.markdown("#### 4. Pievienot jaunu apakšgrupu")
+        st.caption("Izveidojiet papildu izmaksu vai ieņēmumu rindu (piem., Pārējās administrācijas izmaksas, Pārējās pārdošanas izmaksas).")
+        ns1, ns2, ns3 = st.columns([2, 1.5, 1], vertical_alignment="bottom")
+        with ns1:
+            custom_sub_lbl = st.text_input("Jaunās apakšgrupas nosaukums", placeholder="piem., Pārējās administrācijas izmaksas", key="ed_new_sub_lbl")
+        with ns2:
+            custom_sub_main = st.selectbox("Lielā grupa", options=["Uzturēšanas izmaksas (OE)", "TVC (Mainīgās izmaksas)", "S (Ieņēmumi)"], key="ed_new_sub_main")
+        with ns3:
+            if st.button("Pievienot apakšgrupu", use_container_width=True, key="ed_btn_add_sub"):
+                if custom_sub_lbl.strip():
+                    m_c = "S" if custom_sub_main.startswith("S") else ("TVC" if custom_sub_main.startswith("TVC") else "OE")
+                    new_k = f"{m_c}_CUSTOM_{hashlib.md5(custom_sub_lbl.strip().encode()).hexdigest()[:6].upper()}"
+                    S.setdefault("custom_subgroups", {})[new_k] = (custom_sub_lbl.strip(), m_c)
+                    register_custom_subgroup(new_k, custom_sub_lbl.strip(), m_c)
+                    st.toast(f"Apakšgrupa '{custom_sub_lbl.strip()}' pievienota.")
+                    st.rerun()
 
-    if "cls_df" in S and S.cls_df is not None and "analysis" in S and S.analysis is not None:
-        cls_df_edit: pd.DataFrame = S.cls_df.copy()
-        cls_df_edit["Grupa"] = cls_df_edit["Grupa"].map(normalize_group_key)
+    # 5. SAGLABĀTO KONTU KLASIFIKĀCIJA (NOSLĒPJAMA ZEM ATSEVIŠĶA SOĻA)
+    with st.expander("5. Saglabāto kontu klasifikācija (atvērt, lai rediģētu kontus)", expanded=False):
+        if "cls_df" in S and S.cls_df is not None and "analysis" in S and S.analysis is not None:
+            cls_df_edit: pd.DataFrame = S.cls_df.copy()
+            cls_df_edit["Grupa"] = cls_df_edit["Grupa"].map(normalize_group_key)
 
-        ed_view_df = pd.DataFrame(
-            {
-                "Konts": cls_df_edit["Displeja_konts"].tolist(),
-                "Lielā grupa": [get_main_cat(g) for g in cls_df_edit["Grupa"]],
-                "Apakšgrupa (Rinda atskaitē)": [SUBGROUP_LABELS[normalize_group_key(g)] for g in cls_df_edit["Grupa"]],
-            }
-        )
-        ed_h = min((len(ed_view_df) + 1) * 36 + 14, 750)
-        edited_ses = st.data_editor(
-            ed_view_df,
-            hide_index=True,
-            use_container_width=True,
-            height=ed_h,
-            disabled=["Konts"],
-            key=f"direct_ses_editor_{S.get('editor_v', 0)}",
-            column_config={
-                "Konts": st.column_config.TextColumn("Konta nosaukums", width="large"),
-                "Lielā grupa": st.column_config.SelectboxColumn("Lielā grupa", options=MAIN_GROUP_OPTIONS, required=True, width="medium"),
-                "Apakšgrupa (Rinda atskaitē)": st.column_config.SelectboxColumn("Apakšgrupa / Rinda atskaitē", options=list(SUBGROUP_LABELS.values()), required=True, width="large"),
-            },
-        )
-
-        new_grps = []
-        ch_flag = False
-        for idx_p in range(len(cls_df_edit)):
-            o_g = normalize_group_key(cls_df_edit.iloc[idx_p]["Grupa"])
-            o_m = get_main_cat(o_g)
-            o_s = SUBGROUP_LABELS[o_g]
-            n_m = edited_ses.iloc[idx_p]["Lielā grupa"]
-            n_s = edited_ses.iloc[idx_p]["Apakšgrupa (Rinda atskaitē)"]
-            if n_s != o_s and n_s in LABEL_TO_KEY:
-                new_grps.append(LABEL_TO_KEY[n_s])
-                ch_flag = True
-            elif n_m != o_m:
-                new_grps.append(
-                    "S_REV" if n_m.startswith("S") else ("TVC_MATERIALS" if n_m.startswith("TVC") else ("EXCLUDED" if n_m.startswith("Izslēgt") else "OE_OTHER"))
-                )
-                ch_flag = True
-            else:
-                new_grps.append(o_g)
-
-        if ch_flag:
-            cls_df_edit["Grupa"] = new_grps
-            cls_df_edit["Ieņēmums"] = cls_df_edit["Grupa"].str.startswith("S_")
-            S.cls_df = cls_df_edit
-            S.editor_v = S.get("editor_v", 0) + 1
-            st.rerun()
-
-        if st.button("Saglabāt izmaiņas un pārrēķināt aktīvo pārskatu", type="primary"):
-            an = S.analysis
-            stc = S.structure
-            cls_sorted = sort_cls_df(S.cls_df)
-            S.cls_df = cls_sorted
-            mapping = {
-                r["id"]: {
-                    "group": normalize_group_key(r["Grupa"]),
-                    "is_income": bool(str(r["Grupa"]).startswith("S_")),
-                }
-                for _, r in cls_sorted.iterrows()
-            }
-            pos = next((l.pos for l in an.ex.lines if l.row == stc.result_row), None)
-            reported = an.ex.lines[pos].vals if pos is not None else None
-            S.result = compute_toc_with_dynamic_subgroups(an.leaves, mapping, an.ex.period_cols, reported)
-            profile.save(an.leaves, mapping)
-            st.toast("Konti atjaunināti un tabula pārrēķināta.")
-            S.nav_page = "overview"
-            st.rerun()
-    else:
-        saved_maps = profile.list_saved_mappings()
-        if not saved_maps:
-            st.info("Nav saglabātu kontu.")
-        else:
-            db_df = pd.DataFrame(saved_maps)
-            db_df["toc_group"] = db_df["toc_group"].map(normalize_group_key)
-            db_view = pd.DataFrame(
+            ed_view_df = pd.DataFrame(
                 {
-                    "id": db_df["id"],
-                    "Sadaļa": db_df["path_label"],
-                    "Konts": db_df["account_label"],
-                    "Lielā grupa": [get_main_cat(g) for g in db_df["toc_group"]],
-                    "Apakšgrupa (Rinda atskaitē)": [SUBGROUP_LABELS[normalize_group_key(g)] for g in db_df["toc_group"]],
+                    "Konts": cls_df_edit["Displeja_konts"].tolist(),
+                    "Lielā grupa": [get_main_cat(g) for g in cls_df_edit["Grupa"]],
+                    "Apakšgrupa (Rinda atskaitē)": [SUBGROUP_LABELS[normalize_group_key(g)] for g in cls_df_edit["Grupa"]],
                 }
             )
-            db_h = min((len(db_view) + 1) * 36 + 14, 750)
-            edited_db = st.data_editor(
-                db_view,
+            ed_h = min((len(ed_view_df) + 1) * 36 + 14, 750)
+            edited_ses = st.data_editor(
+                ed_view_df,
                 hide_index=True,
                 use_container_width=True,
-                height=db_h,
-                disabled=["id", "Sadaļa", "Konts"],
-                key="db_mappings_editor",
+                height=ed_h,
+                disabled=["Konts"],
+                key=f"direct_ses_editor_{S.get('editor_v', 0)}",
                 column_config={
-                    "id": None,
-                    "Sadaļa": st.column_config.TextColumn("Sadaļa", width="medium"),
                     "Konts": st.column_config.TextColumn("Konta nosaukums", width="large"),
                     "Lielā grupa": st.column_config.SelectboxColumn("Lielā grupa", options=MAIN_GROUP_OPTIONS, required=True, width="medium"),
-                    "Apakšgrupa (Rinda atskaitē)": st.column_config.SelectboxColumn("Apakšgrupa", options=list(SUBGROUP_LABELS.values()), required=True, width="large"),
+                    "Apakšgrupa (Rinda atskaitē)": st.column_config.SelectboxColumn("Apakšgrupa / Rinda atskaitē", options=list(SUBGROUP_LABELS.values()), required=True, width="large"),
                 },
             )
-            if st.button("Saglabāt kontu izmaiņas datubāzē", type="primary"):
-                updates_to_save = []
-                for idx_r in range(len(db_df)):
-                    orig_g = normalize_group_key(db_df.iloc[idx_r]["toc_group"])
-                    orig_m = get_main_cat(orig_g)
-                    orig_s = SUBGROUP_LABELS[orig_g]
-                    new_m = edited_db.iloc[idx_r]["Lielā grupa"]
-                    new_s = edited_db.iloc[idx_r]["Apakšgrupa (Rinda atskaitē)"]
-                    if new_s != orig_s and new_s in LABEL_TO_KEY:
-                        final_g = LABEL_TO_KEY[new_s]
-                    elif new_m != orig_m:
-                        final_g = "S_REV" if new_m.startswith("S") else ("TVC_MATERIALS" if new_m.startswith("TVC") else ("EXCLUDED" if new_m.startswith("Izslēgt") else "OE_OTHER"))
-                    else:
-                        final_g = orig_g
-                    updates_to_save.append({"id": int(db_df.iloc[idx_r]["id"]), "toc_group": final_g})
-                if profile.update_saved_mappings_direct(updates_to_save):
-                    st.success("Klasifikācija saglabāta.")
-                    st.rerun()
+
+            new_grps = []
+            ch_flag = False
+            for idx_p in range(len(cls_df_edit)):
+                o_g = normalize_group_key(cls_df_edit.iloc[idx_p]["Grupa"])
+                o_m = get_main_cat(o_g)
+                o_s = SUBGROUP_LABELS[o_g]
+                n_m = edited_ses.iloc[idx_p]["Lielā grupa"]
+                n_s = edited_ses.iloc[idx_p]["Apakšgrupa (Rinda atskaitē)"]
+                if n_s != o_s and n_s in LABEL_TO_KEY:
+                    new_grps.append(LABEL_TO_KEY[n_s])
+                    ch_flag = True
+                elif n_m != o_m:
+                    new_grps.append(
+                        "S_REV" if n_m.startswith("S") else ("TVC_MATERIALS" if n_m.startswith("TVC") else ("EXCLUDED" if n_m.startswith("Izslēgt") else "OE_OTHER"))
+                    )
+                    ch_flag = True
                 else:
-                    st.error(f"Kļūda: {profile.last_error}")
+                    new_grps.append(o_g)
+
+            if ch_flag:
+                cls_df_edit["Grupa"] = new_grps
+                cls_df_edit["Ieņēmums"] = cls_df_edit["Grupa"].str.startswith("S_")
+                S.cls_df = cls_df_edit
+                S.editor_v = S.get("editor_v", 0) + 1
+                st.rerun()
+
+            if st.button("Saglabāt izmaiņas un pārrēķināt aktīvo pārskatu", type="primary"):
+                an = S.analysis
+                stc = S.structure
+                cls_sorted = sort_cls_df(S.cls_df)
+                S.cls_df = cls_sorted
+                mapping = {
+                    r["id"]: {
+                        "group": normalize_group_key(r["Grupa"]),
+                        "is_income": bool(str(r["Grupa"]).startswith("S_")),
+                    }
+                    for _, r in cls_sorted.iterrows()
+                }
+                pos = next((l.pos for l in an.ex.lines if l.row == stc.result_row), None)
+                reported = an.ex.lines[pos].vals if pos is not None else None
+                S.result = compute_toc_with_dynamic_subgroups(an.leaves, mapping, an.ex.period_cols, reported)
+                profile.save(an.leaves, mapping)
+                st.toast("Konti atjaunināti un tabula pārrēķināta.")
+                S.nav_page = "overview"
+                st.rerun()
+        else:
+            saved_maps = profile.list_saved_mappings()
+            if not saved_maps:
+                st.info("Nav saglabātu kontu.")
+            else:
+                db_df = pd.DataFrame(saved_maps)
+                db_df["toc_group"] = db_df["toc_group"].map(normalize_group_key)
+                db_view = pd.DataFrame(
+                    {
+                        "id": db_df["id"],
+                        "Sadaļa": db_df["path_label"],
+                        "Konts": db_df["account_label"],
+                        "Lielā grupa": [get_main_cat(g) for g in db_df["toc_group"]],
+                        "Apakšgrupa (Rinda atskaitē)": [SUBGROUP_LABELS[normalize_group_key(g)] for g in db_df["toc_group"]],
+                    }
+                )
+                db_h = min((len(db_view) + 1) * 36 + 14, 750)
+                edited_db = st.data_editor(
+                    db_view,
+                    hide_index=True,
+                    use_container_width=True,
+                    height=db_h,
+                    disabled=["id", "Sadaļa", "Konts"],
+                    key="db_mappings_editor",
+                    column_config={
+                        "id": None,
+                        "Sadaļa": st.column_config.TextColumn("Sadaļa", width="medium"),
+                        "Konts": st.column_config.TextColumn("Konta nosaukums", width="large"),
+                        "Lielā grupa": st.column_config.SelectboxColumn("Lielā grupa", options=MAIN_GROUP_OPTIONS, required=True, width="medium"),
+                        "Apakšgrupa (Rinda atskaitē)": st.column_config.SelectboxColumn("Apakšgrupa", options=list(SUBGROUP_LABELS.values()), required=True, width="large"),
+                    },
+                )
+                if st.button("Saglabāt kontu izmaiņas datubāzē", type="primary"):
+                    updates_to_save = []
+                    for idx_r in range(len(db_df)):
+                        orig_g = normalize_group_key(db_df.iloc[idx_r]["toc_group"])
+                        orig_m = get_main_cat(orig_g)
+                        orig_s = SUBGROUP_LABELS[orig_g]
+                        new_m = edited_db.iloc[idx_r]["Lielā grupa"]
+                        new_s = edited_db.iloc[idx_r]["Apakšgrupa (Rinda atskaitē)"]
+                        if new_s != orig_s and new_s in LABEL_TO_KEY:
+                            final_g = LABEL_TO_KEY[new_s]
+                        elif new_m != orig_m:
+                            final_g = "S_REV" if new_m.startswith("S") else ("TVC_MATERIALS" if new_m.startswith("TVC") else ("EXCLUDED" if new_m.startswith("Izslēgt") else "OE_OTHER"))
+                        else:
+                            final_g = orig_g
+                        updates_to_save.append({"id": int(db_df.iloc[idx_r]["id"]), "toc_group": final_g})
+                    if profile.update_saved_mappings_direct(updates_to_save):
+                        st.success("Klasifikācija saglabāta.")
+                        st.rerun()
+                    else:
+                        st.error(f"Kļūda: {profile.last_error}")
