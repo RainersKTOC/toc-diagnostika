@@ -1412,7 +1412,7 @@ with st.container():
 
     if S.hide_top_toolbar:
         # Kad rīkjosla paslēpta -> rādām tikai Asistentu un mazu bultiņu ▼ rīkjoslas atvēršanai
-         _, col_asist, col_arr = st.columns([6.2, 1.0, 0.35], vertical_alignment="center")
+        _, col_asist, col_arr = st.columns([6.2, 1.0, 0.35], vertical_alignment="center")
         with col_asist:
             with st.popover("Asistents", use_container_width=True):
                 st.caption("TOC-FIN Asistents")
