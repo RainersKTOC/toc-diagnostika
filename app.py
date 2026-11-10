@@ -3102,10 +3102,11 @@ elif S.nav_page == "settings":
             custom_sub_main = st.selectbox("Lielā grupa", options=["Uzturēšanas izmaksas (OE)", "TVC (Mainīgās izmaksas)", "S (Ieņēmumi)"], key="ed_new_sub_main")
         with ns3:
             if st.button("Pievienot apakšgrupu", use_container_width=True, key="ed_btn_add_sub"):
-                ifCustom := custom_sub_lbl.strip():
+                if custom_sub_lbl.strip():
+                    clean_lbl = custom_sub_lbl.strip()
                     m_c = "S" if custom_sub_main.startswith("S") else ("TVC" if custom_sub_main.startswith("TVC") else "OE")
-                    new_k = f"{m_c}_CUSTOM_{hashlib.md5(ifCustom.encode()).hexdigest()[:6].upper()}"
-                    S.setdefault("custom_subgroups", {})[new_k] = (ifCustom, m_c)
-                    register_custom_subgroup(new_k, ifCustom, m_c)
-                    st.toast(f"Apakšgrupa '{ifCustom}' pievienota.")
+                    new_k = f"{m_c}_CUSTOM_{hashlib.md5(clean_lbl.encode()).hexdigest()[:6].upper()}"
+                    S.setdefault("custom_subgroups", {})[new_k] = (clean_lbl, m_c)
+                    register_custom_subgroup(new_k, clean_lbl, m_c)
+                    st.toast(f"Apakšgrupa '{clean_lbl}' pievienota.")
                     st.rerun()
