@@ -1,5 +1,5 @@
 """
-toc_ingest.py  —  PZA failu ielasīšana (1.–3. solis) (v25.0 pilnā versija)
+toc_ingest.py  —  PZA failu ielasīšana (1.–3. solis) (v25.1)
 """
 from __future__ import annotations
 
@@ -12,21 +12,15 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-GENERIC_TOTAL = re.compile(
-    r"^\W*(kopā|kopsumma|kopējais|kopējās|pavisam|starpsumma|total|subtotal|summa)\W*:?\W*$",
-    re.I,
-)
-ACCOUNT_CODE = re.compile(r"^\s*(\d{3,6}(?:\.\d+)?)\s+")
+GENERIC_TOTAL = re.compile(r"^\W*(kopā|kopsumma|kopējais|kopējās|total|subtotal|summa)\W*:?\W*$", re.I)
+ACCOUNT_CODE = re.compile(r"^\s*(\d{4,6})\s+")
 HAS_LETTER = re.compile(r"[A-Za-zĀ-žА-я]")
 
 # Rindas, kas pēc definīcijas vienmēr ir PZA starpsummas, virsraksti vai peļņas rādītāji (nekad nav atsevišķi konti)
 SUMMARY_OR_PROFIT_LINE = re.compile(
     r"^\s*("
-    r"kopā:?|kopsumma:?|total:?|subtotal:?|starpsumma:?|pavisam:?|"
-    r".*\bkopā\s*:?$|"
+    r"kopā:?|kopsumma:?|total:?|subtotal:?|"
     r"bruto\s+peļņa.*|peļņa\s+vai\s+zaudējumi.*|pārskata\s+gada\s+peļņa.*|"
-    r"pārskata\s+perioda\s+peļņa.*|peļņa\s+pirms.*|neto\s+peļņa.*|"
-    r"ieņēmumi\s+kopā.*|izmaksas\s+kopā.*|izdevumi\s+kopā.*|"
     r"pza\s+posteņu\s+atšifrējumi.*|postenis"
     r")\s*$",
     re.I,
@@ -270,41 +264,31 @@ def extract_lines(grid: pd.DataFrame, st: Structure) -> Extracted:
 
     raw = []
     for r in range(st.first_row, st.last_row + 1):
-        label_parts: list[str] = []
-        code = ""
+        label, code = "", ""
         for c in label_cols:
             v = grid.iat[r, c]
-            if v is None or (isinstance(v, float) and np.isnan(v)):
-                continue
-            s_val = str(v).strip()
-            if not s_val:
-                continue
-            if not code and re.match(r"^\d{3,6}(?:\.\d+)?$", s_val):
-                code = s_val
-            elif HAS_LETTER.search(s_val):
-                label_parts.append(s_val)
-            elif not code:
-                code = s_val
-
-        label = " ".join(label_parts).strip()
-        if code and label and not label.startswith(code):
-            label = f"{code} {label}".strip()
-
+            if isinstance(v, str) and HAS_LETTER.search(v):
+                label = v.strip()
+                break
+        if not label:
+            for c in label_cols:
+                v = grid.iat[r, c]
+                if isinstance(v, str) and v.strip():
+                    code = v.strip()
         m = ACCOUNT_CODE.match(label)
-        if m and not code:
+        if m:
             code = m.group(1)
-
         nums = [parse_number(grid.iat[r, p["col"]], dec) for p in st.period_cols]
         raw.append((r, label, code, nums))
 
-    # Paturam periodu kolonnas, kurās visā PZA ir vismaz 1 nenulles vērtība
+    # Paturam tikai tās periodu kolonnas, kurās ir vismaz 2 nenulles vērtības (lai izmestu tukšos nākotnes mēnešus ar 0 formulās)
     keep = []
     for j, p in enumerate(st.period_cols):
         nonzero_cnt = sum(1 for x in raw if (x[3][j] or 0) != 0)
-        if nonzero_cnt >= 1:
+        if nonzero_cnt >= 2 or (len(st.period_cols) == 1 and nonzero_cnt >= 1):
             keep.append(j)
     if not keep:
-        keep = list(range(len(st.period_cols)))
+        keep = [j for j in range(len(st.period_cols)) if any((x[3][j] or 0) != 0 for x in raw)]
 
     dropped = [st.period_cols[j] for j in range(len(st.period_cols)) if j not in keep]
     kept_cols = [st.period_cols[j] for j in keep]
@@ -316,27 +300,13 @@ def extract_lines(grid: pd.DataFrame, st: Structure) -> Extracted:
     lines: list[Line] = []
     for r, label, code, nums in raw:
         sel = [nums[j] for j in keep]
-        # SVARĪGI:
-        # 1) Ja kontam 5 mēnešus ir tukšums (None vai 0), bet kaut 1 mēnesī ir skaitlis -> has_nonzero = True (tiek saglabāts!)
-        # 2) Ja kontam VISOS mēnešos ir tukšums vai 0 -> has_nonzero = False (tiek atpazīts kā virsraksts/tukšs un netiek likts pie kontiem!)
-        has_any_cell = any(v is not None for v in sel)
-        has_nonzero = any(v is not None and abs(v) > 1e-9 for v in sel)
-        if not label and not has_any_cell:
+        # Konts ir ar vērtībām, ja tam ir vismaz vienā mēnesī skaitlis (pat ja 5 mēneši ir tukši un tikai 6., 7. mēnesī ir skaitļi)
+        has = any(v is not None for v in sel)
+        if not label and not has:
             continue
-        vec = np.array([float(v) if v is not None else 0.0 for v in sel], dtype=float)
+        vec = np.array([v or 0.0 for v in sel], dtype=float)
         is_ratio = "%" in label or label.lower().startswith("(as ")
-        lines.append(
-            Line(
-                pos=len(lines),
-                row=r,
-                label=label or f"(rinda {r})",
-                code=code,
-                vals=vec,
-                has_values=has_nonzero,
-                is_ratio=is_ratio,
-                id=f"r{r}",
-            )
-        )
+        lines.append(Line(len(lines), r, label or f"(rinda {r})", code, vec, has, is_ratio, id=f"r{r}"))
     return Extracted(lines, kept_cols, dropped, dec, tol)
 
 
@@ -350,8 +320,7 @@ def _stack_totals(order: list[int], V: np.ndarray, tol: float) -> dict[int, list
             best = 0
             for k in range(1, len(stack) + 1):
                 acc = acc + V[stack[-k]]
-                # Pārbaudām gan tiešo summu, gan absolūto vērtību summu (ja kopsumma ir ar pretēju zīmi)
-                if np.all(np.abs(acc - v) <= tol) or np.all(np.abs(acc + v) <= tol):
+                if np.all(np.abs(acc - v) <= tol):
                     best = k
             if best:
                 totals[i] = stack[-best:]
@@ -422,19 +391,11 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
     before = _stack_totals(active[::-1], V, tol)
     pos_hint = st.totals_position
     if pos_hint == "after":
-        direction, totals = "after", dict(after)
+        direction, totals = "after", after
     elif pos_hint == "before":
-        direction, totals = "before", dict(before)
+        direction, totals = "before", before
     else:
-        direction, totals = ("after", dict(after)) if len(after) >= len(before) else ("before", dict(before))
-        # Ja failā dažas grupas ir summētas augšā (before), bet citas apakšā (after),
-        # droši pievienojam arī otra virziena nekonfliktējošās kopsummas!
-        secondary = before if direction == "after" else after
-        used_nodes = set(totals.keys()) | {c for ch in totals.values() for c in ch}
-        for t_sec, ch_sec in secondary.items():
-            if len(ch_sec) >= 2 and t_sec not in used_nodes and not (set(ch_sec) & set(totals.keys())):
-                totals[t_sec] = ch_sec
-
+        direction, totals = ("after", after) if len(after) >= len(before) else ("before", before)
     notes = [f"Kopsummu virziens: {direction} (atrasts: after={len(after)}, before={len(before)})."]
 
     parent: dict[int, int] = {}
@@ -444,21 +405,15 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
 
     def ancestors(i: int) -> list[int]:
         out = []
-        visited = set()
-        while i in parent and i not in visited:
-            visited.add(i)
+        while i in parent:
             i = parent[i]
             out.append(i)
         return out
 
     def descendants_leaves(t: int) -> list[int]:
         out, st_ = [], [t]
-        visited = set()
         while st_:
             x = st_.pop()
-            if x in visited:
-                continue
-            visited.add(x)
             if x in totals:
                 st_.extend(totals[x])
             else:
@@ -547,17 +502,13 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
 
     for d in list(derived):
         stack_ = [d]
-        visited_d = set()
         while stack_:
             x = stack_.pop()
-            if x in visited_d:
-                continue
-            visited_d.add(x)
             for c in totals.get(x, []):
                 derived.add(c)
                 stack_.append(c)
 
-    zero_rows = [ln.pos for ln in lines if not ln.has_values and ln.pos not in mirrors]
+    zero_rows = [i for i in leaf_cand if not np.any(np.abs(V[i]) > tol) and i not in mirrors]
 
     chain_cache: dict[int, bool] = {}
 
@@ -614,8 +565,8 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
     if derived:
         notes.append(f"{len(derived)} rindas atpazītas kā atvasinātas (peļņas/kopsummu rindas) un netiek skaitītas.")
 
-    subtotal_row_nums = sorted({lines[pos].row for pos in (set(totals.keys()) | set(mirrors.keys()) | derived) if 0 <= pos < len(lines)})
-    empty_row_nums = sorted({lines[pos].row for pos in zero_rows if 0 <= pos < len(lines)})
+    subtotal_rows = sorted({lines[p].row for p in (set(totals.keys()) | set(mirrors.keys()) | derived) if 0 <= p < len(lines)})
+    empty_rows = sorted({lines[p].row for p in (zero_rows + list(header_pos)) if 0 <= p < len(lines)})
 
     return Analysis(
         ex=ex,
@@ -626,8 +577,8 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
         derived=derived,
         zero_rows=zero_rows,
         notes=notes,
-        subtotals=subtotal_row_nums,
-        empty_rows=empty_row_nums,
+        subtotals=subtotal_rows,
+        empty_rows=empty_rows,
     )
 
 
