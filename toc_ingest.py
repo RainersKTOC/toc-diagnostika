@@ -1,5 +1,5 @@
 """
-toc_ingest.py  —  PZA failu ielasīšana (1.–3. solis) (v25.1)
+toc_ingest.py  —  PZA failu ielasīšana (1.–3. solis) (v25.2 — salabota pamatkontu saglabāšana)
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ SUMMARY_OR_PROFIT_LINE = re.compile(
     r"^\s*("
     r"kopā:?|kopsumma:?|total:?|subtotal:?|"
     r"bruto\s+peļņa.*|peļņa\s+vai\s+zaudējumi.*|pārskata\s+gada\s+peļņa.*|"
+    r"pārskata\s+perioda\s+peļņa.*|neto\s+peļņa.*|"
     r"pza\s+posteņu\s+atšifrējumi.*|postenis"
     r")\s*$",
     re.I,
@@ -281,7 +282,7 @@ def extract_lines(grid: pd.DataFrame, st: Structure) -> Extracted:
         nums = [parse_number(grid.iat[r, p["col"]], dec) for p in st.period_cols]
         raw.append((r, label, code, nums))
 
-    # Paturam tikai tās periodu kolonnas, kurās ir vismaz 2 nenulles vērtības (lai izmestu tukšos nākotnes mēnešus ar 0 formulās)
+    # Paturam tikai tās periodu kolonnas, kurās ir vismaz 2 nenulles vērtības
     keep = []
     for j, p in enumerate(st.period_cols):
         nonzero_cnt = sum(1 for x in raw if (x[3][j] or 0) != 0)
@@ -300,13 +301,15 @@ def extract_lines(grid: pd.DataFrame, st: Structure) -> Extracted:
     lines: list[Line] = []
     for r, label, code, nums in raw:
         sel = [nums[j] for j in keep]
-        # Konts ir ar vērtībām, ja tam ir vismaz vienā mēnesī skaitlis (pat ja 5 mēneši ir tukši un tikai 6., 7. mēnesī ir skaitļi)
-        has = any(v is not None for v in sel)
-        if not label and not has:
+        # Konts ir aktīvs, ja tam ir vismaz vienā mēnesī nenulles skaitlis (pat ja pārējie mēneši ir tukši vai 0).
+        # Savukārt rindas, kurām visos mēnešos ir tukšums vai 0, saņem has=False un kļūst par virsrakstiem/tukšām rindām.
+        has_any_cell = any(v is not None for v in sel)
+        has_nonzero = any(v is not None and abs(v) > 1e-9 for v in sel)
+        if not label and not has_any_cell:
             continue
         vec = np.array([v or 0.0 for v in sel], dtype=float)
         is_ratio = "%" in label or label.lower().startswith("(as ")
-        lines.append(Line(len(lines), r, label or f"(rinda {r})", code, vec, has, is_ratio, id=f"r{r}"))
+        lines.append(Line(len(lines), r, label or f"(rinda {r})", code, vec, has_nonzero, is_ratio, id=f"r{r}"))
     return Extracted(lines, kept_cols, dropped, dec, tol)
 
 
@@ -321,7 +324,9 @@ def _stack_totals(order: list[int], V: np.ndarray, tol: float) -> dict[int, list
             for k in range(1, len(stack) + 1):
                 acc = acc + V[stack[-k]]
                 if np.all(np.abs(acc - v) <= tol):
-                    best = k
+                    # Apstiprinām kā starpsummu, ja sakrīt vismaz 2 apakšrindas
+                    if k >= 2:
+                        best = k
             if best:
                 totals[i] = stack[-best:]
                 del stack[-best:]
@@ -405,15 +410,21 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
 
     def ancestors(i: int) -> list[int]:
         out = []
-        while i in parent:
+        visited = set()
+        while i in parent and i not in visited:
+            visited.add(i)
             i = parent[i]
             out.append(i)
         return out
 
     def descendants_leaves(t: int) -> list[int]:
         out, st_ = [], [t]
+        visited = set()
         while st_:
             x = st_.pop()
+            if x in visited:
+                continue
+            visited.add(x)
             if x in totals:
                 st_.extend(totals[x])
             else:
@@ -485,14 +496,16 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
             derived.add(R)
             nonzero_roots.append(R)
             continue
-        win = nonzero_roots[-10:]
-        if win:
-            C = _combos(len(win))
-            M = V[win]
-            res = np.abs(C @ M - V[R]).max(axis=1) <= tol
-            res &= (np.abs(C).sum(axis=1) >= 1)
-            if res.any():
-                derived.add(R)
+        # Pārbaudām lineāru kombināciju (piem. Bruto peļņa = Ieņēmumi - Pašizmaksa) tikai tad, ja R pats ir starpsumma vai bez konta koda
+        if R in totals and not lines[R].code:
+            win = [w for w in nonzero_roots if w in totals][-8:]
+            if len(win) >= 2:
+                C = _combos(len(win))
+                M = V[win]
+                res = np.abs(C @ M - V[R]).max(axis=1) <= tol
+                res &= (np.abs(C).sum(axis=1) >= 2)
+                if res.any():
+                    derived.add(R)
         nonzero_roots.append(R)
 
     if st.result_row is not None:
@@ -500,15 +513,10 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
             if ln.row == st.result_row:
                 derived.add(ln.pos)
 
-    for d in list(derived):
-        stack_ = [d]
-        while stack_:
-            x = stack_.pop()
-            for c in totals.get(x, []):
-                derived.add(c)
-                stack_.append(c)
+    # SVARĪGI: NEKAD nedzēšam apakškontus zem `derived` kopsummas rindas!
+    # (Iepriekšējais `for d in list(derived)` cikls izdzēsa visus pamatkontus zem Kopā / Rezultāta rindas.)
 
-    zero_rows = [i for i in leaf_cand if not np.any(np.abs(V[i]) > tol) and i not in mirrors]
+    zero_rows = [ln.pos for ln in lines if not ln.has_values and ln.pos not in mirrors]
 
     chain_cache: dict[int, bool] = {}
 
@@ -524,14 +532,9 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
 
     skip = set(mirrors) | derived | set(zero_rows) | set(totals)
     leaves: list[Leaf] = []
-    for i in leaf_cand:
-        if i in skip:
-            continue
-        ln = lines[i]
-        if GENERIC_TOTAL.match(ln.label.strip()) or SUMMARY_OR_PROFIT_LINE.match(ln.label.strip()):
-            derived.add(i)
-            continue
 
+    def _build_leaf(i: int) -> Leaf:
+        ln = lines[i]
         anc = [a for a in ancestors(i)]
         names = []
         for a in anc:
@@ -558,15 +561,47 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
             mult = None
         else:
             mult = 1
-        leaves.append(Leaf(f"r{ln.row}", ln.row, ln.label, path, ln.code, V[i].copy(), mult))
+        return Leaf(f"r{ln.row}", ln.row, ln.label, path, ln.code, V[i].copy(), mult)
+
+    for i in leaf_cand:
+        if i in skip:
+            continue
+        ln = lines[i]
+        if GENERIC_TOTAL.match(ln.label.strip()) or SUMMARY_OR_PROFIT_LINE.match(ln.label.strip()):
+            derived.add(i)
+            continue
+        leaves.append(_build_leaf(i))
+
+    # Drošības rezerve: ja kāda nestandarta faila dēļ `leaves` izrādās tukšs, paņemam visas aktīvās rindas, kas nav Kopā/Peļņa
+    if not leaves and active:
+        for i in active:
+            ln = lines[i]
+            if st.result_row is not None and ln.row == st.result_row:
+                continue
+            if GENERIC_TOTAL.match(ln.label.strip()) or SUMMARY_OR_PROFIT_LINE.match(ln.label.strip()):
+                continue
+            leaves.append(_build_leaf(i))
 
     if mirrors:
         notes.append(f"{len(mirrors)} kopsavilkuma rindas ir atpazītas kā dublikāti un netiek skaitītas.")
     if derived:
         notes.append(f"{len(derived)} rindas atpazītas kā atvasinātas (peļņas/kopsummu rindas) un netiek skaitītas.")
 
-    subtotal_rows = sorted({lines[p].row for p in (set(totals.keys()) | set(mirrors.keys()) | derived) if 0 <= p < len(lines)})
-    empty_rows = sorted({lines[p].row for p in (zero_rows + list(header_pos)) if 0 <= p < len(lines)})
+    leaf_pos_set = {ln.pos for ln in lines if any(lf.row == ln.row for lf in leaves)}
+    subtotal_rows = sorted(
+        {
+            lines[p].row
+            for p in (set(totals.keys()) | set(mirrors.keys()) | derived)
+            if 0 <= p < len(lines) and p not in leaf_pos_set
+        }
+    )
+    empty_rows = sorted(
+        {
+            lines[p].row
+            for p in zero_rows
+            if 0 <= p < len(lines) and p not in leaf_pos_set
+        }
+    )
 
     return Analysis(
         ex=ex,
