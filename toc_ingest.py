@@ -1,5 +1,5 @@
 """
-toc_ingest.py  —  PZA failu ielasīšana (1.–3. solis)
+toc_ingest.py  —  PZA failu ielasīšana (1.–3. solis) (v25.0 pilnā versija)
 """
 from __future__ import annotations
 
@@ -12,15 +12,21 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-GENERIC_TOTAL = re.compile(r"^\W*(kopā|kopsumma|kopējais|kopējās|total|subtotal|summa)\W*:?\W*$", re.I)
-ACCOUNT_CODE = re.compile(r"^\s*(\d{4,6})\s+")
+GENERIC_TOTAL = re.compile(
+    r"^\W*(kopā|kopsumma|kopējais|kopējās|pavisam|starpsumma|total|subtotal|summa)\W*:?\W*$",
+    re.I,
+)
+ACCOUNT_CODE = re.compile(r"^\s*(\d{3,6}(?:\.\d+)?)\s+")
 HAS_LETTER = re.compile(r"[A-Za-zĀ-žА-я]")
 
 # Rindas, kas pēc definīcijas vienmēr ir PZA starpsummas, virsraksti vai peļņas rādītāji (nekad nav atsevišķi konti)
 SUMMARY_OR_PROFIT_LINE = re.compile(
     r"^\s*("
-    r"kopā:?|kopsumma:?|total:?|subtotal:?|"
+    r"kopā:?|kopsumma:?|total:?|subtotal:?|starpsumma:?|pavisam:?|"
+    r".*\bkopā\s*:?$|"
     r"bruto\s+peļņa.*|peļņa\s+vai\s+zaudējumi.*|pārskata\s+gada\s+peļņa.*|"
+    r"pārskata\s+perioda\s+peļņa.*|peļņa\s+pirms.*|neto\s+peļņa.*|"
+    r"ieņēmumi\s+kopā.*|izmaksas\s+kopā.*|izdevumi\s+kopā.*|"
     r"pza\s+posteņu\s+atšifrējumi.*|postenis"
     r")\s*$",
     re.I,
@@ -144,14 +150,22 @@ STRUCTURE_TOOL = {
             },
             "first_row": {"type": "integer", "description": "First row of the P&L body (first revenue line)."},
             "last_row": {"type": "integer", "description": "Last row of the P&L body. Exclude KPI blocks, notes, footers below it."},
-            "result_row": {"type": ["integer", "null"],
-                           "description": "The final bottom-line profit/loss row of the whole P&L (the last profit line that already includes all items)."},
-            "sign_convention": {"enum": ["costs_negative", "costs_positive", "mixed"],
-                                "description": "How costs are signed in the detail lines. 'mixed' if summary lines and breakdown lines differ."},
-            "totals_position": {"enum": ["after", "before", "auto"],
-                                "description": "Is a total printed AFTER its component lines, or BEFORE them? 'auto' if unsure."},
-            "pl_layout": {"enum": ["by_nature", "by_function", "unclear"],
-                          "description": "by_nature = costs by type (materials, wages, rent...). by_function = only COGS/selling/admin totals with no breakdown."},
+            "result_row": {
+                "type": ["integer", "null"],
+                "description": "The final bottom-line profit/loss row of the whole P&L (the last profit line that already includes all items).",
+            },
+            "sign_convention": {
+                "enum": ["costs_negative", "costs_positive", "mixed"],
+                "description": "How costs are signed in the detail lines. 'mixed' if summary lines and breakdown lines differ.",
+            },
+            "totals_position": {
+                "enum": ["after", "before", "auto"],
+                "description": "Is a total printed AFTER its component lines, or BEFORE them? 'auto' if unsure.",
+            },
+            "pl_layout": {
+                "enum": ["by_nature", "by_function", "unclear"],
+                "description": "by_nature = costs by type (materials, wages, rent...). by_function = only COGS/selling/admin totals with no breakdown.",
+            },
             "unit": {"type": "string", "description": "EUR, tūkst. EUR, ..."},
             "company": {"type": ["string", "null"]},
             "notes": {"type": "string", "description": "Anything unusual a human should know (max 2 sentences)."},
@@ -216,7 +230,7 @@ def validate_structure(grid: pd.DataFrame, st: Structure) -> list[str]:
     dec = detect_decimal_comma(grid)
     counts = []
     for p in st.period_cols:
-        col = grid.iloc[st.first_row: st.last_row + 1, p["col"]]
+        col = grid.iloc[st.first_row : st.last_row + 1, p["col"]]
         counts.append(sum(parse_number(v, dec) is not None for v in col))
     if max(counts) < 3:
         errs.append("None of the period columns contains numbers in the given row range - wrong columns or rows.")
@@ -233,6 +247,7 @@ class Line:
     has_values: bool
     is_ratio: bool = False
     id: str = ""
+    path: str = ""
 
     def __post_init__(self):
         if not self.id:
@@ -255,31 +270,41 @@ def extract_lines(grid: pd.DataFrame, st: Structure) -> Extracted:
 
     raw = []
     for r in range(st.first_row, st.last_row + 1):
-        label, code = "", ""
+        label_parts: list[str] = []
+        code = ""
         for c in label_cols:
             v = grid.iat[r, c]
-            if isinstance(v, str) and HAS_LETTER.search(v):
-                label = v.strip()
-                break
-        if not label:
-            for c in label_cols:
-                v = grid.iat[r, c]
-                if isinstance(v, str) and v.strip():
-                    code = v.strip()
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                continue
+            s_val = str(v).strip()
+            if not s_val:
+                continue
+            if not code and re.match(r"^\d{3,6}(?:\.\d+)?$", s_val):
+                code = s_val
+            elif HAS_LETTER.search(s_val):
+                label_parts.append(s_val)
+            elif not code:
+                code = s_val
+
+        label = " ".join(label_parts).strip()
+        if code and label and not label.startswith(code):
+            label = f"{code} {label}".strip()
+
         m = ACCOUNT_CODE.match(label)
-        if m:
+        if m and not code:
             code = m.group(1)
+
         nums = [parse_number(grid.iat[r, p["col"]], dec) for p in st.period_cols]
         raw.append((r, label, code, nums))
 
-    # Paturam tikai tās periodu kolonnas, kurās ir vismaz 2 nenulles vērtības (lai izmestu tukšos nākotnes mēnešus ar 0 formulās)
+    # Paturam periodu kolonnas, kurās visā PZA ir vismaz 1 nenulles vērtība
     keep = []
     for j, p in enumerate(st.period_cols):
         nonzero_cnt = sum(1 for x in raw if (x[3][j] or 0) != 0)
-        if nonzero_cnt >= 2 or (len(st.period_cols) == 1 and nonzero_cnt >= 1):
+        if nonzero_cnt >= 1:
             keep.append(j)
     if not keep:
-        keep = [j for j in range(len(st.period_cols)) if any((x[3][j] or 0) != 0 for x in raw)]
+        keep = list(range(len(st.period_cols)))
 
     dropped = [st.period_cols[j] for j in range(len(st.period_cols)) if j not in keep]
     kept_cols = [st.period_cols[j] for j in keep]
@@ -291,13 +316,27 @@ def extract_lines(grid: pd.DataFrame, st: Structure) -> Extracted:
     lines: list[Line] = []
     for r, label, code, nums in raw:
         sel = [nums[j] for j in keep]
-        # Rinda skaitās ar vērtībām tikai tad, ja tajā ir kāds skaitlis UN tā nav mēnešu galvenes rinda
-        has = any(v is not None for v in sel)
-        if not label and not has:
+        # SVARĪGI:
+        # 1) Ja kontam 5 mēnešus ir tukšums (None vai 0), bet kaut 1 mēnesī ir skaitlis -> has_nonzero = True (tiek saglabāts!)
+        # 2) Ja kontam VISOS mēnešos ir tukšums vai 0 -> has_nonzero = False (tiek atpazīts kā virsraksts/tukšs un netiek likts pie kontiem!)
+        has_any_cell = any(v is not None for v in sel)
+        has_nonzero = any(v is not None and abs(v) > 1e-9 for v in sel)
+        if not label and not has_any_cell:
             continue
-        vec = np.array([v or 0.0 for v in sel], dtype=float)
+        vec = np.array([float(v) if v is not None else 0.0 for v in sel], dtype=float)
         is_ratio = "%" in label or label.lower().startswith("(as ")
-        lines.append(Line(len(lines), r, label or f"(rinda {r})", code, vec, has, is_ratio, id=f"r{r}"))
+        lines.append(
+            Line(
+                pos=len(lines),
+                row=r,
+                label=label or f"(rinda {r})",
+                code=code,
+                vals=vec,
+                has_values=has_nonzero,
+                is_ratio=is_ratio,
+                id=f"r{r}",
+            )
+        )
     return Extracted(lines, kept_cols, dropped, dec, tol)
 
 
@@ -311,7 +350,8 @@ def _stack_totals(order: list[int], V: np.ndarray, tol: float) -> dict[int, list
             best = 0
             for k in range(1, len(stack) + 1):
                 acc = acc + V[stack[-k]]
-                if np.all(np.abs(acc - v) <= tol):
+                # Pārbaudām gan tiešo summu, gan absolūto vērtību summu (ja kopsumma ir ar pretēju zīmi)
+                if np.all(np.abs(acc - v) <= tol) or np.all(np.abs(acc + v) <= tol):
                     best = k
             if best:
                 totals[i] = stack[-best:]
@@ -341,6 +381,8 @@ class Analysis:
     derived: set[int]
     zero_rows: list[int]
     notes: list[str] = field(default_factory=list)
+    subtotals: list[int] = field(default_factory=list)
+    empty_rows: list[int] = field(default_factory=list)
 
     def roles(self) -> dict[int, str]:
         r = {}
@@ -380,11 +422,19 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
     before = _stack_totals(active[::-1], V, tol)
     pos_hint = st.totals_position
     if pos_hint == "after":
-        direction, totals = "after", after
+        direction, totals = "after", dict(after)
     elif pos_hint == "before":
-        direction, totals = "before", before
+        direction, totals = "before", dict(before)
     else:
-        direction, totals = ("after", after) if len(after) >= len(before) else ("before", before)
+        direction, totals = ("after", dict(after)) if len(after) >= len(before) else ("before", dict(before))
+        # Ja failā dažas grupas ir summētas augšā (before), bet citas apakšā (after),
+        # droši pievienojam arī otra virziena nekonfliktējošās kopsummas!
+        secondary = before if direction == "after" else after
+        used_nodes = set(totals.keys()) | {c for ch in totals.values() for c in ch}
+        for t_sec, ch_sec in secondary.items():
+            if len(ch_sec) >= 2 and t_sec not in used_nodes and not (set(ch_sec) & set(totals.keys())):
+                totals[t_sec] = ch_sec
+
     notes = [f"Kopsummu virziens: {direction} (atrasts: after={len(after)}, before={len(before)})."]
 
     parent: dict[int, int] = {}
@@ -394,15 +444,21 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
 
     def ancestors(i: int) -> list[int]:
         out = []
-        while i in parent:
+        visited = set()
+        while i in parent and i not in visited:
+            visited.add(i)
             i = parent[i]
             out.append(i)
         return out
 
     def descendants_leaves(t: int) -> list[int]:
         out, st_ = [], [t]
+        visited = set()
         while st_:
             x = st_.pop()
+            if x in visited:
+                continue
+            visited.add(x)
             if x in totals:
                 st_.extend(totals[x])
             else:
@@ -437,7 +493,6 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
                 continue
             T_sec_norm = _norm_label(section_name(T))
             for f in (1, -1):
-                # 1) Eksakta sakritība visos mēnešos VAI 2) sakrīt sadaļas vārds un sakrīt >=80% mēnešu
                 diffs = np.abs(V[L] - f * V[T])
                 exact_match = bool(np.all(diffs <= tol))
                 name_and_most_match = bool(
@@ -453,15 +508,12 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
         if best and best[2] >= 2:
             mirrors[L] = (best[0], best[1])
 
-    # Papildu drošība: ja failā ir virsraksts ar tādu pašu nosaukumu kā kopsavilkuma rindai (piem., "Administrācijas izmaksas"),
-    # tad augšējā kopsavilkuma rinda ir mirror/dublikāts un nekad nav konts
     header_norms = {_norm_label(lines[h].label): h for h in header_pos if _norm_label(lines[h].label)}
     for L in leaf_cand:
         if L in mirrors:
             continue
         ln_norm = _norm_label(lines[L].label)
         if ln_norm in header_norms and header_norms[ln_norm] > L:
-            # Atrodam tuvāko Kopā rindu zem šī virsraksta
             h_idx = header_norms[ln_norm]
             for T in totals:
                 if T > h_idx and _norm_label(section_name(T)) == ln_norm:
@@ -474,7 +526,6 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
     for R in roots:
         if not np.any(np.abs(V[R]) > tol):
             continue
-        # Ja rindas nosaukums ir nepārprotama Kopā / Peļņas rinda, atzīmējam kā derived
         if SUMMARY_OR_PROFIT_LINE.match(lines[R].label.strip()) or GENERIC_TOTAL.match(lines[R].label.strip()):
             derived.add(R)
             nonzero_roots.append(R)
@@ -496,13 +547,17 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
 
     for d in list(derived):
         stack_ = [d]
+        visited_d = set()
         while stack_:
             x = stack_.pop()
+            if x in visited_d:
+                continue
+            visited_d.add(x)
             for c in totals.get(x, []):
                 derived.add(c)
                 stack_.append(c)
 
-    zero_rows = [i for i in leaf_cand if not np.any(np.abs(V[i]) > tol) and i not in mirrors]
+    zero_rows = [ln.pos for ln in lines if not ln.has_values and ln.pos not in mirrors]
 
     chain_cache: dict[int, bool] = {}
 
@@ -522,7 +577,6 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
         if i in skip:
             continue
         ln = lines[i]
-        # Nekad neiekļaujam rindas ar nosaukumu "Kopā:", "Bruto peļņa..." utt. kā kontus
         if GENERIC_TOTAL.match(ln.label.strip()) or SUMMARY_OR_PROFIT_LINE.match(ln.label.strip()):
             derived.add(i)
             continue
@@ -537,7 +591,6 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
                 names.append(nm)
             if len(names) == 2:
                 break
-        # Ja kontam nav atrasts Kopā vecāks, paņemam tuvāko virsrakstu virs tā
         if not names:
             p_idx = i - 1
             while p_idx >= 0:
@@ -547,6 +600,7 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
                 p_idx -= 1
 
         path = " › ".join(reversed(names)) if names else ""
+        ln.path = path
         if i in mult_of:
             mult: int | None = mult_of[i]
         elif st.sign_convention in ("costs_positive", "mixed"):
@@ -559,7 +613,22 @@ def analyze(ex: Extracted, st: Structure) -> Analysis:
         notes.append(f"{len(mirrors)} kopsavilkuma rindas ir atpazītas kā dublikāti un netiek skaitītas.")
     if derived:
         notes.append(f"{len(derived)} rindas atpazītas kā atvasinātas (peļņas/kopsummu rindas) un netiek skaitītas.")
-    return Analysis(ex, direction, totals, leaves, mirrors, derived, zero_rows, notes)
+
+    subtotal_row_nums = sorted({lines[pos].row for pos in (set(totals.keys()) | set(mirrors.keys()) | derived) if 0 <= pos < len(lines)})
+    empty_row_nums = sorted({lines[pos].row for pos in zero_rows if 0 <= pos < len(lines)})
+
+    return Analysis(
+        ex=ex,
+        direction=direction,
+        totals=totals,
+        leaves=leaves,
+        mirrors=mirrors,
+        derived=derived,
+        zero_rows=zero_rows,
+        notes=notes,
+        subtotals=subtotal_row_nums,
+        empty_rows=empty_row_nums,
+    )
 
 
 def leaf_amounts(leaves: list[Leaf], income_ids: set[str] | None) -> tuple[np.ndarray, bool]:
@@ -595,42 +664,64 @@ def reconcile(an: Analysis, st: Structure, income_ids: set[str] | None = None) -
     A, complete = leaf_amounts(an.leaves, income_ids)
     if not complete:
         out["status"] = "deferred"
-        out["message"] = ("Šim formātam izdevumu zīme jānosaka pēc klasifikācijas — "
-                          "salīdzināšana tiks veikta pēc 4. soļa.")
+        out["message"] = (
+            "Šim formātam izdevumu zīme jānosaka pēc klasifikācijas — "
+            "salīdzināšana tiks veikta pēc 4. soļa."
+        )
         return out
     calc = A.sum(axis=0)
     rep = an.ex.lines[pos].vals
     diff = calc - rep
-    tbl = pd.DataFrame({"Periods": [p["label"] for p in an.ex.period_cols],
-                        "Σ lapas": calc, "Faila rezultāts": rep, "Starpība": diff})
+    tbl = pd.DataFrame(
+        {"Periods": [p["label"] for p in an.ex.period_cols], "Σ lapas": calc, "Faila rezultāts": rep, "Starpība": diff}
+    )
     ok = bool(np.all(np.abs(diff) <= max(an.ex.tol * 3, 1.0)))
-    out.update(status="ok" if ok else "fail", table=tbl,
-               message="Visu lapu summa sakrīt ar faila gala rezultātu." if ok
-               else "Lapu summa NESAKRĪT ar faila gala rezultātu — dati vai struktūra ir nepareizi nolasīti.")
+    out.update(
+        status="ok" if ok else "fail",
+        table=tbl,
+        message="Visu lapu summa sakrīt ar faila gala rezultātu."
+        if ok
+        else "Lapu summa NESAKRĪT ar faila gala rezultātu — dati vai struktūra ir nepareizi nolasīti.",
+    )
     return out
 
 
-def verification_report(grid: pd.DataFrame, st: Structure, an: Analysis,
-                        income_ids: set[str] | None = None) -> list[dict]:
+def verification_report(
+    grid: pd.DataFrame, st: Structure, an: Analysis, income_ids: set[str] | None = None
+) -> list[dict]:
     rep = []
     errs = validate_structure(grid, st)
-    rep.append({"Pārbaude": "Struktūra (kolonnas, rindu diapazons)",
-                "Statuss": "OK" if not errs else "KĻŪDA", "Detaļas": "; ".join(errs) or "—"})
+    rep.append(
+        {"Pārbaude": "Struktūra (kolonnas, rindu diapazons)", "Statuss": "OK" if not errs else "KĻŪDA", "Detaļas": "; ".join(errs) or "—"}
+    )
     if an.ex.dropped_cols:
-        rep.append({"Pārbaude": "Tukšas periodu kolonnas",
-                    "Statuss": "INFO",
-                    "Detaļas": "Izlaistas: " + ", ".join(p["label"] for p in an.ex.dropped_cols)})
+        rep.append(
+            {
+                "Pārbaude": "Tukšas periodu kolonnas",
+                "Statuss": "INFO",
+                "Detaļas": "Izlaistas: " + ", ".join(p["label"] for p in an.ex.dropped_cols),
+            }
+        )
     roles = an.roles()
     counts = pd.Series(list(roles.values())).value_counts().to_dict()
     unclassified = [ln for ln in an.ex.lines if ln.has_values and not ln.is_ratio and ln.pos not in roles]
-    rep.append({"Pārbaude": "Katra rinda ar skaitļiem ir ar skaidru lomu",
-                "Statuss": "OK" if not unclassified else "KĻŪDA",
-                "Detaļas": ", ".join(f"{k}={v}" for k, v in counts.items())})
+    rep.append(
+        {
+            "Pārbaude": "Katra rinda ar skaitļiem ir ar skaidru lomu",
+            "Statuss": "OK" if not unclassified else "KĻŪDA",
+            "Detaļas": ", ".join(f"{k}={v}" for k, v in counts.items()),
+        }
+    )
     n_tot = len(an.totals)
-    rep.append({"Pārbaude": "Kopsummas sakrīt ar komponentēm",
-                "Statuss": "OK" if n_tot else "BRĪDINĀJUMS",
-                "Detaļas": f"{n_tot} kopsummas atrastas un pārbaudītas ({an.direction})"
-                           if n_tot else "Neviena kopsumma nav atrasta — hierarhija nav noteikta."})
+    rep.append(
+        {
+            "Pārbaude": "Kopsummas sakrīt ar komponentēm",
+            "Statuss": "OK" if n_tot else "BRĪDINĀJUMS",
+            "Detaļas": f"{n_tot} kopsummas atrastas un pārbaudītas ({an.direction})"
+            if n_tot
+            else "Neviena kopsumma nav atrasta — hierarhija nav noteikta.",
+        }
+    )
     rec = reconcile(an, st, income_ids)
     status = {"ok": "OK", "fail": "KĻŪDA", "deferred": "ATLIKTS", "skip": "BRĪDINĀJUMS"}[rec["status"]]
     rep.append({"Pārbaude": "Σ(lapas) = faila gala rezultāts", "Statuss": status, "Detaļas": rec["message"]})
@@ -642,9 +733,13 @@ def verification_report(grid: pd.DataFrame, st: Structure, an: Analysis,
         A, complete = leaf_amounts(an.leaves, income_ids)
         if complete:
             d = np.abs(A[:, months].sum(axis=1) - A[:, ytd[0]]).max()
-            rep.append({"Pārbaude": "YTD kolonna = mēnešu summa",
-                        "Statuss": "OK" if d <= an.ex.tol * 3 else "BRĪDINĀJUMS",
-                        "Detaļas": f"Lielākā starpība vienai lapai: {d:,.0f}"})
+            rep.append(
+                {
+                    "Pārbaude": "YTD kolonna = mēnešu summa",
+                    "Statuss": "OK" if d <= an.ex.tol * 3 else "BRĪDINĀJUMS",
+                    "Detaļas": f"Lielākā starpība vienai lapai: {d:,.0f}",
+                }
+            )
     return rep
 
 
@@ -658,9 +753,11 @@ def pick_sheet(client, model: str, grids: dict[str, pd.DataFrame]) -> str:
         return next(iter(grids))
     parts = [f"=== SHEET '{n}' ===\n{grid_preview(g, max_rows=30, max_cols=12)}" for n, g in list(grids.items())[:8]]
     resp = client.messages.create(
-        model=model, max_tokens=300,
+        model=model,
+        max_tokens=300,
         system="Choose the sheet containing the profit and loss statement (income statement).",
-        tools=[CHOOSE_SHEET_TOOL], tool_choice={"type": "tool", "name": "choose_sheet"},
+        tools=[CHOOSE_SHEET_TOOL],
+        tool_choice={"type": "tool", "name": "choose_sheet"},
         messages=[{"role": "user", "content": "\n\n".join(parts)}],
     )
     sheet = _tool_input(resp, "choose_sheet").input["sheet"]
@@ -672,8 +769,11 @@ def request_structure(client, model: str, sheet: str, grid: pd.DataFrame, max_tr
     last_errs: list[str] = []
     for _ in range(max_tries):
         resp = client.messages.create(
-            model=model, max_tokens=2000, system=STRUCTURE_SYSTEM,
-            tools=[STRUCTURE_TOOL], tool_choice={"type": "tool", "name": STRUCTURE_TOOL["name"]},
+            model=model,
+            max_tokens=2000,
+            system=STRUCTURE_SYSTEM,
+            tools=[STRUCTURE_TOOL],
+            tool_choice={"type": "tool", "name": STRUCTURE_TOOL["name"]},
             messages=msgs,
         )
         tu = _tool_input(resp, STRUCTURE_TOOL["name"])
@@ -683,7 +783,18 @@ def request_structure(client, model: str, sheet: str, grid: pd.DataFrame, max_tr
         last_errs = validate_structure(grid, st)
         if not last_errs:
             return st
-        msgs += [{"role": "assistant", "content": resp.content},
-                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tu.id, "is_error": True,
-                                               "content": "Validation failed: " + " ".join(last_errs) + " Fix and resend."}]}]
+        msgs += [
+            {"role": "assistant", "content": resp.content},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tu.id,
+                        "is_error": True,
+                        "content": "Validation failed: " + " ".join(last_errs) + " Fix and resend.",
+                    }
+                ],
+            },
+        ]
     raise ValueError("Struktūru neizdevās noteikt automātiski: " + " ".join(last_errs))
