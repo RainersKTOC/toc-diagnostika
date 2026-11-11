@@ -538,7 +538,7 @@ def save_report_as_new_or_update(
     lai oriģinālā versija nekad nepazūd!
     """
     rep_meta = st.session_state.get("loaded_report_meta") or {}
-     packed_c = pack_commentary_with_account_details(
+    packed_c = pack_commentary_with_account_details(
         st.session_state.get("commentary", ""),
         acc_details if acc_details is not None else st.session_state.get("loaded_account_details"),
     )
