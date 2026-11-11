@@ -1,6 +1,6 @@
 """
-app.py — TOC-FIN Finanšu diagnostikas un vadības lēmumu sistēma (v25.9)
-Izteiksmīgs vertikālais grafiks | TOC eksperta secinājumi un ieteikumi | Balss poga Sūtīt Asistentā
+app.py — TOC-FIN Finanšu diagnostikas un vadības lēmumu sistēma (v26.0)
+Augsts dinamikas grafiks (560px) | Vienots darba periods | Atskaites versiju saglabāšana | Strukturēta kontu izvēle
 Project ID: amprqueamdcxpjufigvm
 """
 from __future__ import annotations
@@ -523,23 +523,40 @@ def reorder_table_subgroups(
 
     st.session_state.setdefault("custom_row_order", {})[mc] = sorted_ch
     apply_custom_row_order_to_result(res)
+    st.session_state["has_unsaved_changes"] = True
     return sorted_ch
 
 
-def persist_active_report_changes(profile_store: SupabaseProfileStore) -> None:
-    res = st.session_state.get("result")
-    if st.session_state.get("current_report_id") and res is not None:
-        rep_meta = st.session_state.get("loaded_report_meta") or {}
-        packed_c = pack_commentary_with_account_details(
-            st.session_state.get("commentary", ""),
-            st.session_state.get("loaded_account_details"),
-        )
-        profile_store.save_report(
-            report_name=rep_meta.get("report_name", "Atskaite"),
-            file_name=rep_meta.get("file_name", "PZA.xlsx"),
-            res_obj=res,
-            commentary=packed_c,
-        )
+def save_report_as_new_or_update(
+    profile_store: SupabaseProfileStore,
+    res_to_save,
+    new_report_name: str,
+    acc_details: list[dict] | None = None,
+) -> tuple[bool, int | None]:
+    """
+    Saglabā izmainīto pārskatu (vai izvēlētā perioda griezumu) kā JAUNU atskaiti (vai atjaunina esošo, ja nosaukums sakrīt),
+    lai oriģinālā versija nekad nepazūd!
+    """
+    rep_meta = st.session_state.get("loaded_report_meta") or {}
+     packed_c = pack_commentary_with_account_details(
+        st.session_state.get("commentary", ""),
+        acc_details if acc_details is not None else st.session_state.get("loaded_account_details"),
+    )
+    ok_r, rep_id = profile_store.save_report(
+        report_name=new_report_name.strip() or rep_meta.get("report_name", "Atskaite"),
+        file_name=rep_meta.get("file_name", "PZA.xlsx"),
+        res_obj=res_to_save,
+        commentary=packed_c,
+    )
+    if ok_r and rep_id:
+        st.session_state["current_report_id"] = rep_id
+        st.session_state["loaded_report_meta"] = {
+            "id": rep_id,
+            "report_name": new_report_name.strip(),
+            "file_name": rep_meta.get("file_name", "PZA.xlsx"),
+        }
+        st.session_state["has_unsaved_changes"] = False
+    return ok_r, rep_id
 
 
 def rename_subgroup_everywhere(old_name: str, new_name: str, profile_store: SupabaseProfileStore) -> tuple[bool, str]:
@@ -585,8 +602,8 @@ def rename_subgroup_everywhere(old_name: str, new_name: str, profile_store: Supa
     for mc_k, ord_list in st.session_state.get("custom_row_order", {}).items():
         st.session_state["custom_row_order"][mc_k] = [new_clean if x == old_clean else x for x in ord_list]
 
-    persist_active_report_changes(profile_store)
-    return True, f"Apakšgrupa **'{old_clean}'** veiksmīgi pārdēvēta par **'{new_clean}'**!"
+    st.session_state["has_unsaved_changes"] = True
+    return True, f"Apakšgrupa **'{old_clean}'** pārdēvēta par **'{new_clean}'**! (Varat saglabāt šo kā jaunu versiju vai pārrakstīt esošo atskaiti.)"
 
 
 def merge_subgroups_everywhere(source_sub_label: str, target_sub_label: str, profile_store: SupabaseProfileStore) -> tuple[bool, str]:
@@ -667,8 +684,8 @@ def merge_subgroups_everywhere(source_sub_label: str, target_sub_label: str, pro
             if moved_cnt == 0:
                 moved_cnt = len(db_upd)
 
-    persist_active_report_changes(profile_store)
-    return True, f"Apakšgrupa **'{src_lbl}'** ({moved_cnt} konti) ir pievienota pie **'{tgt_lbl}'** un tabula ir pārrēķināta!"
+    S["has_unsaved_changes"] = True
+    return True, f"Apakšgrupa **'{src_lbl}'** ({moved_cnt} konti) ir pievienota pie **'{tgt_lbl}'**!"
 
 
 def move_specific_accounts_to_subgroup(
@@ -752,8 +769,8 @@ def move_specific_accounts_to_subgroup(
         if moved_cnt == 0:
             moved_cnt = len(db_updates)
 
-    persist_active_report_changes(profile_store)
-    return True, f"Pārvietoti **{moved_cnt}** konti uz apakšgrupu **'{clean_target}'** un tabula ir pārrēķināta!"
+    S["has_unsaved_changes"] = True
+    return True, f"Pārvietoti **{moved_cnt}** konti uz apakšgrupu **'{clean_target}'**!"
 
 
 def compute_toc_with_dynamic_subgroups(leaves, mapping: dict[str, dict], period_cols: list[dict], reported=None):
@@ -932,8 +949,8 @@ def _compute_linear_trend(y_vals: list[float]) -> list[float]:
 
 def render_overview_charts(amounts_df: pd.DataFrame, kpi_df: pd.DataFrame, fy_start_month: int = 1) -> None:
     """
-    Zīmē Galveno rādītāju dinamikas grafiku kompaktākā platumā un ar izteiktāku vertikālo skalu (height=410, zero=False),
-    lai līnijas nav saspiestas taisnās svītrās un mēnešu svārstības ir skaidri redzamas!
+    Zīmē vēl augstāku (height=560) un vizuāli izteiksmīgāku Galveno rādītāju dinamikas grafiku,
+    lai skaidri redzētu, kā mēnesi pa mēnesim staigā rezultāti!
     """
     period_cols = [
         c for c in amounts_df.columns
@@ -945,8 +962,7 @@ def render_overview_charts(amounts_df: pd.DataFrame, kpi_df: pd.DataFrame, fy_st
     st.markdown("---")
     st.subheader("Finanšu un produktivitātes dinamika")
 
-    # Ieliekam galveno grafiku kompaktākā platumā (~78% no ekrāna), lai tas nav pārlieku izstiepts horizontāli
-    ch_wrap_l, ch_wrap_c, ch_wrap_r = st.columns([0.1, 4.2, 0.7])
+    ch_wrap_l, ch_wrap_c, ch_wrap_r = st.columns([0.2, 3.8, 1.0])
     with ch_wrap_c:
         with st.container(border=True):
             ch_top1, ch_top2 = st.columns([2.1, 1.1], vertical_alignment="center")
@@ -1000,26 +1016,26 @@ def render_overview_charts(amounts_df: pd.DataFrame, kpi_df: pd.DataFrame, fy_st
 
             y_min = float(long_df["Summa (€)"].min()) if not long_df.empty else 0.0
             y_max = float(long_df["Summa (€)"].max()) if not long_df.empty else 1000.0
-            pad = max((y_max - y_min) * 0.06, 1000.0)
+            pad = max((y_max - y_min) * 0.04, 500.0)
 
             base = alt.Chart(long_df).encode(
                 x=alt.X(
                     "Periods:N",
                     sort=period_cols,
                     title=None,
-                    axis=alt.Axis(labelAngle=0, labelFontWeight="bold"),
-                    scale=alt.Scale(padding=0.12),
+                    axis=alt.Axis(labelAngle=0, labelFontWeight="bold", labelFontSize=12),
+                    scale=alt.Scale(padding=0.15),
                 ),
                 y=alt.Y(
                     "Summa (€):Q",
                     title="Summa (€)",
-                    scale=alt.Scale(domain=[y_min - pad, y_max + pad], zero=False),
-                    axis=alt.Axis(format=",.0f", tickCount=9),
+                    scale=alt.Scale(domain=[y_min - pad, y_max + pad], zero=False, nice=True),
+                    axis=alt.Axis(format=",.0f", tickCount=14, grid=True),
                 ),
                 color=alt.Color(
                     "Rādītājs:N",
                     scale=color_scale,
-                    legend=alt.Legend(title=None, orient="top"),
+                    legend=alt.Legend(title=None, orient="top", labelFontSize=12),
                 ),
                 tooltip=[
                     alt.Tooltip("Periods:N", title="Periods"),
@@ -1028,10 +1044,10 @@ def render_overview_charts(amounts_df: pd.DataFrame, kpi_df: pd.DataFrame, fy_st
                 ],
             )
 
-            lines = base.mark_line(strokeWidth=3.2)
-            points = base.mark_circle(size=80)
-            zero_rule = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(strokeDash=[4, 4], color="#64748B").encode(y="y:Q")
-            st.altair_chart((zero_rule + lines + points).properties(height=410).interactive(), use_container_width=True)
+            lines = base.mark_line(strokeWidth=3.5)
+            points = base.mark_circle(size=95)
+            zero_rule = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(strokeDash=[4, 4], color="#475569", strokeWidth=1.5).encode(y="y:Q")
+            st.altair_chart((zero_rule + lines + points).properties(height=560).interactive(), use_container_width=True)
 
     kpi_m_cols = [c for c in period_cols if c in kpi_df.columns]
     if not kpi_m_cols:
@@ -1071,7 +1087,7 @@ def render_overview_charts(amounts_df: pd.DataFrame, kpi_df: pd.DataFrame, fy_st
                 tooltip=["Periods:N", "Rādītājs:N", alt.Tooltip("Vērtība:Q", format=".2f")],
             )
             ref_one = alt.Chart(pd.DataFrame({"y": [1.0]})).mark_rule(strokeDash=[2, 2], color="#999999").encode(y="y:Q")
-            st.altair_chart((ref_one + fact_prod + trend_prod).properties(height=320).interactive(), use_container_width=True)
+            st.altair_chart((ref_one + fact_prod + trend_prod).properties(height=360).interactive(), use_container_width=True)
 
     with g_col2:
         with st.container(border=True):
@@ -1111,7 +1127,7 @@ def render_overview_charts(amounts_df: pd.DataFrame, kpi_df: pd.DataFrame, fy_st
                 color=alt.Color("Rādītājs:N", scale=alt.Scale(domain=w_domain, range=w_colors)),
                 tooltip=["Periods:N", "Rādītājs:N", alt.Tooltip("Vērtība:Q", format=".2f")],
             )
-            st.altair_chart((fact_w + trend_w).properties(height=320).interactive(), use_container_width=True)
+            st.altair_chart((fact_w + trend_w).properties(height=360).interactive(), use_container_width=True)
 
 
 def rebuild_report_from_account_snapshot(res, acc_details: list[dict]):
@@ -1718,13 +1734,17 @@ st.markdown(
         padding: 6px 12px; border-radius: 6px; margin-bottom: 6px; border-left: 5px solid #C2410C; font-size: 13px;
     }}
     .top-brand-bar {{
-        display: flex; align-items: baseline; gap: 12px;
+        display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
     }}
     .top-brand-title {{
         font-size: 20px; font-weight: 800; letter-spacing: -0.5px; margin: 0;
     }}
     .top-brand-sub {{
-        font-size: 13px; opacity: 0.8;
+        font-size: 13px; opacity: 0.85;
+    }}
+    .unsaved-pill {{
+        background-color: #FEF3C7; color: #92400E; border: 1px solid #F59E0B;
+        padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600;
     }}
     </style>
     """,
@@ -1735,6 +1755,7 @@ st.markdown(
 def build_global_diagnostic_context(profile_store: SupabaseProfileStore) -> str:
     parts = [f"Aktīvais uzņēmuma profils: {S.get('active_profile', 'Nav')}"]
     parts.append(f"Pašreizējā atvērtā sadaļa aplikācijā: {S.get('nav_page', 'overview')}")
+    parts.append(f"Aktīvā atskaite: {S.get('loaded_report_meta', {}).get('report_name', 'Jauna atskaite')}")
     parts.append(
         f"Finanšu gada sākums: {S.get('fy_start_day', 1)}. {MONTH_NAMES_LV.get(S.get('fy_start_month', 1), 'Janvāris')}"
     )
@@ -1840,7 +1861,6 @@ def execute_assistant_action(act: dict, profile_store: SupabaseProfileStore) -> 
         explicit_ord = act.get("order") if isinstance(act.get("order"), list) else None
         keep_oth = bool(act.get("keep_other_last", True))
         new_ord = reorder_table_subgroups(res, main_code=mc, mode=mode, explicit_order=explicit_ord, keep_other_last=keep_oth)
-        persist_active_report_changes(profile_store)
         return True, f"Apakšgrupas grupā **{mc}** ir sakārtotas jaunajā secībā: {', '.join(new_ord)}!"
 
     if act_type in ("split_or_move_accounts", "create_subgroup"):
@@ -2095,6 +2115,7 @@ if not S.get("auto_loaded_latest", False):
             S.result = apply_custom_row_order_to_result(strip_excluded_rows(init_res))
             S.loaded_report_meta = loaded_init
             S.current_report_id = loaded_init["id"]
+            S.has_unsaved_changes = False
             comm_clean, acc_snap = unpack_commentary_and_account_details(loaded_init.get("commentary"))
             S.loaded_account_details = acc_snap
             if comm_clean:
@@ -2103,7 +2124,31 @@ if not S.get("auto_loaded_latest", False):
                 S.pop("commentary", None)
 
 
-# ------------------------------------------------------------------ ASISTENTA IEKŠĒJAIS LOGS (AR POGU "SŪTĪT BALSS JAUTĀJUMU")
+# ------------------------------------------------------------------ VIENOTS DARBA PERIODA SINHRONIZATORA PALĪGS
+def ensure_shared_working_period(all_months: list[str], months_by_year: dict[int, list[str]]) -> tuple[list[str], list[str]]:
+    """
+    Nodrošina, ka izvēlētais periods (piem., 'Pēdējie 12 mēneši' vai manuāla mēnešu izlase)
+    saglabājas un ir vienots gan Pārskatā, gan Scenāriju simulācijā!
+    """
+    preset_opts = [f"Visi mēneši ({len(all_months)} mēn.)"]
+    for yr in sorted(months_by_year.keys()):
+        preset_opts.append(f"{yr}. gads ({len(months_by_year[yr])} mēn.)")
+    if len(all_months) > 12:
+        preset_opts.append("Pēdējie 12 mēneši")
+    if len(all_months) >= 6:
+        preset_opts.append("Pirmie 6 mēneši")
+        preset_opts.append("Pēdējie 6 mēneši")
+    preset_opts.append("Manuāla mēnešu izlase")
+
+    if "working_period_preset" not in S or S.working_period_preset not in preset_opts:
+        S.working_period_preset = preset_opts[0]
+    if "working_months_active" not in S or not set(S.working_months_active).issubset(set(all_months)) or not S.working_months_active:
+        S.working_months_active = list(all_months)
+
+    return preset_opts, S.working_months_active
+
+
+# ------------------------------------------------------------------ ASISTENTA IEKŠĒJAIS LOGS (AR VIENMĒR REDZAMU SŪTĪŠANAS POGU UN AUTO-SŪTĪŠANU)
 def _render_assistant_popover_content(form_key: str) -> None:
     top_c1, top_c2 = st.columns([1.8, 1.2], vertical_alignment="center")
     with top_c1:
@@ -2177,7 +2222,7 @@ def _render_assistant_popover_content(form_key: str) -> None:
     with st.form(form_key, clear_on_submit=True):
         q_in = st.text_input("Jautājums", placeholder="Rakstiet savu jautājumu šeit...", label_visibility="collapsed")
         f_c1, f_c2 = st.columns([2.2, 1.2])
-        sub_q = f_c1.form_submit_button("Sūtīt", type="primary", use_container_width=True)
+        sub_q = f_c1.form_submit_button("Sūtīt tekstu", type="primary", use_container_width=True)
         clr_q = f_c2.form_submit_button("Notīrīt", use_container_width=True)
         if sub_q and q_in.strip():
             S.global_chat.append({"role": "user", "content": q_in.strip()})
@@ -2196,22 +2241,30 @@ def _render_assistant_popover_content(form_key: str) -> None:
             S["asist_audio_ver"] = S.get("asist_audio_ver", 0) + 1
             st.rerun()
 
-    # BALSS IERAKSTS AR SKAIDRU POGU "SŪTĪT BALSS JAUTĀJUMU"
+    # BALSS IEVADE: Poga "Sūtīt balss jautājumu" ir redzama VIENMĒR, un tiklīdz ieraksts ir pabeigts, tas tiek nosūtīts!
     if hasattr(st, "audio_input"):
-        asist_audio = st.audio_input(
-            "🎙️ Vai ierunājiet jautājumu ar balsi",
-            key=f"asist_voice_{form_key}_{S.get('asist_audio_ver', 0)}",
-        )
-        if asist_audio is not None:
-            send_voice_btn = st.button(
-                "Sūtīt balss jautājumu",
-                key=f"send_voice_btn_{form_key}",
+        v_col1, v_col2 = st.columns([1.8, 1.2], vertical_alignment="bottom")
+        with v_col1:
+            asist_audio = st.audio_input(
+                "🎙️ Balss jautājums (spiediet mikrofonu)",
+                key=f"asist_voice_{form_key}_{S.get('asist_audio_ver', 0)}",
+            )
+        with v_col2:
+            manual_voice_send = st.button(
+                "Sūtīt balss ziņu",
+                key=f"send_voice_always_{form_key}",
                 type="primary",
                 use_container_width=True,
+                help="Pabeidziet ierunāt mikrofonā (nospiediet Stop) vai spiediet šeit, lai nosūtītu balss jautājumu.",
             )
-            if send_voice_btn:
+
+        if asist_audio is not None:
+            a_bytes = asist_audio.getvalue()
+            a_hash = hashlib.md5(a_bytes).hexdigest()
+            if S.get("last_asist_audio_hash") != a_hash or manual_voice_send:
+                S["last_asist_audio_hash"] = a_hash
                 with st.spinner("Atpazīst balss jautājumu un gatavo atbildi..."):
-                    transcribed_q, err_v = transcribe_wav_bytes_lv(asist_audio.getvalue())
+                    transcribed_q, err_v = transcribe_wav_bytes_lv(a_bytes)
                     if transcribed_q:
                         S.global_chat.append({"role": "user", "content": transcribed_q})
                         try:
@@ -2226,6 +2279,8 @@ def _render_assistant_popover_content(form_key: str) -> None:
                         st.rerun()
                     elif err_v:
                         st.warning(err_v)
+        elif manual_voice_send:
+            st.caption("ℹ️ Vispirms nospiediet sarkano kvadrātiņu (Stop) pie mikrofona, lai pabeigtu balss ierakstu, un tas uzreiz nosūtīsies!")
 
 
 # ------------------------------------------------------------------ 4. PELDOŠA (STICKY) UN IZCELTA AUGŠĒJĀ RĪKJOSLA
@@ -2242,6 +2297,12 @@ active_rep_label = (
     S.loaded_report_meta.get("report_name")
     if S.get("loaded_report_meta")
     else ("Jauns aprēķins" if "result" in S else "Nav izvēlēta")
+)
+
+unsaved_badge_html = (
+    '&nbsp; <span class="unsaved-pill">● Ir nesaglabātas izmaiņas (oriģināls arhīvā ir drošībā)</span>'
+    if S.get("has_unsaved_changes")
+    else ""
 )
 
 with st.container():
@@ -2262,7 +2323,7 @@ with st.container():
             st.markdown(
                 f'<div class="top-brand-bar">'
                 f'<span class="top-brand-title">TOC-FIN</span>'
-                f'<span class="top-brand-sub">Profils: <b>{S.active_profile}</b> &nbsp;|&nbsp; Atskaite: <b>{active_rep_label}</b></span>'
+                f'<span class="top-brand-sub">Profils: <b>{S.active_profile}</b> &nbsp;|&nbsp; Aktīvā atskaite: <b>{active_rep_label}</b>{unsaved_badge_html}</span>'
                 f'</div>',
                 unsafe_allow_html=True,
             )
@@ -2298,7 +2359,7 @@ with st.container():
 
 
 # ==============================================================================
-# POSMS 1: PĀRSKATS (OVERVIEW)
+# POSMS 1: PĀRSKATS (OVERVIEW) — AR VIENOTU DARBA PERIODU UN ATSKAITES VERSIJU SAGLABĀŠANU
 # ==============================================================================
 if S.nav_page == "overview":
     if "result" not in S or S.result is None:
@@ -2319,73 +2380,100 @@ if S.nav_page == "overview":
         if yr:
             months_by_year.setdefault(yr, []).append(m_col)
 
-    fin_preset_opts = [f"Visi mēneši ({len(all_months)} mēn.)"]
-    for yr in sorted(months_by_year.keys()):
-        fin_preset_opts.append(f"{yr}. gads ({len(months_by_year[yr])} mēn.)")
-    if len(all_months) > 12:
-        fin_preset_opts.append("Pēdējie 12 mēneši")
-    if len(all_months) >= 6:
-        fin_preset_opts.append("Pirmie 6 mēneši")
-        fin_preset_opts.append("Pēdējie 6 mēneši")
-    fin_preset_opts.append("Manuāla mēnešu izlase")
+    fin_preset_opts, _ = ensure_shared_working_period(all_months, months_by_year)
 
-    if "fin_period_preset" not in S or S.fin_period_preset not in fin_preset_opts:
-        S.fin_period_preset = fin_preset_opts[0]
-    if "fin_months_active" not in S or not set(S.fin_months_active).issubset(set(all_months)):
-        S.fin_months_active = list(all_months)
-
-    def _on_fin_preset_change():
-        p = S.fin_period_preset
+    def _on_working_preset_change():
+        p = S.working_period_preset
         if p.startswith("Visi mēneši"):
-            S.fin_months_active = list(all_months)
+            S.working_months_active = list(all_months)
         elif p == "Pēdējie 12 mēneši":
-            S.fin_months_active = list(all_months[-12:])
+            S.working_months_active = list(all_months[-12:])
         elif p == "Pirmie 6 mēneši":
-            S.fin_months_active = list(all_months[:6])
+            S.working_months_active = list(all_months[:6])
         elif p == "Pēdējie 6 mēneši":
-            S.fin_months_active = list(all_months[-6:])
+            S.working_months_active = list(all_months[-6:])
         else:
             for yr_k, m_list in months_by_year.items():
                 if p.startswith(f"{yr_k}. gads"):
-                    S.fin_months_active = list(m_list)
+                    S.working_months_active = list(m_list)
                     break
 
-    def _on_fin_months_change():
-        cur = S.fin_months_active
+    def _on_working_months_change():
+        cur = S.working_months_active
         if cur == list(all_months):
-            S.fin_period_preset = fin_preset_opts[0]
+            S.working_period_preset = fin_preset_opts[0]
         else:
-            S.fin_period_preset = "Manuāla mēnešu izlase"
+            S.working_period_preset = "Manuāla mēnešu izlase"
 
-    bar_c1, bar_c2, bar_c3, _ = st.columns([1.4, 1.2, 1.1, 2.3], vertical_alignment="bottom")
+    bar_c1, bar_c2, bar_c3, bar_c4, _ = st.columns([1.4, 1.2, 1.45, 1.1, 0.85], vertical_alignment="bottom")
     with bar_c1:
         st.selectbox(
-            "Periods pārskatam",
+            "Aktīvais darba periods (arī Simulācijai)",
             options=fin_preset_opts,
-            key="fin_period_preset",
-            on_change=_on_fin_preset_change,
+            key="working_period_preset",
+            on_change=_on_working_preset_change,
         )
 
-    cur_fin_months = S.get("fin_months_active", all_months)
+    cur_fin_months = S.get("working_months_active", all_months)
     with bar_c2:
         with st.popover(f"Mēnešu izlase ({len(cur_fin_months)}/{len(all_months)})", use_container_width=True):
-            st.caption("Atzīmējiet mēnešus, kurus iekļaut tabulā:")
+            st.caption("Atzīmējiet mēnešus, ar kuriem vēlaties strādāt Pārskatā un Simulācijā:")
             st.multiselect(
                 "Izvēlētie mēneši",
                 options=all_months,
-                key="fin_months_active",
-                on_change=_on_fin_months_change,
+                key="working_months_active",
+                on_change=_on_working_months_change,
                 label_visibility="collapsed",
             )
 
-    fin_selected_months = [m for m in all_months if m in S.get("fin_months_active", all_months)]
+    fin_selected_months = [m for m in all_months if m in S.get("working_months_active", all_months)]
     if not fin_selected_months:
         st.warning("Izvēlieties vismaz vienu mēnesi finanšu pārskata tabulai.")
         st.stop()
 
     view_res = filter_result_by_months(res, fin_selected_months, all_months)
 
+    # POGA ATSKAITES VERSIJU SAGLABĀŠANAI (lai vecā versija vienmēr paliek drošībā un var saglabāt jauno vai perioda versiju!)
     with bar_c3:
+        save_btn_lbl = "💾 Saglabāt izmaiņas / Versiju ▾" if S.get("has_unsaved_changes") else "Saglabāt skatu / Versiju ▾"
+        with st.popover(save_btn_lbl, use_container_width=True):
+            st.markdown("**Saglabāt pašreizējo pārskatu**")
+            st.caption(
+                "Oriģinālā atskaite arhīvā vienmēr paliek drošībā! Šeit varat saglabāt savas kontu izmaiņas vai izvēlēto mēnešu periodu kā **jaunu atskaites versiju** vai atjaunināt esošo."
+            )
+            default_ver_name = (
+                f"{active_rep_label} ({fin_selected_months[0]}–{fin_selected_months[-1]})"
+                if len(fin_selected_months) < len(all_months)
+                else f"{active_rep_label} (v2)"
+            )
+            new_ver_name_in = st.text_input("Nosaukums jaunai versijai", value=default_ver_name, key="ov_save_ver_name")
+            save_scope = st.radio(
+                "Ko iekļaut saglabātajā atskaitē?",
+                options=[
+                    f"Tikai izvēlēto darba periodu ({len(fin_selected_months)} mēn.)",
+                    f"Visus faila mēnešus ({len(all_months)} mēn.)",
+                ],
+                key="ov_save_scope_radio",
+            )
+            target_res_obj = view_res if save_scope.startswith("Tikai") else res
+
+            if st.button("➕ Saglabāt kā JAUNU atskaiti (vecā paliek arhīvā)", type="primary", use_container_width=True):
+                ok_sv, _ = save_report_as_new_or_update(profile, target_res_obj, new_ver_name_in.strip())
+                if ok_sv:
+                    if save_scope.startswith("Tikai"):
+                        S.result = view_res
+                        S.pop("working_months_active", None)
+                        S.pop("working_period_preset", None)
+                    st.toast(f"Jauna atskaites versija '{new_ver_name_in}' saglabāta! Vecā versija joprojām ir atrodama arhīvā.")
+                    st.rerun()
+
+            if S.get("current_report_id") and st.button("🔄 Pārrakstīt pašreizējo atskaiti", use_container_width=True):
+                ok_up, _ = save_report_as_new_or_update(profile, target_res_obj, active_rep_label)
+                if ok_up:
+                    st.toast(f"Atskaite '{active_rep_label}' atjaunināta!")
+                    st.rerun()
+
+    with bar_c4:
         with st.popover("Lejupielādēt Excel ▾", use_container_width=True):
             st.caption("Izvēlieties Excel faila veidu:")
             try:
@@ -2427,7 +2515,7 @@ if S.nav_page == "overview":
             view_res.main,
             view_res.kpi,
             view_res.row_kinds,
-            title_main="Finanšu pārskata tabula",
+            title_main=f"Finanšu pārskata tabula — {active_rep_label} ({len(fin_selected_months)} mēn.)",
             title_kpi="Produktivitātes un atdeves rādītāji",
             fy_start_month=S.get("fy_start_month", 1),
             show_cumulative=True,
@@ -2514,7 +2602,7 @@ if S.nav_page == "overview":
 
 
 # ==============================================================================
-# POSMS 2: SCENĀRIJU SIMULĀCIJA
+# POSMS 2: SCENĀRIJU SIMULĀCIJA (IZMANTO TO PAŠU VIENOTO DARBA PERIODU KĀ PĀRSKATS!)
 # ==============================================================================
 elif S.nav_page == "simulation":
     st.subheader("Scenāriju simulācija un Jauns projekts")
@@ -2537,59 +2625,50 @@ elif S.nav_page == "simulation":
     tvc_children = [r for r in res.amounts.index if res.row_kinds.get(r) == "TVC_CHILD"]
     oe_children = [r for r in res.amounts.index if res.row_kinds.get(r) == "OE_CHILD"]
 
-    sim_preset_opts = [f"Visi mēneši ({len(all_months)} mēn.)"]
-    for yr in sorted(months_by_year.keys()):
-        sim_preset_opts.append(f"{yr}. gads ({len(months_by_year[yr])} mēn.)")
-    if len(all_months) >= 6:
-        sim_preset_opts.append("Pirmie 6 mēneši")
-        sim_preset_opts.append("Pēdējie 6 mēneši")
-    sim_preset_opts.append("Manuāla mēnešu izlase")
-
-    if "sim_preset_sel" not in S or S.sim_preset_sel not in sim_preset_opts:
-        S.sim_preset_sel = sim_preset_opts[0]
-    if "sim_months_active" not in S or not set(S.sim_months_active).issubset(set(all_months)):
-        S.sim_months_active = list(all_months)
+    sim_preset_opts, _ = ensure_shared_working_period(all_months, months_by_year)
     if "sim_situation_text" not in S:
         S.sim_situation_text = ""
 
-    def _on_sim_preset_change():
-        p = S.sim_preset_sel
+    def _on_sim_working_preset_change():
+        p = S.working_period_preset
         if p.startswith("Visi mēneši"):
-            S.sim_months_active = list(all_months)
+            S.working_months_active = list(all_months)
+        elif p == "Pēdējie 12 mēneši":
+            S.working_months_active = list(all_months[-12:])
         elif p == "Pirmie 6 mēneši":
-            S.sim_months_active = list(all_months[:6])
+            S.working_months_active = list(all_months[:6])
         elif p == "Pēdējie 6 mēneši":
-            S.sim_months_active = list(all_months[-6:])
+            S.working_months_active = list(all_months[-6:])
         else:
             for yr_k, m_list in months_by_year.items():
                 if p.startswith(f"{yr_k}. gads"):
-                    S.sim_months_active = list(m_list)
+                    S.working_months_active = list(m_list)
                     break
 
-    def _on_sim_months_change():
-        cur = S.sim_months_active
+    def _on_sim_working_months_change():
+        cur = S.working_months_active
         if cur == list(all_months):
-            S.sim_preset_sel = sim_preset_opts[0]
+            S.working_period_preset = sim_preset_opts[0]
         else:
-            S.sim_preset_sel = "Manuāla mēnešu izlase"
+            S.working_period_preset = "Manuāla mēnešu izlase"
 
-    p_col1, p_col2, p_col3, _ = st.columns([1.3, 1.3, 1.2, 2.2], vertical_alignment="bottom")
+    p_col1, p_col2, p_col3, _ = st.columns([1.4, 1.2, 1.2, 2.2], vertical_alignment="bottom")
     with p_col1:
         st.selectbox(
-            "Periods simulācijai",
+            "Aktīvais darba periods (vienots ar Pārskatu)",
             options=sim_preset_opts,
-            key="sim_preset_sel",
-            on_change=_on_sim_preset_change,
+            key="working_period_preset",
+            on_change=_on_sim_working_preset_change,
         )
 
-    cur_sim_months = S.get("sim_months_active", all_months)
+    cur_sim_months = S.get("working_months_active", all_months)
     with p_col2:
         with st.popover(f"Mēnešu izlase ({len(cur_sim_months)}/{len(all_months)})", use_container_width=True):
             st.multiselect(
                 "Mēneši simulācijā",
                 options=all_months,
-                key="sim_months_active",
-                on_change=_on_sim_months_change,
+                key="working_months_active",
+                on_change=_on_sim_working_months_change,
                 label_visibility="collapsed",
             )
     with p_col3:
@@ -2607,7 +2686,7 @@ elif S.nav_page == "simulation":
             S["sim_audio_ver"] = S.get("sim_audio_ver", 0) + 1
             st.rerun()
 
-    selected_months = [m for m in all_months if m in S.get("sim_months_active", all_months)]
+    selected_months = [m for m in all_months if m in S.get("working_months_active", all_months)]
     if not selected_months:
         st.warning("Izvēlieties vismaz vienu mēnesi.")
         st.stop()
@@ -2997,7 +3076,7 @@ elif S.nav_page == "simulation":
             sim_main_df,
             sim_kpi_df,
             sim_row_kinds,
-            title_main=f"Simulētā tabula ({len(selected_months)} mēn.)",
+            title_main=f"Simulētā tabula — {active_rep_label} ({len(selected_months)} mēn.)",
             title_kpi="Simulētie produktivitātes rādītāji",
             grey_cols={"Bāze KOPĀ"},
             muted_cols={"Δ Izmaiņa (€)"},
@@ -3046,14 +3125,30 @@ elif S.nav_page == "simulation":
 
 
 # ==============================================================================
-# POSMS 3: KONTU STRUKTŪRA (INTUITĪVS UN PILNS APAKŠGRUPU UN KONTU PĀRVALDNIEKS)
+# POSMS 3: KONTU STRUKTŪRA (AR PĀRREDZAMU 2 SOĻU KONTU FILTRU UN VERSIJU SAGLABĀŠANU)
 # ==============================================================================
 elif S.nav_page == "accounts_explorer":
-    st.subheader("Kontu struktūra un Apakšgrupu vadība")
-    st.caption(
-        "Šeit varat brīvi **pārvietot kontus** no vienas apakšgrupas uz citu, **apvienot apakšgrupas**, "
-        "**izveidot jaunu apakšgrupu** vai **pārdēvēt esošu**, kā arī apskatīt katra PZA konta mēnešu skaitļus."
-    )
+    top_exp_c1, top_exp_c2 = st.columns([2.8, 1.2], vertical_alignment="center")
+    with top_exp_c1:
+        st.subheader("Kontu struktūra un Apakšgrupu vadība")
+        st.caption(
+            f"Aktīvā atskaite: **{active_rep_label}** — visas izmaiņas varat saglabāt kā jaunu versiju vai atjaunināt esošo."
+        )
+    with top_exp_c2:
+        if S.get("has_unsaved_changes"):
+            with st.popover("💾 Saglabāt veiktās izmaiņas ▾", use_container_width=True):
+                st.markdown("**Saglabāt kontu un apakšgrupu izmaiņas**")
+                ver_nm_exp = st.text_input("Nosaukums jaunai versijai", value=f"{active_rep_label} (rediģēts)", key="exp_save_ver_nm")
+                if st.button("➕ Saglabāt kā JAUNU versiju (vecā paliek)", type="primary", use_container_width=True):
+                    ok_sv, _ = save_report_as_new_or_update(profile, S.result, ver_nm_exp)
+                    if ok_sv:
+                        st.toast(f"Saglabāta jauna versija '{ver_nm_exp}'!")
+                        st.rerun()
+                if S.get("current_report_id") and st.button("🔄 Pārrakstīt esošo atskaiti", use_container_width=True):
+                    ok_up, _ = save_report_as_new_or_update(profile, S.result, active_rep_label)
+                    if ok_up:
+                        st.toast("Esošā atskaite atjaunināta!")
+                        st.rerun()
 
     has_live_pza = ("cls_df" in S and S.cls_df is not None and not S.cls_df.empty and "analysis" in S and S.analysis is not None)
     snap_details: list[dict] = S.get("loaded_account_details") or []
@@ -3090,6 +3185,15 @@ elif S.nav_page == "accounts_explorer":
         ]
 
     existing_sub_labels = [lbl for k, lbl in SUBGROUP_LABELS.items() if k != "EXCLUDED"]
+    mc_badge_icon = {"S": "🟡 [S]", "TVC": "🟠 [TVC]", "OE": "🍑 [OE]", "EXCL": "⚪ [Izsl.]"}
+
+    def _format_account_option_clean(it: dict) -> str:
+        gk = normalize_group_key(it.get("group", "OE_OTHER"))
+        mc = get_main_code(gk)
+        sub_l = SUBGROUP_LABELS.get(gk, gk)
+        badge = mc_badge_icon.get(mc, f"[{mc}]")
+        tot_s = fmt_num(abs(float(it.get("total", 0.0))))
+        return f"{badge} {sub_l}  ▸  {it['label']}  ({tot_s} €)"
 
     with st.container(border=True):
         st.markdown("##### ⚙️ Ātrā apakšgrupu un kontu vadība")
@@ -3102,32 +3206,47 @@ elif S.nav_page == "accounts_explorer":
             ]
         )
 
+        # 1. CILNE: Pārskatāma 2 soļu kontu izvēle (vispirms var izvēlēties apakšgrupu, no kuras izņemt!)
         with tab_move:
-            st.caption("Izvēlieties vienu vai vairākus kontus un norādiet, kurai apakšgrupai tos pievienot:")
-            acc_options_map = {
-                f"{it['label']}  (šobrīd: {SUBGROUP_LABELS.get(normalize_group_key(it['group']), it['group'])} | {fmt_num(abs(float(it.get('total', 0))))} €)": it["label"]
-                for it in all_acc_items
-            }
-            mv_c1, mv_c2, mv_c3 = st.columns([2.2, 1.5, 0.9], vertical_alignment="bottom")
-            with mv_c1:
+            st.caption("Vispirms varat izvēlēties apakšgrupu, no kuras vēlaties izņemt kontu, lai sarakstā rādītos tikai tās konti:")
+            mv_f1, mv_f2, mv_f3, mv_f4 = st.columns([1.3, 2.0, 1.4, 0.85], vertical_alignment="bottom")
+            with mv_f1:
+                used_sub_names = sorted(
+                    {SUBGROUP_LABELS.get(normalize_group_key(it["group"]), it["group"]) for it in all_acc_items},
+                    key=lambda x: GROUP_SORT_ORDER.get(LABEL_TO_KEY.get(x, "OE_OTHER"), 50),
+                )
+                filter_src_sub = st.selectbox(
+                    "1. No kuras grupas izņemt",
+                    options=["Visas apakšgrupas"] + used_sub_names,
+                    key="mgr_filter_src_sub",
+                )
+
+            filtered_items_for_move = [
+                it for it in all_acc_items
+                if filter_src_sub == "Visas apakšgrupas"
+                or SUBGROUP_LABELS.get(normalize_group_key(it["group"]), it["group"]) == filter_src_sub
+            ]
+            filtered_acc_map = {_format_account_option_clean(it): it["label"] for it in filtered_items_for_move}
+
+            with mv_f2:
                 sel_acc_nice = st.multiselect(
-                    "Konti, kurus pārvietot",
-                    options=list(acc_options_map.keys()),
-                    placeholder="Izvēlieties kontu(s)...",
+                    f"2. Konti ({len(filtered_acc_map)} pieejami)",
+                    options=list(filtered_acc_map.keys()),
+                    placeholder="Izvēlieties vienu vai vairākus kontus...",
                     key="mgr_mv_accs",
                 )
-            with mv_c2:
+            with mv_f3:
                 dest_sub_sel = st.selectbox(
-                    "Uz kuru apakšgrupu pārlikt",
+                    "3. Uz kuru apakšgrupu pārlikt",
                     options=existing_sub_labels + [SUBGROUP_LABELS["EXCLUDED"]],
                     key="mgr_mv_dest",
                 )
-            with mv_c3:
-                if st.button("Pārvietot kontus", type="primary", use_container_width=True, key="mgr_btn_mv"):
+            with mv_f4:
+                if st.button("Pārvietot", type="primary", use_container_width=True, key="mgr_btn_mv"):
                     if not sel_acc_nice:
-                        st.warning("Vispirms izvēlieties vismaz vienu kontu.")
+                        st.warning("Izvēlieties vismaz vienu kontu.")
                     else:
-                        raw_names = [acc_options_map[k] for k in sel_acc_nice]
+                        raw_names = [filtered_acc_map[k] for k in sel_acc_nice]
                         dest_key = LABEL_TO_KEY.get(dest_sub_sel, "OE_OTHER")
                         dest_mc = get_main_code(dest_key)
                         ok_m, msg_m = move_specific_accounts_to_subgroup(raw_names, dest_sub_sel, dest_mc, profile)
@@ -3154,6 +3273,7 @@ elif S.nav_page == "accounts_explorer":
 
         with tab_new:
             st.caption("Izveidojiet jaunu apakšgrupu un pēc izvēles uzreiz pārceliet uz to kontus:")
+            all_acc_map_clean = {_format_account_option_clean(it): it["label"] for it in all_acc_items}
             nw1, nw2, nw3, nw4 = st.columns([1.4, 1.2, 1.6, 0.9], vertical_alignment="bottom")
             with nw1:
                 new_sub_name = st.text_input("Jaunās apakšgrupas nosaukums", placeholder="piem., Personāla pasākumi", key="mgr_new_lbl")
@@ -3166,7 +3286,7 @@ elif S.nav_page == "accounts_explorer":
             with nw3:
                 new_sub_accs = st.multiselect(
                     "Konti, ko uzreiz ielikt (neobligāti)",
-                    options=list(acc_options_map.keys()),
+                    options=list(all_acc_map_clean.keys()),
                     placeholder="Var izvēlēties arī vēlāk...",
                     key="mgr_new_accs",
                 )
@@ -3176,7 +3296,7 @@ elif S.nav_page == "accounts_explorer":
                         st.warning("Ievadiet jaunās apakšgrupas nosaukumu.")
                     else:
                         mc_code = "S" if new_sub_mc_lbl.startswith("S") else ("TVC" if new_sub_mc_lbl.startswith("TVC") else "OE")
-                        raw_accs_for_new = [acc_options_map[k] for k in new_sub_accs]
+                        raw_accs_for_new = [all_acc_map_clean[k] for k in new_sub_accs]
                         ok_nw, msg_nw = move_specific_accounts_to_subgroup(raw_accs_for_new, new_sub_name.strip(), mc_code, profile)
                         if ok_nw:
                             st.toast(msg_nw)
@@ -3292,12 +3412,12 @@ elif S.nav_page == "accounts_explorer":
 # ==============================================================================
 elif S.nav_page == "archive":
     st.subheader("Saglabātās atskaites un simulācijas")
-    st.caption("Šeit varat pārskatīt, atvērt vai dzēst iepriekš saglabātās finanšu atskaites un scenāriju simulācijas.")
+    st.caption("Šeit varat pārskatīt, atvērt vai dzēst iepriekš saglabātās finanšu atskaites (pilnos periodus un saglabātās versijas) un scenāriju simulācijas.")
 
     arch_col1, arch_col2 = st.columns(2)
 
     with arch_col1:
-        st.markdown("#### Finanšu atskaites")
+        st.markdown("#### Finanšu atskaites un saglabātās versijas")
         if not fin_reports:
             st.info("Nav saglabātu finanšu atskaišu.")
         else:
@@ -3328,8 +3448,9 @@ elif S.nav_page == "archive":
                                 S.result = apply_custom_row_order_to_result(strip_excluded_rows(loaded_res))
                                 S.loaded_report_meta = loaded
                                 S.current_report_id = loaded["id"]
-                                S.pop("fin_months_active", None)
-                                S.pop("fin_period_preset", None)
+                                S.has_unsaved_changes = False
+                                S.pop("working_months_active", None)
+                                S.pop("working_period_preset", None)
                                 comm_clean, acc_snap = unpack_commentary_and_account_details(loaded.get("commentary"))
                                 S.loaded_account_details = acc_snap
                                 if comm_clean:
@@ -3388,6 +3509,7 @@ elif S.nav_page == "archive":
                                 )
                                 S.result = apply_custom_row_order_to_result(strip_excluded_rows(loaded_sim_res))
                                 S.loaded_report_meta = loaded_s
+                                S.has_unsaved_changes = False
                                 try:
                                     sim_state = json.loads(loaded_s.get("commentary") or "{}")
                                     for r_k in loaded_sim_res.amounts.index:
@@ -3399,7 +3521,8 @@ elif S.nav_page == "archive":
                                         S[f"sim_eur_{k_s}"] = float(v_s)
                                     S["sim_situation_text"] = str(sim_state.get("situation_description") or "")
                                     if sim_state.get("selected_months"):
-                                        S["sim_months_active"] = list(sim_state["selected_months"])
+                                        S["working_months_active"] = list(sim_state["selected_months"])
+                                        S["working_period_preset"] = "Manuāla mēnešu izlase"
                                     np_cfg = sim_state.get("new_product", {})
                                     S["np_enabled"] = bool(np_cfg.get("enabled", False))
                                     S["np_name"] = str(np_cfg.get("name", "Jauns produkts / projekts"))
@@ -3817,8 +3940,9 @@ elif S.nav_page == "ingest":
             compute_toc_with_dynamic_subgroups(an.leaves, mapping, an.ex.period_cols, reported)
         )
         S.result = res
-        S.pop("fin_months_active", None)
-        S.pop("fin_period_preset", None)
+        S.has_unsaved_changes = False
+        S.pop("working_months_active", None)
+        S.pop("working_period_preset", None)
 
         acc_snapshot = build_account_details_snapshot(an.leaves, cls_sorted, an.ex.period_cols)
         S.loaded_account_details = acc_snapshot
@@ -3837,6 +3961,7 @@ elif S.nav_page == "ingest":
             S.loaded_report_meta = {
                 "id": rep_id,
                 "report_name": report_custom_name.strip() or default_rep_name,
+                "file_name": uploaded.name,
                 "periods_label": f"{len(an.ex.period_cols)} periodi",
             }
             if ok_map and ok_rep:
@@ -3848,7 +3973,7 @@ elif S.nav_page == "ingest":
 
 
 # ==============================================================================
-# POSMS 6: PROFILS UN UZSTĀDĪJUMI (BEZ 4. BLOKA — KONTU VADĪBA IR KONTU STRUKTŪRĀ)
+# POSMS 6: PROFILS UN UZSTĀDĪJUMI
 # ==============================================================================
 elif S.nav_page == "settings":
     st.subheader(f"Profils un Uzstādījumi ({S.active_profile})")
