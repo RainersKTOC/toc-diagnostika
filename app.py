@@ -1,6 +1,6 @@
 """
-app.py — TOC-FIN Finanšu diagnostikas un vadības lēmumu sistēma (v25.3)
-Jauns produkts kā atsevišķas rindas zem S, TVC un T | Draudzīgs TOC Eksperts-Asistents | Balss ievade
+app.py — TOC-FIN Finanšu diagnostikas un vadības lēmumu sistēma (v25.4)
+Pilna S, TVC un T sadalījuma aile (Esošā darbība + Jaunais produkts + Kopā) | TOC Grāmatu Eksperts-Asistents
 Project ID: amprqueamdcxpjufigvm
 """
 from __future__ import annotations
@@ -49,9 +49,13 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Pievienojam gaiši zilu noformējumu T apakšrindai (jaunā produkta caurlaidībai T)
+# Pievienojam krāsu kodus T apakšrindām un starpsummu rindām simulācijā
 if "T_CHILD" not in FILLS:
     FILLS["T_CHILD"] = ("DAEEF3", False, "000000")
+if "S_SUBTOTAL" not in FILLS:
+    FILLS["S_SUBTOTAL"] = ("FFF9AE", True, "000000")
+if "TVC_SUBTOTAL" not in FILLS:
+    FILLS["TVC_SUBTOTAL"] = ("F8CBAD", True, "000000")
 
 EXTRA_OE_SUBGROUPS = {
     "OE_ADMIN_OTHER": ("Pārējās administrācijas izmaksas", "OE"),
@@ -164,13 +168,8 @@ def get_client() -> anthropic.Anthropic:
 
 
 def transcribe_wav_bytes_lv(audio_bytes: bytes) -> tuple[str, str]:
-    """
-    Pārvērš st.audio_input ierakstīto WAV failu latviešu tekstā.
-    """
     if not audio_bytes:
         return "", "Tukšs audio ieraksts."
-
-    # 1. Ja ir uzinstalēts SpeechRecognition
     try:
         import speech_recognition as sr  # type: ignore
         recognizer = sr.Recognizer()
@@ -179,62 +178,9 @@ def transcribe_wav_bytes_lv(audio_bytes: bytes) -> tuple[str, str]:
         txt = str(recognizer.recognize_google(audio_data, language="lv-LV")).strip()
         if txt:
             return txt, ""
-    except Exception:
-        pass
-
-    # 2. Tiešais WAV -> Google Speech-to-Text izsaukums ar oficiālo SpeechRecognition publisko atslēgu
-    try:
-        import wave
-        with wave.open(io.BytesIO(audio_bytes), "rb") as wf:
-            sample_rate = wf.getframerate()
-            n_channels = wf.getnchannels()
-            sampwidth = wf.getsampwidth()
-            frames = wf.readframes(wf.getnframes())
-
-        dtype_map = {1: np.int8, 2: np.int16, 4: np.int32}
-        if sampwidth in dtype_map:
-            arr = np.frombuffer(frames, dtype=dtype_map[sampwidth])
-            if n_channels > 1:
-                arr = arr.reshape(-1, n_channels)[:, 0]
-            if sampwidth == 4:
-                arr = (arr >> 16).astype(np.int16)
-            elif sampwidth == 1:
-                arr = ((arr.astype(np.int16) - 128) << 8)
-            raw_pcm = arr.astype(np.int16).tobytes()
-        else:
-            raw_pcm = frames
-
-        sr_default_key = (
-            "AIzaSyBo" + "ti4V_5I" + "J5n5n2" + "J5n5n"
-        )
-        # Izmantojam standarta Chromium Speech API atslēgu no SpeechRecognition pakotnes
-        real_sr_key = "AIzaSyCh8_5B9k8T2r2_HI6M8y1W3K8vX5Z8Q2M"
-        for candidate_k in ("AIzaSyD-9_9_5-k8T2r2", real_sr_key):
-            try:
-                url = f"http://www.google.com/speech-api/v2/recognize?output=json&lang=lv-LV&key={candidate_k}"
-                req = urllib.request.Request(
-                    url,
-                    data=raw_pcm,
-                    headers={"Content-Type": f"audio/l16; rate={sample_rate};"},
-                    method="POST",
-                )
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    raw_lines = resp.read().decode("utf-8", errors="ignore").splitlines()
-                for ln in raw_lines:
-                    if not ln.strip():
-                        continue
-                    obj = json.loads(ln)
-                    res_list = obj.get("result", [])
-                    if res_list and res_list[0].get("alternative"):
-                        transcript = res_list[0]["alternative"][0].get("transcript", "").strip()
-                        if transcript:
-                            return transcript, ""
-            except Exception:
-                continue
     except Exception as e:
-        return "", f"Lai balss atpazīšana strādātu uz servera, pievienojiet rindiņu `SpeechRecognition` savā `requirements.txt` failā ({e})."
-
-    return "", "Lai balss ieraksts automātiski pārvērstos tekstā, pievienojiet `SpeechRecognition` savā GitHub failā `requirements.txt`."
+        return "", f"Lai balss ieraksts darbotos uz servera, pievienojiet rindiņu `SpeechRecognition` savā GitHub failā `requirements.txt` ({e})."
+    return "", "Neizdevās sadzirdēt skaidru tekstu ierakstā."
 
 
 ACCOUNT_DETAILS_MARKER = "\n\n<!--TOC_ACC_DETAILS:"
@@ -675,59 +621,6 @@ def get_main_cat(group_key: str) -> str:
     return MAIN_GROUP_OPTIONS[2]
 
 
-def get_contextual_radio_options(agent_grp: str, konts_label: str, path_label: str = "") -> tuple[list[str], int]:
-    code = get_main_code(agent_grp)
-    combined = f"{konts_label} {path_label}".lower()
-    is_revenue_context = (
-        code == "S"
-        or ("ieņēm" in combined or "apgrozīj" in combined or "grant" in combined or "subsīd" in combined)
-        and not ("izmaks" in combined or "izdevum" in combined)
-    )
-
-    if is_revenue_context:
-        opts = [
-            "S — Ieņēmumi (Sales)",
-            "Izslēgt — Virtuāla nauda / neiekļaut",
-        ]
-        def_idx = 0 if code != "EXCL" else 1
-        return opts, def_idx
-    else:
-        opts = [
-            "TVC — Patiesi mainīga izmaksa (1:1 ar pārdošanu)",
-            "Uzturēšanas izmaksas (OE) — Kapacitātes / darbības izdevums",
-            "Izslēgt — Virtuāla nauda (amortizācija / nolietojums)",
-        ]
-        def_idx = {"TVC": 0, "OE": 1, "EXCL": 2}.get(code, 1)
-        return opts, def_idx
-
-
-def resolve_radio_choice(choice: str, original_group: str, konts_label: str) -> tuple[str, bool]:
-    orig_grp = normalize_group_key(original_group)
-    orig_code = get_main_code(orig_grp)
-    lbl_low = str(konts_label or "").lower()
-
-    if choice.startswith("S "):
-        target_code = "S"
-        fallback = "S_OTHER" if ("grant" in lbl_low or "citi" in lbl_low or "pārēj" in lbl_low) else "S_REV"
-    elif choice.startswith("TVC"):
-        target_code = "TVC"
-        fallback = "TVC_DELIVERY" if ("piegād" in lbl_low or "transp" in lbl_low or "kurjer" in lbl_low) else "TVC_MATERIALS"
-    elif choice.startswith("Izslēgt"):
-        target_code = "EXCL"
-        fallback = "EXCLUDED"
-    else:
-        target_code = "OE"
-        if "admin" in lbl_low:
-            fallback = "OE_ADMIN_OTHER"
-        elif "pārdoš" in lbl_low:
-            fallback = "OE_SALES_OTHER"
-        else:
-            fallback = "OE_OTHER"
-
-    final_grp = orig_grp if orig_code == target_code else fallback
-    return final_grp, final_grp.startswith("S_")
-
-
 GROUP_SORT_ORDER = {
     "S": 1,
     "S_REV": 1,
@@ -994,6 +887,15 @@ def render_unified_toc_tables_html(
         border-right: 2.5px solid #000000 !important;
         color: #000000 !important;
     }
+    table.toc-unified td.lbl-sub-bold {
+        text-align: left;
+        font-weight: 700;
+        padding-left: 16px;
+        padding-right: 8px;
+        border-left: 2.5px solid #000000 !important;
+        border-right: 2.5px solid #000000 !important;
+        color: #000000 !important;
+    }
     table.toc-unified td.val-col {
         text-align: right;
         border-left: 1px solid #222222 !important;
@@ -1041,6 +943,11 @@ def render_unified_toc_tables_html(
         html.append(f'<th class="th-val" style="{th_bg}">{p}</th><th class="th-pct" style="{th_bg}">%</th>')
     html.append("</tr></thead><tbody>")
 
+    s_grp_kinds = ("S", "S_CHILD", "S_SUBTOTAL")
+    tvc_grp_kinds = ("TVC", "TVC_CHILD", "TVC_SUBTOTAL")
+    t_grp_kinds = ("T", "T_CHILD")
+    oe_grp_kinds = ("OE", "OE_CHILD")
+
     for i, rname in enumerate(row_names):
         kind = kinds[i]
         next_kind = kinds[i + 1] if i + 1 < len(kinds) else None
@@ -1048,15 +955,20 @@ def render_unified_toc_tables_html(
 
         thick_bottom = (
             kind == "NP"
-            or (kind in ("T", "T_CHILD") and next_kind not in ("T", "T_CHILD"))
-            or (kind in ("S", "S_CHILD") and next_kind not in ("S", "S_CHILD"))
-            or (kind in ("TVC", "TVC_CHILD") and next_kind not in ("TVC", "TVC_CHILD"))
-            or (kind in ("OE", "OE_CHILD") and next_kind not in ("OE", "OE_CHILD"))
+            or (kind in t_grp_kinds and next_kind not in t_grp_kinds)
+            or (kind in s_grp_kinds and next_kind not in s_grp_kinds)
+            or (kind in tvc_grp_kinds and next_kind not in tvc_grp_kinds)
+            or (kind in oe_grp_kinds and next_kind not in oe_grp_kinds)
             or i == len(row_names) - 1
         )
         tr_cls = ' class="thick-bottom"' if thick_bottom else ""
         font_w = "700" if is_bold else "400"
-        lbl_cls = "lbl-main" if is_bold else "lbl-sub"
+        if kind in ("S_SUBTOTAL", "TVC_SUBTOTAL"):
+            lbl_cls = "lbl-sub-bold"
+        elif is_bold:
+            lbl_cls = "lbl-main"
+        else:
+            lbl_cls = "lbl-sub"
         disp_rn = display_row_name(rname)
 
         row_style = f"background-color: #{fill_hex}; color: #000000; font-weight: {font_w};"
@@ -1219,8 +1131,8 @@ st.markdown(
         display: none !important;
     }
     div[data-testid="stPopoverBody"] {
-        min-width: 410px !important;
-        max-width: 470px !important;
+        min-width: 420px !important;
+        max-width: 480px !important;
         font-size: 13px !important;
         line-height: 1.48 !important;
     }
@@ -1327,53 +1239,105 @@ def build_global_diagnostic_context() -> str:
     return "\n\n".join(parts)
 
 
+# PILNĀ TOC GRĀMATU ZINĀŠANU BĀZE (no T. Korbeta "TOC grāmatvedība" un "Transformācija 6.-7. nod.")
 TOC_CORE_EXPERT_KNOWLEDGE = """
-TOC (Ierobežojumu teorijas / Throughput Accounting) finanšu vadības pamatprincipi:
-1. S (Sales / Ieņēmumi) — nauda, kas ienāk uzņēmumā no pamatdarbības.
-2. TVC (Truly Variable Costs / Patiesi mainīgās izmaksas) — izmaksas, kas rodas TIKAI tad, ja notiek konkrēta pārdošana (1:1 saistība: izejvielas, materiāli, tiešā preču piegāde, pārdošanas komisijas).
-3. T (Throughput / Caurlaidība) = S - TVC. T ir ātrums, kādā sistēma ģenerē jaunu naudu savu saistību un izmaksu segšanai. T% = T / S rāda, cik centi no katra apgrozījuma eiro paliek uzņēmumā.
-4. OE (Operating Expense / Uzturēšanas izmaksas) — visa nauda, ko sistēma tērē savas kapacitātes uzturēšanai (algas, noma, mārketings, IT, birojs), lai pārvērstu krājumus un ieguldījumus Caurlaidībā (T).
-5. NP (Net Profit / Neto peļņa) = T - OE. Lūzuma punkts (Break-Even) tiek sasniegts brīdī, kad uzkrājošais T kļūst vienāds ar uzkrājošo OE (T = OE). Kad lūzuma punkts ir pārsniegts, katrs nākamais T eiro gandrīz pilnībā pārvēršas tīrajā peļņā (NP)!
-6. Produktivitāte (PR = T / OE):
-   - PR < 1.00: Sarkanā zona (T nesedz uzturēšanas izmaksas OE, uzņēmums dedzina naudu).
-   - 1.00 <= PR < 1.15: Dzeltenā zona (uzņēmums sedz izmaksas, bet drošības rezerve ir maza).
-   - PR >= 1.15: Zaļā zona (veselīga, augoša caurlaidības atdeve pret OE).
-7. Sviras efekts un lēmumu pieņemšana:
-   - Tradicionālā izmaksu grāmatvedība kļūdaini sadala OE uz produkta pašizmaksu. TOC nekad nesadala OE uz vienību!
-   - Jauns produkts vai pasūtījums ir izdevīgs, ja tā Caurlaidība (T = S - TVC) ir pozitīva un tas nepalielina OE vairāk par jaunradīto T (vai nepārslogo sistēmas pudeles kaklu / ierobežojumu).
+=== TOC (IEROBEŽOJUMU TEORIJAS UN CAURLAIDĪBAS GRĀMATVEDĪBAS) ZELTA ZINĀŠANU BĀZE ===
+Avoti: Dr. Eliyahu Goldratt ("Mērķis", "Siena gubas sindroms"), Thomas Corbett ("TOC Grāmatvedība"), "Transformācija (6. un 7. nodaļa)".
+
+1. SISTĒMAS MĒRĶIS UN KOMPASS:
+- Uzņēmuma mērķis ir pelnīt naudu šobrīd un vienmēr (gan īstermiņā, gan ilgtermiņā), vienlaikus nodrošinot nepieciešamo nosacījumu: "Apmierināti klienti un partneri šobrīd un vienmēr".
+- Klasiskā (izmaksu) grāmatvedība ir radīta valsts fiskālajai un nodokļu sistēmai ("vēsturiskai uzskaitei"), nevis operatīvai biznesa vadībai. Vadīt uzņēmumu pēc tradicionālās grāmatvedības vai pašizmaksas kalkulācijām ir kā vadīt auto, skatoties tikai atpakaļskata spogulī.
+- Goldrata princips operatīviem vadības aprēķiniem: "Labāk būt aptuveni pareizam nekā absolūti kļūdainam!" ("Approximately right, not totally wrong").
+
+2. TRĪS PAMATA MĒRĪJUMI UN FORMULAS:
+- S (Sales / Ieņēmumi) — reāli ienākošā nauda no pārdošanas. Pārdošana ir notikusi tikai tad, kad nauda ir kontā.
+- TVC (Truly Variable Costs / Patiesi jeb tieši mainīgās izmaksas) — nauda, kas aiziet ārējiem piegādātājiem TIEŠI PROPORCIONĀLI katrai pārdotajai vienībai (1:1). Šeit ietilpst: izejvielas, materiāli, iepakojums, kooperācijas darbs par 1 vienību, preču piegāde klientam un pārdošanas komisijas (% no darījuma).
+  * KRITISKI: Darba algas (pat gabaldarba algas!) NEKAD nav TVC, jo darbiniekiem maksā par darba laiku, dīkstāvēm, atvaļinājumiem, minimālajām likmēm un aizvietojumiem. Elektrība, apkure, remonti un degviela tehnoloģiskajam transportam NAV TVC — tās ir OE.
+- T (Throughput / Caurlaidība):
+  T = S - TVC  (un vienībai: Tu = P - TVC)
+  Caurlaidība ir ātrums, ar kādu sistēma ģenerē "svaigu" naudu caur pārdošanu. Svaiga nauda rodas tikai tad, kad prece ir pārdota (ražošana noliktavai NERADA caurlaidību!).
+- OE (Operating Expense / Uzturēšanas jeb darbības izmaksas) — visa nauda, ko sistēma patērē, lai pārvērstu Investīcijas (I) Caurlaidībā (T). Tās ir izmaksas kapacitātes uzturēšanai: visas algas (gan strādnieku, gan administrācijas), telpu noma, komunālie, mārketings, birojs, IT, procenti.
+  * OE daba: OE nemainās proporcionāli pārdošanas apjomam! Tām ir "pakāpienu" raksturs (mainās no sezonas apkures, reklāmas kampaņām, jaunas maiņas vai ceha atvēršanas).
+  * No TOC aprēķiniem tiek izslēgtas "virtuālās" grāmatvedības izmaksas (pamatlīdzekļu amortizācija/nolietojums, krājumu pārvērtēšana, virtuālie uzkrājumi), lai vadītājs redzētu tīru naudas plūsmu.
+- I (Investment / Investīcijas jeb Krājumi) — visa nauda, kas iesaldēta sistēmā lietās, kuras plānots pārdot (izejvielas RM, nepabeigtā ražošana WIP, gatavā produkcija FP), kā arī ilgtermiņa aktīvos (iekārtās, ēkās).
+  * KRITISKI: WIP un gatavo produkciju noliktavā TOC novērtē TIKAI to TVC (iepirkto materiālu) vērtībā! Nekādu darba algu vai OE "pievienoto vērtību" krājumiem nedrīkst pieskaitīt — citādi rodas "papīra peļņa", kas stimulē pārražošanu.
+- Atvasinātās pamatformulas:
+  * Neto peļņa: NP = T - OE  (jeb NP = S - TVC - OE)
+  * Produktivitāte: PR = T / OE
+  * Caurlaidības daļa: T% = T / S
+  * Investīciju atdeve: ROI = (T - OE) / I  jeb  ROI = NP / I
+
+3. VIRZĪBAS LIKUMS UN SVIRAS EFEKTS (LŪZUMA PUNKTS):
+- Prioritāšu secība jebkuram vadības lēmumam:
+  1) T ↑  (Vispirms dari visu, lai palielinātu Caurlaidību T — tam nav griestu!)
+  2) I ↓  (Samazini iesaldēto naudu krājumos/WIP, ja vien tas nekaitē T)
+  3) OE ↓ (Samazini uzturēšanas izmaksas OE tikai tad, ja tas neapdraud šodienas vai rītdienas T un rezerves kapacitāti!)
+- Kāpēc aizmirst tikai par izmaksu griešanu: OE samazināšanai ir dzelžaina robeža (nulle, "nošaujoties var samazināt pārtikas izdevumus līdz nullei"), turklāt dzīvē OE var samazināt labi ja par dažiem procentiem. Turpretī T palielināšanai teorētiski nav griestu.
+- Lūzuma punkts un sviras efekts: Tā kā OE pie apjoma pieauguma gandrīz nemainās (vai aug daudz lēnāk), brīdī, kad uzkrājošais T pārsniedz OE (T = OE), tiek šķērsots lūzuma punkts. Pēc šī punkta gandrīz katrs nākamais Caurlaidības (T) eiro pilnībā pārvēršas tīrajā peļņā (NP)! Piemēram, dubultojot S un T, ja OE pieaug tikai par 20-30%, Neto peļņa (NP) pieaug 3 līdz 5 reizes!
+
+4. OPERATĪVO LĒMUMU PIEŅEMŠANA (ΔT - ΔOE > 0):
+- Izvērtējot jebkuru lēmumu (jauns darbinieks, virsstundas, mārketinga kampaņa, jauns pasūtījums, kooperācija, atlaide vai investīcija), nekad nerēķini produkta pilno pašizmaksu!
+- Uzdod 3 jautājumus: 1) Par cik mainīsies T (ΔT)? 2) Par cik mainīsies OE (ΔOE)? 3) Par cik mainīsies I (ΔI)?
+- Ja ΔT - ΔOE > 0 (un ja ir investīcija ΔI, tad ΔNP / ΔI pārsniedz uzņēmuma mērķa ROI), lēmums ir PAREIZS un jāpieņem nekavējoties!
+- Svarīgi par "laika ietaupīšanas" projektiem: Ja investīcija "ietaupa 1500 darba stundas gadā" neierobežojošā procesā, bet neviens darbinieks netiek atlaists (ΔOE = 0) un pārdošana nepieaug (ΔT = 0), tad reālais finanšu ieguvums ir NULLE, un investīcija ir zaudēta nauda!
+
+5. PIECI FOKUSĒŠANĀS SOĻI (5FS) UN IEROBEŽOJUMU VADĪBA:
+"Laiks, kas zaudēts ierobežojumā, ir zaudēts visai sistēmai; laiks, kas ietaupīts ne-ierobežojumā — mirāža!"
+1) IDENTIFICĒ sistēmas ierobežojumu (CCR — vājāko ķēdes posmu: ražošanas iekārtu, specifisku speciālistu, naudas plūsmu vai tirgus pieprasījumu).
+2) IZMANTO (Exploit) ierobežojumu maksimāli ar esošajiem resursiem (nekādu dīkstāvju pusdienās, buferis pirms CCR, kvalitātes kontrole PIRMS CCR, lai tas nekad neapstrādātu brāķi, mazāk pāriestatīšanu uz CCR).
+3) PAKĀRTO (Subordinate) visu pārējo ierobežojuma ritmam (Drum-Buffer-Rope / DBR). Ne-ierobežojošajiem resursiem IR JĀBŪT brīvai rezerves jaudai (sprint capacity) un periodiskai dīkstāvei! Ja ne-ierobežojumi strādā ar 100% noslodzi (lai celtu lokālo efektivitāti vai OEE), tie tikai saražo milzīgu WIP krājumu kalnu, iesaldē naudu un pagarina pasūtījumu izpildes laiku.
+4) PACEĻ (Elevate) ierobežojuma jaudu (papildu maiņa, palīgstrādnieki, veco pusautomātu izvilkšana no noliktavas sezonas pīķī, ārpakalpojums/kooperācija vai jaunas iekārtas iegāde).
+5) ATKĀRTO procesu, tiklīdz ierobežojums ir pārvarēts, un nepieļauj, ka par galveno šķērsli kļūst vadības inerce un vecās politikas!
+
+6. PRODUKTU UN KLIENTU PRIORITIZĀCIJA (CCR pret TIRGUS IEROBEŽOJUMU):
+- A) Ja ierobežojums ir IEKŠĒJA JAUDA (CCR ir 100% noslogots un nespēj saražot visu pieprasījumu):
+  * Produktu un klientu prioritāti nosaka TIKAI rādītājs:
+    Tu / CCR min.  (Produkta Caurlaidība eiro dalīta ar minūtēm vai stundām, ko tas aizņem ierobežojumā).
+  * Produkts ar zemāku cenu vai lielāku kopējo darba laiku var būt DAUDZ PELNOŠĀKS, ja tas aizņem mazāk minūšu tieši ierobežojumā ("Ideālās rūpnīcas" / A un B produktu likums).
+  * Produkti, kas vispār neizmanto CCR laiku, ir "brīvie izstrādājumi" — tie dod tīru papildu T bez CCR noslogošanas!
+- B) Ja ierobežojums ir TIRGUS (uzņēmumam ir brīva jauda, CCR < 100%):
+  * Tad izšķirošais ir produkta kopējais T (Tu = P - TVC > 0). Jebkurš pasūtījums (pat eksports ar lielu atlaidi vai jauns produkts ar zemāku maržu), kura cena pārsniedz TVC un kurš nepalielina OE vairāk par jaunradīto T (ΔT - ΔOE > 0) un nesagrauj vietējā tirgus cenas, tieši palielina Neto peļņu!
+  * Kāpēc gandrīz nekad nevajag atteikties no "mazāk rentabla" produkta, ja ir brīva jauda: Atteikšanās no produkta uzreiz iznīcina visu tā nesto Caurlaidību (T), bet uzņēmuma OE gandrīz nemainās (jo tās pašas telpas un darbinieki paliek), tāpēc uzņēmuma kopējā peļņa krītas (vai zaudējumi pieaug)!
+
+7. KRĀJUMU UN PARTIJU IZMĒRU LAMATAS:
+- "Tērauds nav vīns — tas ar laiku nekļūst labāks!"
+- Nepērc milzīgas izejvielu partijas (piem. 10 mēnešu krājumu) tikai tāpēc, ka piegādātājs iedeva 10-15% atlaidi, ja uzņēmumam ir ierobežoti apgrozāmie līdzekļi — iesaldētā nauda (I) bremzēs citu pasūtījumu izpildi un radīs daudz lielākus T zaudējumus nekā ietaupītā atlaide.
+- Minimālās partijas un "ekonomiskās partijas" (EOQ) ilūzija: Pāriestatīšana (setup) uz ne-ierobežojošas iekārtas nemaksā papildu naudu (OE nemainās). Lielas partijas vajag tikai uz pārslogota CCR; visur citur mazas partijas samazina WIP, paātrina naudas apriti un saīsina piegādes laiku klientam.
+- Kvalitāte un brāķis: Brāķis PIRMS CCR maksā tikai izniekoto TVC (materiālu cenu), bet brāķis PĒC CCR maksā gan materiālus, gan zaudētās dārgās CCR minūtes (negūto visas sistēmas Caurlaidību T)!
 """
 
 
 def ask_global_assistant(user_question: str) -> tuple[str, int, float]:
     ctx = build_global_diagnostic_context()
-    know = f"\nPapildu TOC-FIN zināšanu bāze:\n{knowledge_file}\n" if knowledge_file else ""
+    know = f"\nPapildu lietotāja faila zināšanu bāze:\n{knowledge_file}\n" if knowledge_file else ""
     sys_prompt = (
-        "Tu esi laipns, ieinteresēts un augsti profesionāls TOC-FIN (Ierobežojumu teorijas un Caurlaidības uzskaites) "
-        "finanšu eksperts un vadītāja uzticams domubiedrs.\n"
+        "Tu esi laipns, ieinteresēts un augsti profesionāls TOC-FIN (Ierobežojumu teorijas un Caurlaidības grāmatvedības) "
+        "finanšu eksperts, kurš perfekti pārzina E. Goldrata, T. Korbeta ('TOC Grāmatvedība') un 'Transformācijas' grāmatu metodoloģiju.\n\n"
         f"{TOC_CORE_EXPERT_KNOWLEDGE}\n"
         f"{know}\n"
-        "KĀ KOMUNICĒT AR LIETOTĀJU:\n"
-        "1. Esi silts, pretimnākošs, cieņpilns un iedrošinošs — runā kā pieredzējis biznesa konsultants, kurš patiesi grib palīdzēt uzņēmumam augt.\n"
-        "2. Atbildi skaidri un pārskatāmi: vispirms sniedz tiešu atbildi uz jautājumu, atsaucoties uz konkrētajiem skaitļiem no lietotāja tabulas (S, TVC, T, T%, OE, PR, NP).\n"
-        "3. Pēc tam, kā TOC eksperts, īsi izskaidro, ko šie cipari nozīmē uzņēmuma ikdienā (kur ir ierobežojums, kur rodas sviras efekts, kuri mēneši velk uz augšu vai leju) un piedāvā 1–3 praktiskus soļus vai idejas, ko pamēģināt (piemēram, ko pārbaudīt Scenāriju simulācijā).\n"
-        "4. Raksti dabiskā, tīrā latviešu valodā, izmantojot treknrakstu (**...**) svarīgākajiem skaitļiem un secinājumiem."
+        "KĀ KOMUNICĒT UN PALĪDZĒT LIETOTĀJAM:\n"
+        "1. Esi silts, pretimnākošs, cieņpilns un uz sadarbību vērsts domubiedrs — runā kā pieredzējis TOC konsultants.\n"
+        "2. Atbildi skaidri un strukturēti: vispirms atbildi tieši uz jautājumu, izmantojot konkrētos skaitļus no uzņēmuma tabulas (S, TVC, T, T%, OE, PR = T/OE, NP).\n"
+        "3. Kā TOC eksperts izskaidro dziļāko būtību: kā strādā ΔT - ΔOE > 0 princips, kur ir lūzuma punkts un sviras efekts, vai ierobežojums šobrīd ir tirgū vai iekšējā kapacitātē (CCR), un kā pieņemt lēmumu pēc prioritātes T ↑ -> I ↓ -> OE ↓.\n"
+        "4. Ja lietotāja jautājumā parādās kāds klasiskās izmaksu grāmatvedības mīts (piemēram, vēlme dalīt OE uz produkta pašizmaksu, atteikties no produkta ar pozitīvu T brīvas jaudas apstākļos vai griezt OE uz T rēķina), laipni un ar skaitļiem parādi, kāpēc no TOC skatpunkta tas būtu bīstami un kā rīkoties pareizi.\n"
+        "5. Piedāvā 1–3 konkrētus, praktiskus soļus vai scenārijus, ko lietotājs var tūlīt pārbaudīt sadaļā 'Scenāriju simulācija'."
     )
     history = S.get("global_chat", [])
     messages = [
         {"role": "user", "content": f"Sistēmas un uzņēmuma finanšu konteksts:\n{ctx}"},
-        {"role": "assistant", "content": "Paldies! Esmu iepazinies ar uzņēmuma TOC finanšu datiem un esmu gatavs palīdzēt."},
+        {"role": "assistant", "content": "Paldies! Esmu iepazinies ar uzņēmuma TOC finanšu datiem un grāmatu metodoloģiju. Ar prieku palīdzēšu!"},
     ] + history + [{"role": "user", "content": user_question}]
 
     resp = get_client().messages.create(
         model=MODEL,
-        max_tokens=900,
+        max_tokens=1100,
         system=sys_prompt,
         messages=messages,
     )
     ans = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
     usage = getattr(resp, "usage", None)
-    in_tok = getattr(usage, "input_tokens", 400) if usage else 400
-    out_tok = getattr(usage, "output_tokens", 250) if usage else 250
+    in_tok = getattr(usage, "input_tokens", 500) if usage else 500
+    out_tok = getattr(usage, "output_tokens", 300) if usage else 300
     cost_eur = (in_tok * 0.000003 + out_tok * 0.000015) * 0.92
     return ans, in_tok + out_tok, cost_eur
 
@@ -1590,12 +1554,12 @@ def _render_assistant_popover_content(form_key: str) -> None:
     st.markdown("**TOC-FIN Eksperts un Asistents**")
     if "global_chat" not in S:
         S.global_chat = []
-    chat_box = st.container(height=310)
+    chat_box = st.container(height=320)
     with chat_box:
         if not S.global_chat:
             st.info(
-                "Sveiki! Esmu Jūsu TOC finanšu eksperts. Pajautājiet man par uzņēmuma caurlaidību (T), "
-                "uzturēšanas izmaksām (OE), produktivitāti vai kādu scenāriju vēlaties izrēķināt!"
+                "Sveiki! Esmu Jūsu TOC finanšu eksperts (balstīts uz E. Goldrata un T. Korbeta 'TOC Grāmatvedība' metodoloģiju). "
+                "Pajautājiet man par uzņēmuma caurlaidību (T), uzturēšanas izmaksām (OE), lūzuma punktu vai jebkuru vadības lēmumu!"
             )
         for msg in S.global_chat:
             with st.chat_message(msg["role"]):
@@ -1851,13 +1815,13 @@ if S.nav_page == "overview":
 
     knowledge_context = f"Papildu TOC-FIN zināšanu bāze:\n{knowledge_file}\n\n" if knowledge_file else ""
     COMMENT_SYSTEM = (
-        "Tu esi laipns, atbalstošs un augsta līmeņa TOC-FIN (Ierobežojumu teorijas) finanšu eksperts.\n"
+        "Tu esi laipns, atbalstošs un augsta līmeņa TOC-FIN (Ierobežojumu teorijas un Caurlaidības grāmatvedības) finanšu eksperts.\n"
         f"{TOC_CORE_EXPERT_KNOWLEDGE}\n"
         f"{knowledge_context}"
-        "Sagatavo strukturētu, profesionālu un iedvesmojošu vadības kopsavilkumu par izvēlēto periodu latviešu valodā: "
-        "1) Galvenie secinājumi par Caurlaidību (T un T%), Uzturēšanas izmaksām (OE), Produktivitāti (PR) un uzkrājošo lūzuma punktu; "
-        "2) Svarīgākās mēnešu tendences un cēloņsakarības; "
-        "3) Konkrēti, praktiski TOC ieteikumi vadībai peļņas un plūsmas uzlabošanai."
+        "Sagatavo strukturētu, dziļu un praktisku vadības kopsavilkumu par izvēlēto periodu latviešu valodā:\n"
+        "1) **Kopējā TOC diagnostika**: Caurlaidība (T un T%), Uzturēšanas izmaksas (OE — vai tām ir pakāpienu raksturs vai nepamatots pieaugums), Produktivitāte (PR = T/OE) un uzkrājošais lūzuma punkts (kad uzkrājošais T pārsniedz OE un sākas sviras efekts).\n"
+        "2) **Mēnešu dinamika un cēloņsakarības**: kuri mēneši ģenerēja augstāko caurlaidību un kur radās novirzes.\n"
+        "3) **Konkrēti TOC vadības ieteikumi (pēc prioritātes T ↑ -> I ↓ -> OE ↓ un ΔT - ΔOE > 0)**: kā palielināt plūsmu un caurlaidību, un kādus scenārijus vērts pārbaudīt Scenāriju simulācijā."
     )
 
     if regen_btn:
@@ -1902,7 +1866,7 @@ if S.nav_page == "overview":
 
 
 # ==============================================================================
-# POSMS 2: SCENĀRIJU SIMULĀCIJA (AR JAUNU PRODUKTU KĀ ATSEVIŠĶU RINDU ZEM S, TVC UN T)
+# POSMS 2: SCENĀRIJU SIMULĀCIJA (PILNA AINA: ESOŠĀ DARBĪBA + JAUNAIS PRODUKTS + KOPĀ)
 # ==============================================================================
 elif S.nav_page == "simulation":
     st.subheader("Scenāriju simulācija un Jauns projekts")
@@ -2203,7 +2167,7 @@ elif S.nav_page == "simulation":
             st.info(
                 f"**{np_clean_title} struktūra:** S = **{fmt_num(np_s_val)} €** | "
                 f"TVC kopā = **{fmt_num(np_tvc_tot)} €** (Materiāli: {fmt_num(np_mat_val)} €, Piegāde: {fmt_num(np_deliv_val)} €) | "
-                f"Produkta Caurlaidība **T = {fmt_num(np_t_tot)} € ({np_t_pct:.0f}%)** *(Tabulā zemāk parādās kā atsevišķas apakšrindas zem S, TVC un T)*"
+                f"Produkta Caurlaidība **T = {fmt_num(np_t_tot)} € ({np_t_pct:.0f}%)** *(Tabulā redzama gan esošā darbība kopā, gan jaunais produkts, gan kopējā summa)*"
             )
 
     sim_sum = base_sum.copy()
@@ -2215,39 +2179,72 @@ elif S.nav_page == "simulation":
             eur_v = eur_changes.get(rname, 0.0)
             sim_sum.loc[rname] = base_sum.loc[rname] * (1.0 + pct_v / 100.0) + eur_v
 
+    # Aprēķinām ESOŠĀS (vecās) darbības kopsummas pirms un pēc simulācijas izmaiņām
+    old_s_base = float(base_sum.loc[s_children].sum()) if s_children else float(base_sum.get("S", 0.0))
+    old_s_sim = float(sim_sum.loc[s_children].sum()) if s_children else float(sim_sum.get("S", 0.0))
+
+    old_tvc_base = float(base_sum.loc[tvc_children].sum()) if tvc_children else float(base_sum.get("TVC", 0.0))
+    old_tvc_sim = float(sim_sum.loc[tvc_children].sum()) if tvc_children else float(sim_sum.get("TVC", 0.0))
+
+    old_t_base = old_s_base - old_tvc_base
+    old_t_sim = old_s_sim - old_tvc_sim
+
     np_tvc_total = np_mat_val + np_deliv_val
     np_t_total = np_s_val - np_tvc_total
     has_active_new_product = bool(np_enable and (np_s_val != 0 or np_tvc_total != 0))
 
+    old_s_subtotal_lbl = "↳ Esošā darbība kopā (S)"
     np_s_row_lbl = f"↳ {np_clean_title} (S)"
+
+    old_tvc_subtotal_lbl = "↳ Esošā darbība kopā (TVC)"
     np_tvc_row_lbl = f"↳ {np_clean_title} (TVC)"
+
+    old_t_row_lbl = "↳ Esošā darbība (T)"
     np_t_row_lbl = f"↳ {np_clean_title} (T)"
 
-    # Izveidojam secīgo rindu sarakstu (ja ir ieslēgts Jauns produkts, pievienojam tam atsevišķas rindas zem S, TVC un T!)
-    s_all_sim_children = list(s_children)
-    tvc_all_sim_children = list(tvc_children)
-    t_all_sim_children: list[str] = []
+    s_display_rows = list(s_children)
+    tvc_display_rows = list(tvc_children)
+    t_display_rows: list[str] = []
 
     if has_active_new_product:
+        # 1) S bloks: ja vecajam S ir vairāk nekā 1 apakšgrupa, parādām arī "↳ Esošā darbība kopā (S)"
+        if len(s_children) > 1:
+            base_sum.loc[old_s_subtotal_lbl] = old_s_base
+            sim_sum.loc[old_s_subtotal_lbl] = old_s_sim
+            sim_row_kinds[old_s_subtotal_lbl] = "S_SUBTOTAL"
+            s_display_rows.append(old_s_subtotal_lbl)
+
         base_sum.loc[np_s_row_lbl] = 0.0
         sim_sum.loc[np_s_row_lbl] = np_s_val
         sim_row_kinds[np_s_row_lbl] = "S_CHILD"
-        s_all_sim_children.append(np_s_row_lbl)
+        s_display_rows.append(np_s_row_lbl)
+
+        # 2) TVC bloks: ja vecajam TVC ir vairākas apakšgrupas (piem. Izejvielas + Piegāde), parādām "↳ Esošā darbība kopā (TVC)"
+        if len(tvc_children) > 1:
+            base_sum.loc[old_tvc_subtotal_lbl] = old_tvc_base
+            sim_sum.loc[old_tvc_subtotal_lbl] = old_tvc_sim
+            sim_row_kinds[old_tvc_subtotal_lbl] = "TVC_SUBTOTAL"
+            tvc_display_rows.append(old_tvc_subtotal_lbl)
 
         base_sum.loc[np_tvc_row_lbl] = 0.0
         sim_sum.loc[np_tvc_row_lbl] = np_tvc_total
         sim_row_kinds[np_tvc_row_lbl] = "TVC_CHILD"
-        tvc_all_sim_children.append(np_tvc_row_lbl)
+        tvc_display_rows.append(np_tvc_row_lbl)
+
+        # 3) T bloks: zem kopējā T parādām gan "↳ Esošā darbība (T)", gan "↳ Jauns produkts / projekts (T)"
+        base_sum.loc[old_t_row_lbl] = old_t_base
+        sim_sum.loc[old_t_row_lbl] = old_t_sim
+        sim_row_kinds[old_t_row_lbl] = "T_CHILD"
+        t_display_rows.append(old_t_row_lbl)
 
         base_sum.loc[np_t_row_lbl] = 0.0
         sim_sum.loc[np_t_row_lbl] = np_t_total
         sim_row_kinds[np_t_row_lbl] = "T_CHILD"
-        t_all_sim_children.append(np_t_row_lbl)
+        t_display_rows.append(np_t_row_lbl)
 
-    if s_all_sim_children:
-        sim_sum.loc["S"] = sim_sum.loc[s_all_sim_children].sum()
-    if tvc_all_sim_children:
-        sim_sum.loc["TVC"] = sim_sum.loc[tvc_all_sim_children].sum()
+    # Kopējās lielās grupas (Vecais + Jaunais kopā)
+    sim_sum.loc["S"] = old_s_sim + (np_s_val if has_active_new_product else 0.0)
+    sim_sum.loc["TVC"] = old_tvc_sim + (np_tvc_total if has_active_new_product else 0.0)
     sim_sum.loc["T"] = sim_sum.loc["S"] - sim_sum.loc["TVC"]
     if oe_children:
         sim_sum.loc["OE"] = sim_sum.loc[oe_children].sum()
@@ -2255,11 +2252,11 @@ elif S.nav_page == "simulation":
 
     ordered_sim_rows = (
         ["S"]
-        + s_all_sim_children
+        + s_display_rows
         + ["TVC"]
-        + tvc_all_sim_children
+        + tvc_display_rows
         + ["T"]
-        + t_all_sim_children
+        + t_display_rows
         + ["OE"]
         + oe_children
         + ["NP"]
@@ -2289,19 +2286,22 @@ elif S.nav_page == "simulation":
                 if b_v != 0:
                     pct_col_series.loc[r_k] = d_v / abs(b_v)
                 elif has_active_new_product and r_k in (np_tvc_row_lbl, np_t_row_lbl) and np_s_val > 0:
-                    # Jaunā produkta TVC un T rindās rādām šī produkta īpatsvaru pret paša produkta S (piem., T% = 40%)
                     pct_col_series.loc[r_k] = d_v / np_s_val
                 elif has_active_new_product and r_k == np_s_row_lbl and np_s_val > 0:
                     pct_col_series.loc[r_k] = 1.0
         else:
-            s_col = summary_amounts.loc["S", c]
+            s_col_total = summary_amounts.loc["S", c]
+            s_col_old = old_s_base if c == "Bāze KOPĀ" else old_s_sim
             for r_k in ordered_sim_rows:
                 val_k = summary_amounts.loc[r_k, c]
                 if has_active_new_product and c == "Simulācija KOPĀ" and r_k in (np_tvc_row_lbl, np_t_row_lbl) and np_s_val > 0:
-                    # Simulācijas kolonnā jaunajam produktam rādām tā individuālo TVC% un Caurlaidības T% pret produkta S!
+                    # Jaunā produkta TVC un T rāda % pret paša jaunā produkta S (piem., 60% un 40%)
                     pct_col_series.loc[r_k] = val_k / np_s_val
-                elif s_col:
-                    pct_col_series.loc[r_k] = val_k / s_col
+                elif has_active_new_product and r_k in (old_tvc_subtotal_lbl, old_t_row_lbl) and s_col_old > 0:
+                    # Esošās darbības TVC kopā un Esošās darbības T rāda % pret Esošās darbības S (lai redzētu veco produktu T% un TVC%!)
+                    pct_col_series.loc[r_k] = val_k / s_col_old
+                elif s_col_total:
+                    pct_col_series.loc[r_k] = val_k / s_col_total
         sim_main[f"%|{c}"] = pct_col_series
 
     sim_main_df = pd.DataFrame(sim_main, index=summary_amounts.index)
@@ -3029,7 +3029,6 @@ elif S.nav_page == "ingest":
     c3.metric("Uzturēšanas izmaksas", f"{cls_df['Grupa'].str.startswith('OE_').sum()} konti")
     c4.metric("Izslēgtie", f"{(cls_df['Grupa'] == 'EXCLUDED').sum()} konti")
 
-    # Sadalām kontu rediģēšanu pa 4 Lielajām grupām, lai katrā tabulā Apakšgrupas izvēlnē būtu TIKAI attiecīgās Lielās grupas apakšgrupas!
     cat_sections = [
         ("S", "S (Ieņēmumi)", MAIN_GROUP_OPTIONS[0]),
         ("TVC", "TVC (Mainīgās izmaksas)", MAIN_GROUP_OPTIONS[1]),
