@@ -5,3 +5,4 @@ numpy>=1.26
 openpyxl>=3.1
 tabulate>=0.9
 supabase>=2.0.0
+SpeechRecognition
