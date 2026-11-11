@@ -1,6 +1,6 @@
 """
-app.py — TOC-FIN Finanšu diagnostikas un vadības lēmumu sistēma (v25.5)
-Simulācijas kopsummas virs apakškontiem | Interaktīvs TOC Eksperts ar darbību izpildi | Ērts čata logs
+app.py — TOC-FIN Finanšu diagnostikas un vadības lēmumu sistēma (v25.6)
+Skaidra Simulācijas apakšgrupu hierarhija | Apakšgrupu pārdēvēšana & Tabulas kārtošana | Balss ievade Asistentā
 Project ID: amprqueamdcxpjufigvm
 """
 from __future__ import annotations
@@ -50,15 +50,25 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Pievienojam krāsu kodus T apakšrindām un pus-bold starpsummu rindām simulācijā
+# Vienotas, vizuāli saskaņotas krāsas apakšgrupām, kopsummām un jaunajam produktam
 if "T_CHILD" not in FILLS:
     FILLS["T_CHILD"] = ("DAEEF3", False, "000000")
 if "T_SUBTOTAL" not in FILLS:
-    FILLS["T_SUBTOTAL"] = ("CBE4EE", False, "000000")
+    FILLS["T_SUBTOTAL"] = ("DAEEF3", False, "000000")
 if "S_SUBTOTAL" not in FILLS:
-    FILLS["S_SUBTOTAL"] = ("FFF9BF", False, "000000")
+    FILLS["S_SUBTOTAL"] = (FILLS["S_CHILD"][0], False, "000000")
 if "TVC_SUBTOTAL" not in FILLS:
-    FILLS["TVC_SUBTOTAL"] = ("F7D6BF", False, "000000")
+    FILLS["TVC_SUBTOTAL"] = (FILLS["TVC_CHILD"][0], False, "000000")
+if "S_DETAIL" not in FILLS:
+    FILLS["S_DETAIL"] = (FILLS["S_CHILD"][0], False, "000000")
+if "TVC_DETAIL" not in FILLS:
+    FILLS["TVC_DETAIL"] = (FILLS["TVC_CHILD"][0], False, "000000")
+if "S_NEW_PROD" not in FILLS:
+    FILLS["S_NEW_PROD"] = (FILLS["S_CHILD"][0], False, "000000")
+if "TVC_NEW_PROD" not in FILLS:
+    FILLS["TVC_NEW_PROD"] = (FILLS["TVC_CHILD"][0], False, "000000")
+if "T_NEW_PROD" not in FILLS:
+    FILLS["T_NEW_PROD"] = ("DAEEF3", False, "000000")
 
 EXTRA_OE_SUBGROUPS = {
     "OE_ADMIN_OTHER": ("Pārējās administrācijas izmaksas", "OE"),
@@ -74,6 +84,9 @@ for k_ext, (lbl_ext, mc_ext) in EXTRA_OE_SUBGROUPS.items():
 
 
 def register_custom_subgroup(key: str, label: str, main_code: str = "OE") -> None:
+    old_lbl = SUBGROUP_LABELS.get(key)
+    if old_lbl and old_lbl != label:
+        LABEL_TO_KEY.pop(old_lbl, None)
     GROUPS[key] = (label, main_code)
     SUBGROUP_LABELS[key] = label
     LABEL_TO_KEY[label] = key
@@ -82,7 +95,7 @@ def register_custom_subgroup(key: str, label: str, main_code: str = "OE") -> Non
 def get_subgroups_for_main_code(main_code: str) -> list[str]:
     res = []
     for k, (lbl, mc) in GROUPS.items():
-        if mc == main_code:
+        if mc == main_code and lbl not in res:
             res.append(lbl)
     return res
 
@@ -325,6 +338,158 @@ def strip_excluded_rows(res):
         for dr in drop_rows:
             res.row_kinds.pop(dr, None)
     return res
+
+
+def apply_custom_row_order_to_result(res):
+    """Pielieto saglabāto vai lietotāja/Asistenta pieprasīto apakšgrupu secību tabulai."""
+    if res is None or res.amounts is None or res.amounts.empty:
+        return res
+    custom_ord: dict[str, list[str]] = st.session_state.get("custom_row_order", {})
+    if not custom_ord:
+        return res
+
+    idx_list = list(res.amounts.index)
+    rk = res.row_kinds
+
+    s_ch = [r for r in idx_list if rk.get(r) == "S_CHILD"]
+    tvc_ch = [r for r in idx_list if rk.get(r) == "TVC_CHILD"]
+    oe_ch = [r for r in idx_list if rk.get(r) == "OE_CHILD"]
+
+    def _sort_sub(curr: list[str], pref: list[str]) -> list[str]:
+        if not pref:
+            return curr
+        ordered = [x for x in pref if x in curr]
+        rest = [x for x in curr if x not in ordered]
+        return ordered + rest
+
+    s_ch = _sort_sub(s_ch, custom_ord.get("S", []))
+    tvc_ch = _sort_sub(tvc_ch, custom_ord.get("TVC", []))
+    oe_ch = _sort_sub(oe_ch, custom_ord.get("OE", []))
+
+    new_idx = ["S"] + s_ch + ["TVC"] + tvc_ch + ["T", "OE"] + oe_ch + ["NP"]
+    new_idx = [r for r in new_idx if r in res.amounts.index]
+    res.amounts = res.amounts.loc[new_idx]
+    res.main = res.main.loc[new_idx]
+    return res
+
+
+def reorder_table_subgroups(
+    res,
+    main_code: str = "OE",
+    mode: str = "desc",
+    explicit_order: list[str] | None = None,
+    keep_other_last: bool = True,
+) -> list[str]:
+    """
+    Sakārto S, TVC vai OE apakšgrupas:
+    - mode='desc': dilstošā secībā pēc kopējās summas (lielākās pozīcijas augšā)
+    - mode='asc': augošā secībā pēc summas
+    - mode='custom': pēc explicit_order saraksta
+    """
+    if res is None or res.amounts is None:
+        return []
+    mc = main_code.upper()
+    if mc not in ("S", "TVC", "OE"):
+        mc = "OE"
+
+    kind_tag = f"{mc}_CHILD"
+    children = [r for r in res.amounts.index if res.row_kinds.get(r) == kind_tag]
+    if not children:
+        return []
+
+    month_cols = [c for c in res.amounts.columns if not ("YTD" in str(c).upper() or "AVG" in str(c).upper())]
+    if not month_cols:
+        month_cols = list(res.amounts.columns)
+
+    if mode == "custom" and explicit_order:
+        matched = []
+        for req in explicit_order:
+            req_l = req.strip().lower()
+            for ch in children:
+                if ch not in matched and (ch.lower() == req_l or req_l in ch.lower() or ch.lower() in req_l):
+                    matched.append(ch)
+        rest = [c for c in children if c not in matched]
+        sorted_ch = matched + rest
+    else:
+        totals_map = {ch: float(res.amounts.loc[ch, month_cols].sum()) for ch in children}
+        rev = mode != "asc"
+        if keep_other_last:
+            regular = [c for c in children if not (c.lower().startswith("citi ") or c.lower().startswith("pārēj"))]
+            others = [c for c in children if c not in regular]
+            regular.sort(key=lambda x: totals_map.get(x, 0.0), reverse=rev)
+            others.sort(key=lambda x: totals_map.get(x, 0.0), reverse=rev)
+            sorted_ch = regular + others
+        else:
+            sorted_ch = sorted(children, key=lambda x: totals_map.get(x, 0.0), reverse=rev)
+
+    st.session_state.setdefault("custom_row_order", {})[mc] = sorted_ch
+    apply_custom_row_order_to_result(res)
+    return sorted_ch
+
+
+def rename_subgroup_everywhere(old_name: str, new_name: str, profile_store: SupabaseProfileStore) -> tuple[bool, str]:
+    """Pārdēvē esošu apakšgrupu visās tabulās, GROUPS vārdnīcā un aktīvajā pārskatā."""
+    old_clean = str(old_name or "").strip()
+    new_clean = str(new_name or "").strip()
+    if not old_clean or not new_clean:
+        return False, "Norādiet gan veco, gan jauno apakšgrupas nosaukumu."
+
+    # 1. Atrodam grupas atslēgu (arī tad, ja nosaukums uzrakstīts daļēji vai ar citu burtu reģistru)
+    target_key = LABEL_TO_KEY.get(old_clean)
+    if not target_key:
+        for k, lbl in SUBGROUP_LABELS.items():
+            if lbl.lower() == old_clean.lower():
+                target_key = k
+                old_clean = lbl
+                break
+    if not target_key:
+        for k, lbl in SUBGROUP_LABELS.items():
+            if old_clean.lower() in lbl.lower() or lbl.lower() in old_clean.lower():
+                target_key = k
+                old_clean = lbl
+                break
+
+    res = st.session_state.get("result")
+    # Ja nosaukums ir tieši tabulas rindā
+    if not target_key and res is not None:
+        for r_idx in res.amounts.index:
+            if r_idx.lower() == old_clean.lower() or old_clean.lower() in r_idx.lower():
+                old_clean = r_idx
+                target_key = LABEL_TO_KEY.get(r_idx)
+                break
+
+    if target_key:
+        mc = get_main_code(target_key)
+        register_custom_subgroup(target_key, new_clean, mc)
+        st.session_state.setdefault("custom_subgroups", {})[target_key] = (new_clean, mc)
+
+    # 2. Pārdēvējam rindu aktīvajā finanšu tabulā (S.result)
+    if res is not None and old_clean in res.amounts.index:
+        res.amounts = res.amounts.rename(index={old_clean: new_clean})
+        res.main = res.main.rename(index={old_clean: new_clean})
+        if old_clean in res.row_kinds:
+            kind_val = res.row_kinds.pop(old_clean)
+            res.row_kinds[new_clean] = kind_val
+
+    # 3. Atjauninām arī custom_row_order, ja tāds ir
+    for mc_k, ord_list in st.session_state.get("custom_row_order", {}).items():
+        st.session_state["custom_row_order"][mc_k] = [new_clean if x == old_clean else x for x in ord_list]
+
+    # 4. Saglabājam izmaiņas datubāzes atskaitē, ja ir aktīvs report_id
+    if st.session_state.get("current_report_id") and res is not None:
+        rep_meta = st.session_state.get("loaded_report_meta") or {}
+        packed_c = pack_commentary_with_account_details(
+            st.session_state.get("commentary", ""),
+            st.session_state.get("loaded_account_details"),
+        )
+        profile_store.save_report(
+            report_name=rep_meta.get("report_name", "Atskaite"),
+            file_name=rep_meta.get("file_name", "PZA.xlsx"),
+            res_obj=res,
+            commentary=packed_c,
+        )
+
+    return True, f"Apakšgrupa **'{old_clean}'** veiksmīgi pārdēvēta par **'{new_clean}'**!"
 
 
 def filter_result_by_months(res, selected_months: list[str], all_months: list[str]):
@@ -591,165 +756,7 @@ def render_overview_charts(amounts_df: pd.DataFrame, kpi_df: pd.DataFrame, fy_st
             st.altair_chart((fact_w + trend_w).properties(height=320).interactive(), use_container_width=True)
 
 
-MAIN_GROUP_OPTIONS = [
-    "S (Ieņēmumi)",
-    "TVC (Mainīgās izmaksas)",
-    "Uzturēšanas izmaksas (OE)",
-    "Izslēgt (Nolietojums / Virtuāls)",
-]
-
-
-def normalize_group_key(group_key: str) -> str:
-    g = str(group_key or "OE_OTHER").strip()
-    if g == "S":
-        return "S_REV"
-    if g not in SUBGROUP_LABELS:
-        return "OE_OTHER"
-    return g
-
-
-def get_main_code(group_key: str) -> str:
-    g = normalize_group_key(group_key)
-    return GROUPS.get(g, ("", "OE"))[1]
-
-
-def get_main_cat(group_key: str) -> str:
-    code = get_main_code(group_key)
-    if code == "S":
-        return MAIN_GROUP_OPTIONS[0]
-    if code == "TVC":
-        return MAIN_GROUP_OPTIONS[1]
-    if code == "EXCL":
-        return MAIN_GROUP_OPTIONS[3]
-    return MAIN_GROUP_OPTIONS[2]
-
-
-GROUP_SORT_ORDER = {
-    "S": 1,
-    "S_REV": 1,
-    "S_OTHER": 2,
-    "TVC_MATERIALS": 3,
-    "TVC_DELIVERY": 4,
-    "OE_ADMIN_WAGES": 5,
-    "OE_WORKER_WAGES": 6,
-    "OE_MARKETING": 7,
-    "OE_PLATFORMS": 8,
-    "OE_PREMISES": 9,
-    "OE_OFFICE_IT": 10,
-    "OE_FIN_TAX": 11,
-    "OE_ADMIN_OTHER": 12,
-    "OE_SALES_OTHER": 13,
-    "OE_OPER_OTHER": 14,
-    "OE_OTHER": 15,
-    "EXCLUDED": 99,
-}
-
-
-def sort_cls_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame(columns=["id", "Konts", "Displeja_konts", "Sadaļa", "Grupa", "Ieņēmums", "Jautājums"])
-    out = df.copy()
-    out["Grupa"] = out["Grupa"].map(normalize_group_key)
-    out["_sort"] = out["Grupa"].map(lambda g: GROUP_SORT_ORDER.get(g, 50))
-    out = out.sort_values(by=["_sort", "Displeja_konts"], kind="mergesort").drop(columns=["_sort"]).reset_index(drop=True)
-    return out
-
-
-def build_display_labels(leaves) -> dict[str, str]:
-    counts: dict[str, int] = {}
-    for lf in leaves:
-        lbl = str(lf.label).strip()
-        counts[lbl] = counts.get(lbl, 0) + 1
-
-    display_map: dict[str, str] = {}
-    for lf in leaves:
-        lbl = str(lf.label).strip()
-        if counts.get(lbl, 0) > 1:
-            path_parts = [p.strip() for p in re.split(r"[›>]", str(getattr(lf, "path", ""))) if p.strip()]
-            parent = path_parts[-1] if path_parts else f"rinda {lf.row}"
-            display_map[lf.id] = f"{lbl} [{parent}]"
-        else:
-            display_map[lf.id] = lbl
-    return display_map
-
-
-def compute_toc_with_dynamic_subgroups(leaves, mapping: dict[str, dict], period_cols: list[dict], reported=None):
-    res = compute_toc(leaves, mapping, period_cols, reported)
-    res = strip_excluded_rows(res)
-
-    month_labels = [p["label"] for p in period_cols if p.get("kind") == "month"]
-    all_cols = list(res.amounts.columns)
-
-    used_groups = {m["group"] for m in mapping.values() if m.get("group") and m["group"] != "EXCLUDED"}
-    missing_groups = [g for g in used_groups if GROUPS.get(g, ("", ""))[0] not in res.amounts.index]
-
-    if not missing_groups:
-        return res
-
-    amounts = res.amounts.copy()
-    row_kinds = dict(res.row_kinds)
-
-    for g_key in missing_groups:
-        lbl, m_code = GROUPS.get(g_key, (g_key, "OE"))
-        if m_code == "EXCL":
-            continue
-        kind_tag = f"{m_code}_CHILD"
-        g_leaves = [lf for lf in leaves if mapping.get(lf.id, {}).get("group") == g_key]
-        if not g_leaves:
-            continue
-
-        row_series = pd.Series(0.0, index=all_cols)
-        for j, p in enumerate(period_cols):
-            p_lbl = p["label"]
-            if p_lbl in row_series.index:
-                tot_j = 0.0
-                for lf in g_leaves:
-                    v = float(lf.vals[j]) if j < len(lf.vals) else 0.0
-                    tot_j += v if m_code == "S" else abs(v)
-                row_series[p_lbl] = tot_j
-
-        for c in all_cols:
-            if "YTD" in c.upper() and "AVG" not in c.upper() and month_labels:
-                row_series[c] = row_series[month_labels].sum()
-            elif "AVG" in c.upper() and month_labels:
-                row_series[c] = row_series[month_labels].mean()
-
-        amounts.loc[lbl] = row_series
-        row_kinds[lbl] = kind_tag
-
-    s_ch = [r for r in amounts.index if row_kinds.get(r) == "S_CHILD"]
-    tvc_ch = [r for r in amounts.index if row_kinds.get(r) == "TVC_CHILD"]
-    oe_ch = [r for r in amounts.index if row_kinds.get(r) == "OE_CHILD"]
-
-    if s_ch:
-        amounts.loc["S"] = amounts.loc[s_ch].sum(axis=0)
-    if tvc_ch:
-        amounts.loc["TVC"] = amounts.loc[tvc_ch].sum(axis=0)
-    amounts.loc["T"] = amounts.loc["S"] - amounts.loc["TVC"]
-    if oe_ch:
-        amounts.loc["OE"] = amounts.loc[oe_ch].sum(axis=0)
-    amounts.loc["NP"] = amounts.loc["T"] - amounts.loc["OE"]
-
-    ordered_idx = ["S"] + s_ch + ["TVC"] + tvc_ch + ["T", "OE"] + oe_ch + ["NP"]
-    ordered_idx = [r for r in ordered_idx if r in amounts.index]
-    amounts = amounts.loc[ordered_idx]
-
-    main_dict = {}
-    for c in amounts.columns:
-        main_dict[c] = amounts[c]
-        s_val = amounts.loc["S", c]
-        main_dict[f"%|{c}"] = np.where(s_val != 0, amounts[c] / s_val, np.nan)
-    res.amounts = amounts
-    res.main = pd.DataFrame(main_dict, index=amounts.index)
-    res.row_kinds = row_kinds
-    return strip_excluded_rows(res)
-
-
 def rebuild_report_from_account_snapshot(res, acc_details: list[dict]):
-    """
-    Pārrēķina finanšu tabulu no saglabātā kontu mēnešu snapshot (pat tad, ja skatāmies arhīva atskaiti),
-    lai Asistents vai lietotājs var sadalīt apakšgrupas sīkāk jebkurā brīdī!
-    """
     if not acc_details or res is None:
         return res
 
@@ -815,7 +822,7 @@ def rebuild_report_from_account_snapshot(res, acc_details: list[dict]):
     res.amounts = new_amounts
     res.main = pd.DataFrame(new_main_dict, index=new_amounts.index)
     res.row_kinds = new_kinds
-    return res
+    return apply_custom_row_order_to_result(res)
 
 
 def _kpi_cond_color(idx_name: str, val: float, row_vals: list[float]) -> str:
@@ -945,6 +952,10 @@ def render_unified_toc_tables_html(
     table.toc-unified tr.thick-bottom td {
         border-bottom: 2.5px solid #000000 !important;
     }
+    /* Pirmo 1. apakšlīmeņa bloku (Jaunais produkts) vizuāli atdalām no Esošās darbības apakškontiem ar nedaudz izteiktāku starplīniju */
+    table.toc-unified tr.new-prod-sep td {
+        border-top: 1.5px solid #000000 !important;
+    }
     table.toc-unified td.lbl-main {
         text-align: left;
         font-weight: 700;
@@ -957,21 +968,37 @@ def render_unified_toc_tables_html(
     table.toc-unified td.lbl-sub {
         text-align: left;
         font-weight: 400;
-        padding-left: 16px;
+        padding-left: 14px;
         padding-right: 8px;
         border-left: 2.5px solid #000000 !important;
         border-right: 2.5px solid #000000 !important;
         color: #000000 !important;
     }
-    /* Esošās darbības kopā stils: pus-bold (600), ne tik spēcīgs kā galvenās grupas (700) */
-    table.toc-unified td.lbl-sub-medium {
+    /* 1. apakšlīmenis simulācijā: "Esošā darbība kopā" un "Jauns produkts / projekts" (abi vienā līmenī, pus-bold 600) */
+    table.toc-unified td.lbl-sub-l1 {
         text-align: left;
         font-weight: 600;
-        padding-left: 12px;
+        padding-left: 14px;
+        padding-right: 8px;
+        border-left: 2.5px solid #000000 !important;
+        border-right: 2.5px solid #000000 !important;
+        color: #000000 !important;
+    }
+    /* 2. apakšlīmenis simulācijā: Esošās darbības apakškonti (Izejvielas, Piegāde u.c.) ar atkāpi un smalku vertikālu vadlīniju zem Esošās darbības */
+    table.toc-unified td.lbl-sub-l2 {
+        text-align: left;
+        font-weight: 400;
+        padding-left: 24px;
         padding-right: 8px;
         border-left: 2.5px solid #000000 !important;
         border-right: 2.5px solid #000000 !important;
         color: #1E293B !important;
+    }
+    span.sub-tree-bar {
+        display: inline-block;
+        border-left: 2px solid rgba(0, 0, 0, 0.38);
+        padding-left: 7px;
+        line-height: 1.15;
     }
     table.toc-unified td.val-col {
         text-align: right;
@@ -1020,11 +1047,14 @@ def render_unified_toc_tables_html(
         html.append(f'<th class="th-val" style="{th_bg}">{p}</th><th class="th-pct" style="{th_bg}">%</th>')
     html.append("</tr></thead><tbody>")
 
-    s_grp_kinds = ("S", "S_CHILD", "S_SUBTOTAL")
-    tvc_grp_kinds = ("TVC", "TVC_CHILD", "TVC_SUBTOTAL")
-    t_grp_kinds = ("T", "T_CHILD", "T_SUBTOTAL")
+    s_grp_kinds = ("S", "S_CHILD", "S_SUBTOTAL", "S_DETAIL", "S_NEW_PROD")
+    tvc_grp_kinds = ("TVC", "TVC_CHILD", "TVC_SUBTOTAL", "TVC_DETAIL", "TVC_NEW_PROD")
+    t_grp_kinds = ("T", "T_CHILD", "T_SUBTOTAL", "T_NEW_PROD")
     oe_grp_kinds = ("OE", "OE_CHILD")
-    subtotal_kinds = ("S_SUBTOTAL", "TVC_SUBTOTAL", "T_SUBTOTAL")
+
+    l1_medium_kinds = ("S_SUBTOTAL", "TVC_SUBTOTAL", "T_SUBTOTAL", "S_NEW_PROD", "TVC_NEW_PROD", "T_NEW_PROD")
+    l2_detail_kinds = ("S_DETAIL", "TVC_DETAIL")
+    new_prod_kinds = ("S_NEW_PROD", "TVC_NEW_PROD", "T_NEW_PROD")
 
     for i, rname in enumerate(row_names):
         kind = kinds[i]
@@ -1039,28 +1069,40 @@ def render_unified_toc_tables_html(
             or (kind in oe_grp_kinds and next_kind not in oe_grp_kinds)
             or i == len(row_names) - 1
         )
-        tr_cls = ' class="thick-bottom"' if thick_bottom else ""
-
-        if kind in subtotal_kinds:
-            font_w = "600"
-            lbl_cls = "lbl-sub-medium"
-        elif is_bold:
-            font_w = "700"
-            lbl_cls = "lbl-main"
-        else:
-            font_w = "400"
-            lbl_cls = "lbl-sub"
+        tr_classes = []
+        if thick_bottom:
+            tr_classes.append("thick-bottom")
+        if kind in new_prod_kinds:
+            tr_classes.append("new-prod-sep")
+        tr_cls = f' class="{" ".join(tr_classes)}"' if tr_classes else ""
 
         disp_rn = display_row_name(rname)
 
+        if kind in l1_medium_kinds:
+            font_w = "600"
+            lbl_cls = "lbl-sub-l1"
+            lbl_inner = disp_rn
+        elif kind in l2_detail_kinds:
+            font_w = "400"
+            lbl_cls = "lbl-sub-l2"
+            lbl_inner = f'<span class="sub-tree-bar">{disp_rn}</span>'
+        elif is_bold:
+            font_w = "700"
+            lbl_cls = "lbl-main"
+            lbl_inner = disp_rn
+        else:
+            font_w = "400"
+            lbl_cls = "lbl-sub"
+            lbl_inner = disp_rn
+
         row_style = f"background-color: #{fill_hex}; color: #000000; font-weight: {font_w};"
-        html.append(f'<tr{tr_cls} style="{row_style}"><td class="{lbl_cls}" title="{disp_rn}">{disp_rn}</td>')
+        html.append(f'<tr{tr_cls} style="{row_style}"><td class="{lbl_cls}" title="{disp_rn}">{lbl_inner}</td>')
 
         for p in periods:
             val_str = fmt_num(main_df.loc[rname, p])
             pct_str = fmt_pct_int(main_df.loc[rname, f"%|{p}"])
             if p in grey_cols:
-                g_bg = "#CBD5E1" if is_bold else ("#DCE4EE" if kind in subtotal_kinds else "#E2E8F0")
+                g_bg = "#CBD5E1" if is_bold else "#E2E8F0"
                 cell_style = f"background-color: {g_bg}; color: #000000; font-weight: {font_w};"
             else:
                 cell_style = f"color: #000000; font-weight: {font_w};"
@@ -1287,7 +1329,6 @@ def build_global_diagnostic_context(profile_store: SupabaseProfileStore) -> str:
         f"Finanšu gada sākums: {S.get('fy_start_day', 1)}. {MONTH_NAMES_LV.get(S.get('fy_start_month', 1), 'Janvāris')}"
     )
 
-    # 1. Pilns apakšgrupu un tajās ietilpstošo PZA pamatkontu sadalījums (lai Asistents vienmēr zina, kas slēpjas zem katras grupas!)
     acc_snap: list[dict] = []
     if "cls_df" in S and S.cls_df is not None and not S.cls_df.empty and "analysis" in S and S.analysis is not None:
         acc_snap = build_account_details_snapshot(S.analysis.leaves, S.cls_df, S.analysis.ex.period_cols)
@@ -1339,31 +1380,29 @@ TOC_CORE_EXPERT_KNOWLEDGE = """
 4. Lēmumu prioritāte: 1) T ↑ (palielināt Caurlaidību — tam nav griestu!), 2) I ↓ (samazināt krājumos/WIP iesaldēto naudu), 3) OE ↓ (samazināt tikai tad, ja tas nekaitē T). Operatīvā formula: ΔT - ΔOE > 0.
 5. Produktu un klientu prioritāte: Ja ierobežo jauda (CCR 100%), prioritāti nosaka Tu / CCR minūtē. Ja ierobežo tirgus (ir brīva jauda), jebkurš pasūtījums vai produkts ar pozitīvu T (kur ΔT - ΔOE > 0) palielina peļņu (atteikšanās no produkta ar pozitīvu T brīvas jaudas apstākļos samazina peļņu, jo OE paliek!).
 
-=== KĀ ORIENTĒTIES UN STRĀDĀT TOC-FIN APLIKĀCIJĀ ===
-Augšējā rīkjoslā ir 6 galvenās sadaļas:
-- 'Pārskats' (nav_page='overview'): Finanšu tabula, Produktivitātes KPI, Uzkrājošie rādītāji, Grafiki un Vadības kopsavilkums.
-- 'Scenāriju simulācija' (nav_page='simulation'): Kur var mainīt S, TVC un OE par % vai EUR, kā arī pievienot 'Jaunu produktu / projektu' un redzēt Esošo darbību kopā, Jauno produktu un Kopējo rezultātu.
-- 'Kontu struktūra' (nav_page='accounts_explorer'): 3 līmeņu izklājums (1. Lielā grupa -> 2. Apakšgrupa -> 3. Konkrētie PZA pamatkonti ar mēnešu skaitļiem). Šeit var arī izveidot jaunu apakšgrupu un pārvietot jebkuru kontu uz jauno apakšgrupu!
-- 'Atskaites un Simulācijas' (nav_page='archive'): Saglabāto finanšu atskaišu un simulāciju arhīvs.
-- 'Jauns PZA / Klasifikācija' (nav_page='ingest'): Jauna PZA faila ielasīšana un kontu klasifikācija.
-- 'Profils un Uzstādījumi' (nav_page='settings'): Finanšu gada sākuma datums, paroles maiņa un apakšgrupu pievienošana.
+=== VISAS DARBĪBAS (ACTIONS), KO TU KĀ ASISTENTS VARI AUTOMĀTISKI IZPILDĪT APLIKĀCIJĀ ===
+TEV IR PILNAS TIESĪBAS UN TEHNISKA IESPĒJA izpildīt jebkuru no šīm 4 darbībām (nekad nesaki lietotājam, ka nevari pārdēvēt apakšgrupu vai sakārtot tabulu — tu to VARI izdarīt!):
+Lai piedāvātu un izpildītu darbību, izstāsti lietotājam, ko darīsi, un pašās atbildes beigās pievieno JSON bloku tagos `<ACTION>...</ACTION>` (lietotājam uzreiz parādīsies apstiprinājuma poga!):
 
-=== KĀ ASISTENTAM PIEDĀVĀT AUTOMĀTISKU DARBĪBU (ACTION) ===
-Ja lietotājs vēlas:
-a) doties uz kādu aplikācijas sadaļu (piem. 'Kontu struktūra' vai 'Scenāriju simulācija'), VAI
-b) izveidot jaunu apakšgrupu un/vai sadalīt kādu lielo apakšgrupu (pārvietojot konkrētus PZA kontus uz jauno apakšgrupu),
-tad savas atbildes tekstā laipni izstāsti, ko iesaki darīt, un pašās atbildes beigās pievieno JSON bloku tagos <ACTION>...</ACTION> (lietotājam parādīsies apstiprinājuma poga, lai viņš pirms izpildes redz un apstiprina izmaiņas!):
+1) PĀRDĒVĒT ESOŠU APAKŠGRUPU (`rename_subgroup`):
+<ACTION>{"type": "rename_subgroup", "summary": "Pārdēvēt apakšgrupu 'Mārketings un reklāma' par 'Reklāmas izdevumi'", "old_name": "Mārketings un reklāma", "new_name": "Reklāmas izdevumi"}</ACTION>
 
-Piemērs 1 (Sadalīt grupu / izveidot jaunu apakšgrupu un pārvietot kontus):
-<ACTION>{"type": "split_or_move_accounts", "summary": "Izveidot jaunu OE apakšgrupu 'Personāla labbūtības un apmācību izdevumi' un pārvietot uz to 2 kontus", "main_code": "OE", "new_subgroup": "Personāla labbūtības un apmācību izdevumi", "accounts": ["Darbinieku apdrošināšanas maksājumi", "Personāla apmācības izdevumi"]}</ACTION>
+2) SAKĀRTOT TABULAS RINDAS / APAKŠGRUPAS PĒC SUMMAS VAI SECĪBAS (`reorder_subgroups`):
+- Lai sakārtotu OE, TVC vai S apakšgrupas dilstošā secībā pēc summas (no lielākās uz mazāko):
+<ACTION>{"type": "reorder_subgroups", "summary": "Sakārtot OE apakšgrupas dilstošā secībā pēc YTD summas", "main_code": "OE", "mode": "desc", "keep_other_last": true}</ACTION>
+- Vai konkrētā lietotāja norādītā secībā:
+<ACTION>{"type": "reorder_subgroups", "summary": "Sakārtot OE apakšgrupas norādītajā secībā", "main_code": "OE", "mode": "custom", "order": ["Mārketings un reklāma", "Strādnieku algas (+ sociālās iemaksas)", "Administrācijas algas (+ sociālās iemaksas)"]}</ACTION>
 
-Piemērs 2 (Aizvest lietotāju uz konkrētu aplikācijas sadaļu):
+3) IZVEIDOT JAUNU APAKŠGRUPU UN PĀRVIETOT UZ TO KONTUS (`split_or_move_accounts`):
+<ACTION>{"type": "split_or_move_accounts", "summary": "Izveidot jaunu OE apakšgrupu un pārvietot uz to izvēlētos kontus", "main_code": "OE", "new_subgroup": "Personāla labbūtības izdevumi", "accounts": ["Darbinieku apdrošināšanas maksājumi", "Personāla apmācības izdevumi"]}</ACTION>
+
+4) AIZVEST LIETOTĀJU UZ CICTU SADAĻU (`navigate`, kur target_page ir 'overview', 'simulation', 'accounts_explorer', 'archive', 'ingest' vai 'settings'):
 <ACTION>{"type": "navigate", "summary": "Atvērt sadaļu 'Kontu struktūra'", "target_page": "accounts_explorer"}</ACTION>
 """
 
 
 def execute_assistant_action(act: dict, profile_store: SupabaseProfileStore) -> tuple[bool, str]:
-    """Izpilda lietotāja apstiprināto Asistenta darbību."""
+    """Izpilda lietotāja apstiprināto Asistenta darbību (navigate, rename_subgroup, reorder_subgroups, split_or_move_accounts)."""
     act_type = act.get("type", "")
 
     if act_type == "navigate":
@@ -1371,6 +1410,31 @@ def execute_assistant_action(act: dict, profile_store: SupabaseProfileStore) -> 
         S.nav_page = target
         st.query_params["p"] = target
         return True, f"Atvērta sadaļa **{target}**."
+
+    if act_type == "rename_subgroup":
+        old_nm = str(act.get("old_name") or "").strip()
+        new_nm = str(act.get("new_name") or "").strip()
+        return rename_subgroup_everywhere(old_nm, new_nm, profile_store)
+
+    if act_type == "reorder_subgroups":
+        res = S.get("result")
+        if res is None:
+            return False, "Nav aktīvas atskaites, ko sakārtot."
+        mc = str(act.get("main_code") or "OE").upper()
+        mode = str(act.get("mode") or "desc").lower()
+        explicit_ord = act.get("order") if isinstance(act.get("order"), list) else None
+        keep_oth = bool(act.get("keep_other_last", True))
+        new_ord = reorder_table_subgroups(res, main_code=mc, mode=mode, explicit_order=explicit_ord, keep_other_last=keep_oth)
+        if S.get("current_report_id"):
+            rep_meta = S.get("loaded_report_meta") or {}
+            packed_c = pack_commentary_with_account_details(S.get("commentary", ""), S.get("loaded_account_details"))
+            profile_store.save_report(
+                report_name=rep_meta.get("report_name", "Atskaite"),
+                file_name=rep_meta.get("file_name", "PZA.xlsx"),
+                res_obj=res,
+                commentary=packed_c,
+            )
+        return True, f"Apakšgrupas grupā **{mc}** ir sakārtotas jaunajā secībā: {', '.join(new_ord)}!"
 
     if act_type in ("split_or_move_accounts", "create_subgroup"):
         main_code = str(act.get("main_code") or "OE").upper()
@@ -1389,7 +1453,6 @@ def execute_assistant_action(act: dict, profile_store: SupabaseProfileStore) -> 
                 register_custom_subgroup(target_g_key, new_sub_lbl, main_code)
 
         moved_cnt = 0
-        # 1) Ja ir aktīvs cls_df sesijā
         if target_g_key and acc_names and "cls_df" in S and S.cls_df is not None and not S.cls_df.empty:
             for acc_nm in acc_names:
                 mask = (S.cls_df["Konts"].str.lower() == acc_nm.lower()) | (S.cls_df["Displeja_konts"].str.lower() == acc_nm.lower())
@@ -1410,11 +1473,12 @@ def execute_assistant_action(act: dict, profile_store: SupabaseProfileStore) -> 
                 }
                 pos = next((l.pos for l in an.ex.lines if l.row == stc.result_row), None)
                 reported = an.ex.lines[pos].vals if pos is not None else None
-                S.result = compute_toc_with_dynamic_subgroups(an.leaves, mapping_upd, an.ex.period_cols, reported)
+                S.result = apply_custom_row_order_to_result(
+                    compute_toc_with_dynamic_subgroups(an.leaves, mapping_upd, an.ex.period_cols, reported)
+                )
                 S.loaded_account_details = build_account_details_snapshot(an.leaves, S.cls_df, an.ex.period_cols)
                 profile_store.save(an.leaves, mapping_upd)
 
-        # 2) Ja skatāmies ielādētu atskaiti ar loaded_account_details
         elif target_g_key and acc_names and S.get("loaded_account_details"):
             snap_list = S.get("loaded_account_details") or []
             for it in snap_list:
@@ -1428,7 +1492,6 @@ def execute_assistant_action(act: dict, profile_store: SupabaseProfileStore) -> 
                     packed_c = pack_commentary_with_account_details(S.get("commentary", ""), snap_list)
                     profile_store.update_report_commentary(S.current_report_id, packed_c)
 
-        # 3) Atjauninām arī datubāzes saglabātos kontus (saved_mappings)
         if target_g_key and acc_names:
             saved_m = profile_store.list_saved_mappings()
             db_updates = []
@@ -1452,16 +1515,16 @@ def ask_global_assistant(user_question: str, profile_store: SupabaseProfileStore
         "Tu esi laipns, cilvēcīgs un augsti profesionāls TOC-FIN eksperts un aplikācijas gids.\n\n"
         f"{TOC_CORE_EXPERT_KNOWLEDGE}\n"
         f"{know}\n"
-        "SVARĪGI NOTEIKUMI ČATA STILAM:\n"
-        "1. Raksti viegli lasāmā ČATA FORMĀTĀ: īsas rindkopas (1–2 teikumi), ar atstarpēm un aizzīmēm (•), lai lietotājam nav jālasa garš, blīvs teksta klucis!\n"
-        "2. Ja lietotājs jautā, kas slēpjas zem kādas apakšgrupas vai vai kāda OE/TVC grupa nav par lielu — nosauc konkrētos PZA kontus un to EUR summas no konteksta un iesaki, kā tos vislabāk sadalīt.\n"
-        "3. Paskaidro, kur aplikācijā to var izdarīt (sadaļā **Kontu struktūra**), UN piedāvā to izdarīt automātiski, pašās beigās pievienojot `<ACTION>...</ACTION>` JSON bloku (lietotājam parādīsies apstiprinājuma poga)."
+        "SVARĪGI NOTEIKUMI ČATA STILAM UN DARBĪBĀM:\n"
+        "1. Raksti viegli lasāmā ČATA FORMĀTĀ: īsas rindkopas (1–2 teikumi), ar atstarpēm un aizzīmēm (•).\n"
+        "2. Tu MĀKI un VARI: a) pārdēvēt jebkuru apakšgrupu (`rename_subgroup`), b) sakārtot tabulas apakšgrupas dilstošā/augošā vai pielāgotā secībā (`reorder_subgroups`), c) izveidot jaunu apakšgrupu un pārvietot kontus (`split_or_move_accounts`), d) aizvest lietotāju uz jebkuru sadaļu (`navigate`).\n"
+        "3. Kad lietotājs palūdz kādu no šīm darbībām, laipni apstiprini, ka tūlīt to izdarīsi, un pašās atbildes beigās vienmēr pievieno atbilstošo `<ACTION>{...}</ACTION>` JSON bloku!"
     )
     history = S.get("global_chat", [])
     clean_history = [{"role": m["role"], "content": m["content"]} for m in history[-8:]]
     messages = [
         {"role": "user", "content": f"Sistēmas un uzņēmuma finanšu konteksts:\n{ctx}"},
-        {"role": "assistant", "content": "Sapratu! Esmu gatavs palīdzēt gan ar TOC finanšu analīzi, gan ar kontu sadalīšanu un navigāciju aplikācijā."},
+        {"role": "assistant", "content": "Sapratu! Esmu gatavs palīdzēt gan ar TOC finanšu analīzi, gan ar apakšgrupu pārdēvēšanu, kārtošanu un kontu sadalīšanu."},
     ] + clean_history + [{"role": "user", "content": user_question}]
 
     resp = get_client().messages.create(
@@ -1684,7 +1747,7 @@ if not S.get("auto_loaded_latest", False):
                 reconciliation=loaded_init["reconciliation"],
                 by_group={},
             )
-            S.result = strip_excluded_rows(init_res)
+            S.result = apply_custom_row_order_to_result(strip_excluded_rows(init_res))
             S.loaded_report_meta = loaded_init
             S.current_report_id = loaded_init["id"]
             comm_clean, acc_snap = unpack_commentary_and_account_details(loaded_init.get("commentary"))
@@ -1695,28 +1758,31 @@ if not S.get("auto_loaded_latest", False):
                 S.pop("commentary", None)
 
 
-# ------------------------------------------------------------------ ASISTENTA IEKŠĒJAIS LOGS (AR IZMĒRA SLĒDZI, RITINĀŠANU UZ ATBILDES SĀKUMU UN DARBĪBU IZPILDI)
+# ------------------------------------------------------------------ ASISTENTA IEKŠĒJAIS LOGS (AR BALSS IERAKSTU, IZMĒRA SLĒDZI UN DARBĪBU IZPILDI)
 def _render_assistant_popover_content(form_key: str) -> None:
     top_c1, top_c2 = st.columns([1.8, 1.2], vertical_alignment="center")
     with top_c1:
         st.markdown("**TOC-FIN Eksperts**")
     with top_c2:
-        st.toggle("Paplašināt logu", key=f"exp_tog_{form_key}", value=bool(S.get("assistant_expanded", False)), on_change=lambda: S.update(assistant_expanded=not S.get("assistant_expanded", False)))
+        st.toggle(
+            "Paplašināt logu",
+            key=f"exp_tog_{form_key}",
+            value=bool(S.get("assistant_expanded", False)),
+            on_change=lambda: S.update(assistant_expanded=not S.get("assistant_expanded", False)),
+        )
 
     if "global_chat" not in S:
         S.global_chat = []
 
-    box_h = 430 if S.get("assistant_expanded", False) else 265
+    box_h = 430 if S.get("assistant_expanded", False) else 255
     chat_box = st.container(height=box_h)
     with chat_box:
         if not S.global_chat:
             st.caption(
-                "Sveiki! Pajautājiet man par uzņēmuma skaitļiem, kas slēpjas zem katras izmaksu grupas, "
-                "vai palūdziet sadalīt kādu apakšgrupu sīkāk!"
+                "Sveiki! Pajautājiet man par skaitļiem, kas slēpjas zem katras grupas, "
+                "vai palūdziet pārdēvēt, sadalīt vai sakārtot apakšgrupas!"
             )
         else:
-            # Ja ir vairākas ziņas, vecākās saliekam kompaktā izvelkamā blokā virs pašreizējās atbildes,
-            # lai jaunākā atbilde vienmēr sākas pašā augšā un nav jātin uz augšu un leju!
             if len(S.global_chat) > 2:
                 with st.expander(f"Iepriekšējā sarakste ({len(S.global_chat) - 2} ziņas)", expanded=False):
                     for old_m in S.global_chat[:-2]:
@@ -1731,7 +1797,6 @@ def _render_assistant_popover_content(form_key: str) -> None:
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
 
-            # Automātiski uzritinām čata konteineru uz jaunākās atbildes SĀKUMU (nevis pašām beigām)
             components.html(
                 """
                 <script>
@@ -1746,7 +1811,6 @@ def _render_assistant_popover_content(form_key: str) -> None:
                 height=0,
             )
 
-    # Ja Asistents ir sagatavojis darbību (piem., grupas sadalīšanu vai navigāciju), parādām apstiprinājuma kartīti
     pending_act = S.get("pending_assistant_action")
     if pending_act:
         with st.container(border=True):
@@ -1784,7 +1848,35 @@ def _render_assistant_popover_content(form_key: str) -> None:
         if clr_q:
             S.global_chat = []
             S.pop("pending_assistant_action", None)
+            S["asist_audio_ver"] = S.get("asist_audio_ver", 0) + 1
             st.rerun()
+
+    # BALSS IERAKSTS TIEŠI ASISTENTA LOGĀ
+    if hasattr(st, "audio_input"):
+        asist_audio = st.audio_input(
+            "🎙️ Vai ierunāt jautājumu ar balsi",
+            key=f"asist_voice_{form_key}_{S.get('asist_audio_ver', 0)}",
+        )
+        if asist_audio is not None:
+            a_bytes = asist_audio.getvalue()
+            a_hash = hashlib.md5(a_bytes).hexdigest()
+            if S.get("last_asist_audio_hash") != a_hash:
+                S["last_asist_audio_hash"] = a_hash
+                with st.spinner("Atpazīst balss jautājumu..."):
+                    transcribed_q, err_v = transcribe_wav_bytes_lv(a_bytes)
+                    if transcribed_q:
+                        S.global_chat.append({"role": "user", "content": transcribed_q})
+                        try:
+                            ans, act_obj, t_tok, t_eur = ask_global_assistant(transcribed_q, profile)
+                            profile.log_api_usage(t_tok, t_eur)
+                            if act_obj:
+                                S.pending_assistant_action = act_obj
+                        except Exception as e:
+                            ans = f"Kļūda: {e}"
+                        S.global_chat.append({"role": "assistant", "content": ans})
+                        st.rerun()
+                    elif err_v:
+                        st.caption(f"ℹ️ {err_v}")
 
 
 # ------------------------------------------------------------------ 4. PELDOŠA (STICKY) UN IZCELTA AUGŠĒJĀ RĪKJOSLA
@@ -1867,7 +1959,7 @@ if S.nav_page == "overview":
             st.rerun()
         st.stop()
 
-    res = strip_excluded_rows(S.result)
+    res = apply_custom_row_order_to_result(strip_excluded_rows(S.result))
     all_months = [c for c in res.amounts.columns if not ("YTD" in c or "AVG" in c)]
     if not all_months:
         all_months = list(res.amounts.columns)
@@ -1916,7 +2008,7 @@ if S.nav_page == "overview":
         else:
             S.fin_period_preset = "Manuāla mēnešu izlase"
 
-    bar_c1, bar_c2, bar_c3, _ = st.columns([1.4, 1.2, 1.1, 2.3], vertical_alignment="bottom")
+    bar_c1, bar_c2, bar_c3, bar_c4, _ = st.columns([1.3, 1.15, 1.05, 1.05, 1.45], vertical_alignment="bottom")
     with bar_c1:
         st.selectbox(
             "Periods pārskatam",
@@ -1945,6 +2037,20 @@ if S.nav_page == "overview":
     view_res = filter_result_by_months(res, fin_selected_months, all_months)
 
     with bar_c3:
+        with st.popover("Kārtot rindas ▾", use_container_width=True):
+            st.caption("Sakārtot apakšgrupas pēc kopējās summas periodā:")
+            if st.button("OE: No lielākās uz mazāko ↓", type="primary", use_container_width=True):
+                reorder_table_subgroups(S.result, main_code="OE", mode="desc", keep_other_last=True)
+                st.rerun()
+            if st.button("OE: No mazākās uz lielāko ↑", use_container_width=True):
+                reorder_table_subgroups(S.result, main_code="OE", mode="asc", keep_other_last=True)
+                st.rerun()
+            if st.button("Visas grupas (S, TVC, OE) ↓", use_container_width=True):
+                for mc_i in ("S", "TVC", "OE"):
+                    reorder_table_subgroups(S.result, main_code=mc_i, mode="desc", keep_other_last=True)
+                st.rerun()
+
+    with bar_c4:
         with st.popover("Lejupielādēt Excel ▾", use_container_width=True):
             st.caption("Izvēlieties Excel faila veidu:")
             try:
@@ -2070,7 +2176,7 @@ if S.nav_page == "overview":
 
 
 # ==============================================================================
-# POSMS 2: SCENĀRIJU SIMULĀCIJA (ESOŠĀ DARBĪBA KOPĀ VIRS APAKŠKONTIEM + JAUNS PRODUKTS APAKŠĀ)
+# POSMS 2: SCENĀRIJU SIMULĀCIJA (VIZUĀLI SKAIDRA HIERARHIJA ESOŠAJAI DARBĪBAI UN JAUNAJAM PRODUKTAM)
 # ==============================================================================
 elif S.nav_page == "simulation":
     st.subheader("Scenāriju simulācija un Jauns projekts")
@@ -2078,7 +2184,7 @@ elif S.nav_page == "simulation":
         st.info("Vispirms ielādējiet vai izveidojiet finanšu atskaiti, lai veiktu simulāciju.")
         st.stop()
 
-    res = strip_excluded_rows(S.result)
+    res = apply_custom_row_order_to_result(strip_excluded_rows(S.result))
     all_months = [c for c in res.amounts.columns if not ("YTD" in c or "AVG" in c)]
     if not all_months:
         all_months = list(res.amounts.columns)
@@ -2396,7 +2502,6 @@ elif S.nav_page == "simulation":
     np_t_total = np_s_val - np_tvc_total
     has_active_new_product = bool(np_enable and (np_s_val != 0 or np_tvc_total != 0))
 
-    # Nosaukumi bez enter (↳) zīmēm!
     old_s_subtotal_lbl = "Esošā darbība kopā (S)"
     np_s_row_lbl = f"{np_clean_title} (S)"
 
@@ -2411,33 +2516,46 @@ elif S.nav_page == "simulation":
     t_display_rows: list[str] = []
 
     if has_active_new_product:
-        # 1) S bloks: Ja ir vairāki vecie S apakškonti, VIRS tiem liekam "Esošā darbība kopā (S)", tad vecos apakškontus, un apakšā Jauno produktu
+        # 1) S bloks: Ja vecajam S ir 1 rinda (piem. Neto apgrozījums), liekam to 1. apakšlīmenī (pus-bold) kā S_SUBTOTAL;
+        # ja vairākas, virs tām liekam "Esošā darbība kopā (S)" (1. līmenī), bet apakškontus 2. līmenī (S_DETAIL ar atkāpi un vadlīniju)
         if len(s_children) > 1:
             base_sum.loc[old_s_subtotal_lbl] = old_s_base
             sim_sum.loc[old_s_subtotal_lbl] = old_s_sim
             sim_row_kinds[old_s_subtotal_lbl] = "S_SUBTOTAL"
             s_display_rows.append(old_s_subtotal_lbl)
-        s_display_rows.extend(s_children)
+            for sc in s_children:
+                sim_row_kinds[sc] = "S_DETAIL"
+                s_display_rows.append(sc)
+        elif len(s_children) == 1:
+            sim_row_kinds[s_children[0]] = "S_SUBTOTAL"
+            s_display_rows.append(s_children[0])
 
         base_sum.loc[np_s_row_lbl] = 0.0
         sim_sum.loc[np_s_row_lbl] = np_s_val
-        sim_row_kinds[np_s_row_lbl] = "S_CHILD"
+        sim_row_kinds[np_s_row_lbl] = "S_NEW_PROD"
         s_display_rows.append(np_s_row_lbl)
 
-        # 2) TVC bloks: VIRS apakškontiem (Izejvielas, Piegāde) liekam "Esošā darbība kopā (TVC)", tad abus apakškontus, un apakšā Jauno produktu!
+        # 2) TVC bloks: "Esošā darbība kopā (TVC)" ir 1. apakšlīmenī (TVC_SUBTOTAL),
+        # zem tās apakškonti (Izejvielas, Piegāde) ir 2. apakšlīmenī (TVC_DETAIL ar atkāpi un kreiso vadlīniju),
+        # un zem tiem atkal 1. apakšlīmenī "Jauns produkts / projekts (TVC)" (TVC_NEW_PROD)!
         if len(tvc_children) > 1:
             base_sum.loc[old_tvc_subtotal_lbl] = old_tvc_base
             sim_sum.loc[old_tvc_subtotal_lbl] = old_tvc_sim
             sim_row_kinds[old_tvc_subtotal_lbl] = "TVC_SUBTOTAL"
             tvc_display_rows.append(old_tvc_subtotal_lbl)
-        tvc_display_rows.extend(tvc_children)
+            for tc in tvc_children:
+                sim_row_kinds[tc] = "TVC_DETAIL"
+                tvc_display_rows.append(tc)
+        elif len(tvc_children) == 1:
+            sim_row_kinds[tvc_children[0]] = "TVC_SUBTOTAL"
+            tvc_display_rows.append(tvc_children[0])
 
         base_sum.loc[np_tvc_row_lbl] = 0.0
         sim_sum.loc[np_tvc_row_lbl] = np_tvc_total
-        sim_row_kinds[np_tvc_row_lbl] = "TVC_CHILD"
+        sim_row_kinds[np_tvc_row_lbl] = "TVC_NEW_PROD"
         tvc_display_rows.append(np_tvc_row_lbl)
 
-        # 3) T bloks: zem kopējā T vispirms "Esošā darbība kopā (T)" (pus-bold) un zem tās "Jauns produkts / projekts (T)"
+        # 3) T bloks: abi 1. apakšlīmenī ("Esošā darbība kopā (T)" un "Jauns produkts / projekts (T)")
         base_sum.loc[old_t_row_lbl] = old_t_base
         sim_sum.loc[old_t_row_lbl] = old_t_sim
         sim_row_kinds[old_t_row_lbl] = "T_SUBTOTAL"
@@ -2445,7 +2563,7 @@ elif S.nav_page == "simulation":
 
         base_sum.loc[np_t_row_lbl] = 0.0
         sim_sum.loc[np_t_row_lbl] = np_t_total
-        sim_row_kinds[np_t_row_lbl] = "T_CHILD"
+        sim_row_kinds[np_t_row_lbl] = "T_NEW_PROD"
         t_display_rows.append(np_t_row_lbl)
     else:
         s_display_rows = list(s_children)
@@ -2595,7 +2713,7 @@ elif S.nav_page == "simulation":
 
 
 # ==============================================================================
-# POSMS 3: KONTU STRUKTŪRA
+# POSMS 3: KONTU STRUKTŪRA (AR APAKŠGRUPAS PIEVIENOŠANU UN PĀRDĒVĒŠANU)
 # ==============================================================================
 elif S.nav_page == "accounts_explorer":
     st.subheader("Kontu struktūra un PZA mēnešu skaitļu kontrole")
@@ -2604,22 +2722,42 @@ elif S.nav_page == "accounts_explorer":
         "**3. Konkrētā PZA pozīcija ar nolasītajiem mēnešu skaitļiem**."
     )
 
-    with st.expander("Pievienot jaunu apakšgrupu (sadalīt izmaksas vai ieņēmumus sīkāk)", expanded=False):
-        ns1, ns2, ns3 = st.columns([2, 1.5, 1], vertical_alignment="bottom")
-        with ns1:
-            custom_sub_lbl = st.text_input("Jaunās apakšgrupas nosaukums", placeholder="piem., Pārējās administrācijas izmaksas", key="exp_new_sub_lbl")
-        with ns2:
-            custom_sub_main = st.selectbox("Lielā grupa", options=["Uzturēšanas izmaksas (OE)", "TVC (Mainīgās izmaksas)", "S (Ieņēmumi)"], key="exp_new_sub_main")
-        with ns3:
-            if st.button("Pievienot apakšgrupu", use_container_width=True, key="exp_btn_add_sub"):
-                if custom_sub_lbl.strip():
-                    clean_lbl = custom_sub_lbl.strip()
-                    m_c = "S" if custom_sub_main.startswith("S") else ("TVC" if custom_sub_main.startswith("TVC") else "OE")
-                    new_k = f"{m_c}_CUSTOM_{hashlib.md5(clean_lbl.encode()).hexdigest()[:6].upper()}"
-                    S.setdefault("custom_subgroups", {})[new_k] = (clean_lbl, m_c)
-                    register_custom_subgroup(new_k, clean_lbl, m_c)
-                    st.toast(f"Apakšgrupa '{clean_lbl}' pievienota.")
-                    st.rerun()
+    col_exp_act1, col_exp_act2 = st.columns(2)
+    with col_exp_act1:
+        with st.expander("➕ Pievienot jaunu apakšgrupu", expanded=False):
+            ns1, ns2, ns3 = st.columns([1.8, 1.3, 1], vertical_alignment="bottom")
+            with ns1:
+                custom_sub_lbl = st.text_input("Jaunās apakšgrupas nosaukums", placeholder="piem., Reklāmas izdevumi", key="exp_new_sub_lbl")
+            with ns2:
+                custom_sub_main = st.selectbox("Lielā grupa", options=["Uzturēšanas izmaksas (OE)", "TVC (Mainīgās izmaksas)", "S (Ieņēmumi)"], key="exp_new_sub_main")
+            with ns3:
+                if st.button("Pievienot", use_container_width=True, key="exp_btn_add_sub"):
+                    if custom_sub_lbl.strip():
+                        clean_lbl = custom_sub_lbl.strip()
+                        m_c = "S" if custom_sub_main.startswith("S") else ("TVC" if custom_sub_main.startswith("TVC") else "OE")
+                        new_k = f"{m_c}_CUSTOM_{hashlib.md5(clean_lbl.encode()).hexdigest()[:6].upper()}"
+                        S.setdefault("custom_subgroups", {})[new_k] = (clean_lbl, m_c)
+                        register_custom_subgroup(new_k, clean_lbl, m_c)
+                        st.toast(f"Apakšgrupa '{clean_lbl}' pievienota.")
+                        st.rerun()
+
+    with col_exp_act2:
+        with st.expander("✏️ Pārdēvēt esošu apakšgrupu", expanded=False):
+            rn1, rn2, rn3 = st.columns([1.4, 1.4, 1], vertical_alignment="bottom")
+            existing_sub_list = [lbl for k, lbl in SUBGROUP_LABELS.items() if k != "EXCLUDED"]
+            with rn1:
+                old_sub_sel = st.selectbox("Esošā apakšgrupa", options=existing_sub_list, key="exp_rn_old")
+            with rn2:
+                new_sub_inp = st.text_input("Jaunais nosaukums", placeholder="piem., Reklāmas izdevumi", key="exp_rn_new")
+            with rn3:
+                if st.button("Pārdēvēt", type="primary", use_container_width=True, key="exp_btn_rn_sub"):
+                    if new_sub_inp.strip():
+                        ok_rn, msg_rn = rename_subgroup_everywhere(old_sub_sel, new_sub_inp.strip(), profile)
+                        if ok_rn:
+                            st.toast(msg_rn)
+                            st.rerun()
+                        else:
+                            st.error(msg_rn)
 
     has_live_pza = ("cls_df" in S and S.cls_df is not None and not S.cls_df.empty and "analysis" in S and S.analysis is not None)
     snap_details: list[dict] = S.get("loaded_account_details") or []
@@ -2730,7 +2868,9 @@ elif S.nav_page == "accounts_explorer":
                                             stc = S.structure
                                             pos = next((l.pos for l in an.ex.lines if l.row == stc.result_row), None)
                                             reported = an.ex.lines[pos].vals if pos is not None else None
-                                            S.result = compute_toc_with_dynamic_subgroups(an.leaves, mapping_upd, an.ex.period_cols, reported)
+                                            S.result = apply_custom_row_order_to_result(
+                                                compute_toc_with_dynamic_subgroups(an.leaves, mapping_upd, an.ex.period_cols, reported)
+                                            )
                                             S.loaded_account_details = build_account_details_snapshot(an.leaves, S.cls_df, an.ex.period_cols)
                                             profile.save(an.leaves, mapping_upd)
                                         else:
@@ -2852,7 +2992,7 @@ elif S.nav_page == "archive":
                                     reconciliation=loaded["reconciliation"],
                                     by_group={},
                                 )
-                                S.result = strip_excluded_rows(loaded_res)
+                                S.result = apply_custom_row_order_to_result(strip_excluded_rows(loaded_res))
                                 S.loaded_report_meta = loaded
                                 S.current_report_id = loaded["id"]
                                 S.pop("fin_months_active", None)
@@ -2913,7 +3053,7 @@ elif S.nav_page == "archive":
                                     reconciliation=loaded_s["reconciliation"],
                                     by_group={},
                                 )
-                                S.result = strip_excluded_rows(loaded_sim_res)
+                                S.result = apply_custom_row_order_to_result(strip_excluded_rows(loaded_sim_res))
                                 S.loaded_report_meta = loaded_s
                                 try:
                                     sim_state = json.loads(loaded_s.get("commentary") or "{}")
@@ -3347,7 +3487,9 @@ elif S.nav_page == "ingest":
         pos = next((l.pos for l in an.ex.lines if l.row == stc.result_row), None)
         reported = an.ex.lines[pos].vals if pos is not None else None
 
-        res = compute_toc_with_dynamic_subgroups(an.leaves, mapping, an.ex.period_cols, reported)
+        res = apply_custom_row_order_to_result(
+            compute_toc_with_dynamic_subgroups(an.leaves, mapping, an.ex.period_cols, reported)
+        )
         S.result = res
         S.pop("fin_months_active", None)
         S.pop("fin_period_preset", None)
@@ -3448,7 +3590,7 @@ elif S.nav_page == "settings":
                         st.error(msg_pw)
 
     with st.container(border=True):
-        st.markdown("#### 4. Pievienot jaunu apakšgrupu")
+        st.markdown("#### 4. Pievienot vai pārdēvēt apakšgrupu")
         st.caption("Izveidojiet papildu izmaksu vai ieņēmumu rindu (visu kontu detalizētu izklājumu skatiet rīkjoslas sadaļā **Kontu struktūra**).")
         ns1, ns2, ns3 = st.columns([2, 1.5, 1], vertical_alignment="bottom")
         with ns1:
