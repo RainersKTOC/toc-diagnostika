@@ -1,6 +1,6 @@
 """
-app.py — THRUVIA: MI instruments uzņēmuma finanšu analīzei un vadības lēmumu modelēšanai (v26.2)
-Centrēts grafiks | Tīra navigācija | Gadu pāršķiršana (36+ mēn.) | Abonēšanas pamats (5d trial + Stripe)
+app.py — THRUVIA: MI instruments uzņēmuma finanšu analīzei un vadības lēmumu modelēšanai (v26.3)
+Tīra navigācija bez dubultām bultiņām | 15+ mēnešu sadalījums & fiksētas (sticky) kolonnas | Bez kvotu limitiem
 Project ID: amprqueamdcxpjufigvm
 """
 from __future__ import annotations
@@ -293,7 +293,6 @@ def get_billing_config() -> dict:
         "monthly_price_eur": _get_secret_or_env("SUBSCRIPTION_PRICE_EUR", "49"),
         "stripe_checkout_url": _get_secret_or_env("STRIPE_CHECKOUT_URL", ""),
         "stripe_portal_url": _get_secret_or_env("STRIPE_PORTAL_URL", ""),
-        "consult_booking_url": _get_secret_or_env("CONSULT_BOOKING_URL", ""),
         "support_email": _get_secret_or_env("SUPPORT_EMAIL", "info@b4b.lv"),
     }
 
@@ -582,7 +581,7 @@ def reorder_table_subgroups(
     wages.sort(key=lambda w: 0 if "admin" in w.lower() else 1)
     rem_children = [c for c in children if c not in wages]
 
-    month_cols = [c for c in res.amounts.columns if not ("YTD" in str(c).upper() or "AVG" in str(c).upper())]
+    month_cols = [c for c in res.amounts.columns if not ("YTD" in str(c).upper() or "AVG" in str(c).upper() or "KOPĀ" in str(c).upper())]
     if not month_cols:
         month_cols = list(res.amounts.columns)
 
@@ -954,11 +953,6 @@ def filter_result_by_months(
     summary_source_months: list[str] | None = None,
     summary_label_prefix: str | None = None,
 ):
-    """
-    Atlasītie mēneši + fiksētas TOTAL (KOPĀ) un AVG kolonnas.
-    Ja tiek padots `summary_source_months`, tad KOPĀ un AVG var rēķināt vai nu par redzamo gadu,
-    vai par visu izvēlēto darba periodu (piem., pāršķirot 36 mēnešu atskaiti pa gadiem!).
-    """
     if not selected_months:
         return res
 
@@ -1003,7 +997,6 @@ def filter_result_by_months(
 
 
 def aggregate_result_by_years(res, selected_months: list[str]):
-    """Izveido 'Gadu salīdzinājuma' skatu (pa vienai kolonnai katram gadam + KOPĀ + AVG/mēn.)."""
     by_yr: dict[str, list[str]] = {}
     for m_col in selected_months:
         _, yr = parse_period_month_year(m_col)
@@ -1143,7 +1136,6 @@ def render_overview_charts(amounts_df: pd.DataFrame, kpi_df: pd.DataFrame, fy_st
     st.markdown("---")
     st.subheader("Finanšu un produktivitātes dinamika")
 
-    # Simetriski centrēts virs abiem apakšējiem grafikiem
     _, ch_wrap_c, _ = st.columns([0.55, 3.9, 0.55])
     with ch_wrap_c:
         with st.container(border=True):
@@ -1441,7 +1433,13 @@ def render_unified_toc_tables_html(
     fy_start_month: int = 1,
     show_cumulative: bool = True,
     lbl_width_px: int | None = None,
+    freeze_sides: bool = False,
 ) -> str:
+    """
+    Ģenerē TOC finanšu, KPI un uzkrājošo rādītāju tabulas.
+    Ja `freeze_sides=True` (ritināmajā 15+ mēnešu skatā), tad Rādītāju kolonna paliek fiksēta kreisajā pusē,
+    bet KOPĀ un AVG kolonnas paliek fiksētas labajā pusē!
+    """
     valid_rows = [
         r for r in amounts_df.index
         if row_kinds.get(r) not in ("EXCL", "EXCLUDED")
@@ -1460,7 +1458,6 @@ def render_unified_toc_tables_html(
 
     display_row_name = lambda rn: "Uzturēšanas izmaksas (OE)" if rn == "OE" else rn
 
-    # Simulācijā vai skatos ar maz kolonnām (<= 5) dodam nosaukumiem 370px, lai redzami pilni nosaukumi bez apraušanas!
     if lbl_width_px is not None:
         lbl_w_px = lbl_width_px
     elif n_per <= 5:
@@ -1468,7 +1465,26 @@ def render_unified_toc_tables_html(
     else:
         lbl_w_px = 245
 
+    use_freeze = bool(freeze_sides and n_per >= 4)
+
+    # Fiksētie pikseļu platumi ritināmajam skatam ar sticky kreiso un labajām kolonnām
+    m_val_w, m_pct_w = 80, 42
+    sum_val_w, sum_pct_w = 88, 42
+    sum_pair_w = sum_val_w + sum_pct_w  # 130px
+
     def _build_two_subcol_colgroup(num_periods: int, total_ref_periods: int) -> tuple[str, str]:
+        if use_freeze:
+            cols_html = [f'<col style="width: {lbl_w_px}px;">']
+            for p_i in range(num_periods):
+                if p_i >= num_periods - 2:
+                    cols_html.append(f'<col style="width: {sum_val_w}px;">')
+                    cols_html.append(f'<col style="width: {sum_pct_w}px;">')
+                else:
+                    cols_html.append(f'<col style="width: {m_val_w}px;">')
+                    cols_html.append(f'<col style="width: {m_pct_w}px;">')
+            total_px = lbl_w_px + max(num_periods - 2, 0) * (m_val_w + m_pct_w) + min(num_periods, 2) * sum_pair_w
+            return "<colgroup>" + "".join(cols_html) + "</colgroup>", f"width: {total_px}px; table-layout: fixed;"
+
         if num_periods == total_ref_periods:
             table_style = "width: 100%; table-layout: fixed;"
         else:
@@ -1483,6 +1499,14 @@ def render_unified_toc_tables_html(
         return "<colgroup>" + "".join(cols_html) + "</colgroup>", table_style
 
     def _build_single_col_kpi_colgroup(num_periods: int, total_ref_periods: int) -> tuple[str, str]:
+        if use_freeze:
+            cols_html = [f'<col style="width: {lbl_w_px}px;">']
+            for p_i in range(num_periods):
+                w_c = sum_pair_w if p_i >= num_periods - 2 else (m_val_w + m_pct_w)
+                cols_html.append(f'<col style="width: {w_c}px;">')
+            total_px = lbl_w_px + max(num_periods - 2, 0) * (m_val_w + m_pct_w) + min(num_periods, 2) * sum_pair_w
+            return "<colgroup>" + "".join(cols_html) + "</colgroup>", f"width: {total_px}px; table-layout: fixed;"
+
         if num_periods == total_ref_periods:
             table_style = "width: 100%; table-layout: fixed;"
         else:
@@ -1496,6 +1520,30 @@ def render_unified_toc_tables_html(
         return "<colgroup>" + "".join(cols_html) + "</colgroup>", table_style
 
     main_colgroup, main_tbl_style = _build_two_subcol_colgroup(n_per, n_per)
+    tbl_cls = "toc-unified toc-freeze" if use_freeze else "toc-unified"
+
+    def _sticky_left_style(bg: str) -> str:
+        if not use_freeze:
+            return f"background-color: {bg};"
+        return f"position: sticky; left: 0; z-index: 5; background-color: {bg}; box-shadow: 2px 0 4px rgba(0,0,0,0.12);"
+
+    def _sticky_right_pair(p_idx: int, total_p: int, is_pct: bool, bg: str) -> str:
+        if not use_freeze or p_idx < total_p - 2:
+            return ""
+        if p_idx == total_p - 1:
+            r_px = 0 if is_pct else sum_pct_w
+            return f"position: sticky; right: {r_px}px; z-index: 5; background-color: {bg};"
+        # p_idx == total_p - 2 (KOPĀ)
+        if is_pct:
+            return f"position: sticky; right: {sum_pair_w}px; z-index: 5; background-color: {bg};"
+        return f"position: sticky; right: {sum_pair_w + sum_pct_w}px; z-index: 5; background-color: {bg}; box-shadow: -3px 0 6px rgba(0,0,0,0.15);"
+
+    def _sticky_right_single(p_idx: int, total_p: int, bg: str) -> str:
+        if not use_freeze or p_idx < total_p - 2:
+            return ""
+        if p_idx == total_p - 1:
+            return f"position: sticky; right: 0px; z-index: 5; background-color: {bg};"
+        return f"position: sticky; right: {sum_pair_w}px; z-index: 5; background-color: {bg}; box-shadow: -3px 0 6px rgba(0,0,0,0.15);"
 
     html = ["""
     <style>
@@ -1517,6 +1565,13 @@ def render_unified_toc_tables_html(
         font-family: 'Inter', 'Calibri', 'Segoe UI', sans-serif;
         font-size: 12px;
         border: 2.5px solid #000000 !important;
+    }
+    table.toc-unified.toc-freeze {
+        border-collapse: separate !important;
+        border-spacing: 0 !important;
+    }
+    table.toc-unified th, table.toc-unified td {
+        box-sizing: border-box !important;
     }
     table.toc-unified th {
         background-color: #E2E8F0;
@@ -1597,16 +1652,24 @@ def render_unified_toc_tables_html(
 
     if title_main:
         html.append(f'<div class="toc-sec-heading">{title_main}</div>')
-    html.append(f'<div class="toc-table-wrap"><table class="toc-unified" style="{main_tbl_style}">{main_colgroup}<thead><tr>')
-    html.append('<th class="th-lbl">Rādītājs / Kontugrupa</th>')
-    for p in periods:
+    html.append(f'<div class="toc-table-wrap"><table class="{tbl_cls}" style="{main_tbl_style}">{main_colgroup}<thead><tr>')
+    html.append(f'<th class="th-lbl" style="{_sticky_left_style("#E2E8F0")}">Rādītājs / Kontugrupa</th>')
+    for p_idx, p in enumerate(periods):
         if p in grey_cols:
-            th_bg = "background-color: #CBD5E1; color: #000000;"
+            base_th_bg = "#CBD5E1"
+            extra_th = "color: #000000;"
         elif p in muted_cols:
-            th_bg = "background-color: #F1F5F9; color: #334155; font-weight: 600;"
+            base_th_bg = "#F1F5F9"
+            extra_th = "color: #334155; font-weight: 600;"
         else:
-            th_bg = ""
-        html.append(f'<th class="th-val" style="{th_bg}">{p}</th><th class="th-pct" style="{th_bg}">%</th>')
+            base_th_bg = "#E2E8F0"
+            extra_th = ""
+        st_v = _sticky_right_pair(p_idx, n_per, False, base_th_bg)
+        st_p = _sticky_right_pair(p_idx, n_per, True, base_th_bg)
+        html.append(
+            f'<th class="th-val" style="background-color: {base_th_bg}; {extra_th} {st_v}">{p}</th>'
+            f'<th class="th-pct" style="background-color: {base_th_bg}; {extra_th} {st_p}">%</th>'
+        )
     html.append("</tr></thead><tbody>")
 
     s_grp_kinds = ("S", "S_CHILD", "S_SUBTOTAL", "S_DETAIL", "S_NEW_PROD")
@@ -1667,50 +1730,61 @@ def render_unified_toc_tables_html(
             lbl_cls = "lbl-sub"
             lbl_inner = disp_rn
 
-        row_bg_hex = "F1C7A8" if is_wage_row else fill_hex
-        row_style = f"background-color: #{row_bg_hex}; color: #000000; font-weight: {font_w};"
-        html.append(f'<tr{tr_cls} style="{row_style}"><td class="{lbl_cls}" title="{disp_rn}">{lbl_inner}</td>')
+        row_bg_css = f"#{'F1C7A8' if is_wage_row else fill_hex}"
+        row_style = f"background-color: {row_bg_css}; color: #000000; font-weight: {font_w};"
+        html.append(
+            f'<tr{tr_cls} style="{row_style}">'
+            f'<td class="{lbl_cls}" style="{_sticky_left_style(row_bg_css)}" title="{disp_rn}">{lbl_inner}</td>'
+        )
 
-        for p in periods:
+        for p_idx, p in enumerate(periods):
             val_str = fmt_num(main_df.loc[rname, p])
             pct_str = fmt_pct_int(main_df.loc[rname, f"%|{p}"])
             if p in grey_cols:
-                g_bg = "#CBD5E1" if is_bold else "#E2E8F0"
-                cell_style = f"background-color: {g_bg}; color: #000000; font-weight: {font_w};"
+                c_bg = "#CBD5E1" if is_bold else "#E2E8F0"
+                base_cell = f"background-color: {c_bg}; color: #000000; font-weight: {font_w};"
             elif p in muted_cols:
-                m_bg = MUTED_DIFF_BG.get(kind, "#F8FAFC")
+                c_bg = MUTED_DIFF_BG.get(kind, "#F8FAFC")
                 m_fw = "600" if is_bold else "400"
-                cell_style = f"background-color: {m_bg}; color: #334155 !important; font-weight: {m_fw};"
+                base_cell = f"background-color: {c_bg}; color: #334155 !important; font-weight: {m_fw};"
             else:
-                cell_style = f"color: #000000; font-weight: {font_w};"
-            html.append(f'<td class="val-col" style="{cell_style}">{val_str}</td><td class="pct-col" style="{cell_style}">{pct_str}</td>')
+                c_bg = row_bg_css
+                base_cell = f"background-color: {c_bg}; color: #000000; font-weight: {font_w};"
+            st_v = _sticky_right_pair(p_idx, n_per, False, c_bg)
+            st_p = _sticky_right_pair(p_idx, n_per, True, c_bg)
+            html.append(f'<td class="val-col" style="{base_cell} {st_v}">{val_str}</td><td class="pct-col" style="{base_cell} {st_p}">{pct_str}</td>')
         html.append("</tr>")
 
     html.append("</tbody></table></div>")
 
+    # 2. KPI TABULA
     kpi_periods = [p for p in periods if p in kpi_df.columns]
-    kpi_colgroup, kpi_tbl_style = _build_single_col_kpi_colgroup(len(kpi_periods), n_per)
+    n_kpi_p = len(kpi_periods)
+    kpi_colgroup, kpi_tbl_style = _build_single_col_kpi_colgroup(n_kpi_p, n_per)
     month_only_kpi_cols = [
         p for p in kpi_periods
         if not ("YTD" in str(p).upper() or "AVG" in str(p).upper() or "BĀZE" in str(p).upper() or "KOPĀ" in str(p).upper())
     ]
 
     html.append(f'<div class="toc-sec-heading">{title_kpi}</div>')
-    html.append(f'<div class="toc-table-wrap"><table class="toc-unified" style="{kpi_tbl_style}">{kpi_colgroup}<thead><tr>')
-    html.append('<th class="th-lbl">Produktivitātes rādītājs</th>')
-    for p in kpi_periods:
-        th_bg = "background-color: #CBD5E1;" if p in grey_cols else "background-color: #E2E8F0;"
-        html.append(f'<th class="th-kpi" style="{th_bg}">{p}</th>')
+    html.append(f'<div class="toc-table-wrap"><table class="{tbl_cls}" style="{kpi_tbl_style}">{kpi_colgroup}<thead><tr>')
+    html.append(f'<th class="th-lbl" style="{_sticky_left_style("#E2E8F0")}">Produktivitātes rādītājs</th>')
+    for p_idx, p in enumerate(kpi_periods):
+        th_bg_c = "#CBD5E1" if p in grey_cols else "#E2E8F0"
+        st_r = _sticky_right_single(p_idx, n_kpi_p, th_bg_c)
+        html.append(f'<th class="th-kpi" style="background-color: {th_bg_c}; {st_r}">{p}</th>')
     html.append("</tr></thead><tbody>")
 
     for i, idx_name in enumerate(kpi_df.index):
         tr_cls = ' class="thick-bottom"' if i == len(kpi_df.index) - 1 else ""
         html.append(f'<tr{tr_cls} style="background-color: #FFFFFF; color: #000000;">')
-        html.append(f'<td class="lbl-main" style="background-color: #F1F5F9; font-weight: 700; color: #000000;" title="{idx_name}">{idx_name}</td>')
+        html.append(
+            f'<td class="lbl-main" style="font-weight: 700; color: #000000; {_sticky_left_style("#F1F5F9")}" title="{idx_name}">{idx_name}</td>'
+        )
 
         row_month_vals = [kpi_df.loc[idx_name, mp] for mp in month_only_kpi_cols] if month_only_kpi_cols else list(kpi_df.loc[idx_name].values)
 
-        for p in kpi_periods:
+        for p_idx, p in enumerate(kpi_periods):
             v = kpi_df.loc[idx_name, p]
             if pd.isna(v):
                 s = ""
@@ -1720,23 +1794,26 @@ def render_unified_toc_tables_html(
                 s = f"{v:.2f}"
 
             bg_cell = "#E2E8F0" if p in grey_cols else _kpi_cond_color(idx_name, v, row_month_vals)
-            html.append(f'<td class="kpi-col" style="background-color: {bg_cell};">{s}</td>')
+            st_r = _sticky_right_single(p_idx, n_kpi_p, bg_cell)
+            html.append(f'<td class="kpi-col" style="background-color: {bg_cell}; {st_r}">{s}</td>')
         html.append("</tr>")
 
     html.append("</tbody></table></div>")
 
+    # 3. UZKRĀJOŠO RĀDĪTĀJU TABULA
     if show_cumulative:
         cum_df, cum_periods, _ = compute_cumulative_toc_df(amounts_df, fy_start_month=fy_start_month)
         html.append('<div class="toc-sec-heading">Uzkrājošie rādītāji</div>')
-        html.append(f'<div class="toc-table-wrap"><table class="toc-unified" style="{main_tbl_style}">{main_colgroup}<thead><tr>')
-        html.append('<th class="th-lbl">Uzkrājošais rādītājs</th>')
-        for p in periods:
+        html.append(f'<div class="toc-table-wrap"><table class="{tbl_cls}" style="{main_tbl_style}">{main_colgroup}<thead><tr>')
+        html.append(f'<th class="th-lbl" style="{_sticky_left_style("#E2E8F0")}">Uzkrājošais rādītājs</th>')
+        for p_idx, p in enumerate(periods):
             if p in cum_periods:
                 html.append(f'<th class="th-val">{p}</th><th class="th-pct">%</th>')
             else:
+                st_r = _sticky_right_single(p_idx, n_per, "#E2E8F0")
                 html.append(
                     f'<th colspan="2" style="background-color: #E2E8F0; color: #000000; border-top: 2.5px solid #000000 !important; '
-                    f'border-bottom: 2.5px solid #000000 !important; border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important;">{p}</th>'
+                    f'border-bottom: 2.5px solid #000000 !important; border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important; {st_r}">{p}</th>'
                 )
         html.append("</tr></thead><tbody>")
 
@@ -1750,15 +1827,15 @@ def render_unified_toc_tables_html(
 
         for idx_c, c_name in enumerate(cum_df.index):
             tr_cls = ' class="thick-bottom"' if idx_c == len(cum_df.index) - 1 else ""
-            lbl_bg_hex = cum_label_fills.get(c_name, "F1F5F9")
+            lbl_bg_css = f"#{cum_label_fills.get(c_name, 'F1F5F9')}"
             is_np_cum = c_name.startswith("NP")
 
             html.append(f'<tr{tr_cls} style="background-color: #FFFFFF; color: #000000; font-weight: 400;">')
             html.append(
-                f'<td class="lbl-main" style="background-color: #{lbl_bg_hex}; font-weight: 700; color: #000000;" title="{c_name}">{c_name}</td>'
+                f'<td class="lbl-main" style="font-weight: 700; color: #000000; {_sticky_left_style(lbl_bg_css)}" title="{c_name}">{c_name}</td>'
             )
 
-            for p in periods:
+            for p_idx, p in enumerate(periods):
                 if p in cum_df.columns:
                     val_c = cum_df.loc[c_name, p]
                     s_c = cum_df.loc[s_row_label, p] if s_row_label else np.nan
@@ -1781,17 +1858,20 @@ def render_unified_toc_tables_html(
                     if last_p and ("YTD" in str(p).upper() or "KOPĀ" in str(p).upper()) and "AVG" not in str(p).upper():
                         v_ytd = cum_df.loc[c_name, last_p]
                         ytd_bg = ("#D4EFDF" if v_ytd >= 0 else "#FADBD8") if is_np_cum else "#F8F9F9"
+                        st_r = _sticky_right_single(p_idx, n_per, ytd_bg)
                         html.append(
-                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: {ytd_bg}; color: #000000; border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important; font-weight: 400;">{fmt_num(v_ytd)}</td>'
+                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: {ytd_bg}; color: #000000; border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important; font-weight: 400; {st_r}">{fmt_num(v_ytd)}</td>'
                         )
                     elif last_p and "AVG" in str(p).upper() and len(cum_periods) > 0:
                         v_avg = cum_df.loc[c_name, last_p] / len(cum_periods)
                         avg_bg = ("#D4EFDF" if v_avg >= 0 else "#FADBD8") if is_np_cum else "#F8F9F9"
+                        st_r = _sticky_right_single(p_idx, n_per, avg_bg)
                         html.append(
-                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: {avg_bg}; color: #000000; border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important; font-weight: 400;">{fmt_num(v_avg)}</td>'
+                            f'<td colspan="2" style="text-align: right; padding: 4px 6px; background-color: {avg_bg}; color: #000000; border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important; font-weight: 400; {st_r}">{fmt_num(v_avg)}</td>'
                         )
                     else:
-                        html.append('<td colspan="2" style="background-color: #FFFFFF; border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important;"></td>')
+                        st_r = _sticky_right_single(p_idx, n_per, "#FFFFFF")
+                        html.append(f'<td colspan="2" style="background-color: #FFFFFF; border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important; {st_r}"></td>')
             html.append("</tr>")
 
         html.append("</tbody></table></div>")
@@ -1888,7 +1968,7 @@ def render_about_and_help_page() -> None:
                 ---
                 **2. Analizējiet rezultātus un izvēlieties darba periodu (`Pārskats`)**
                 * Pārskatā redzama galvenā TA tabula, produktivitātes koeficienti (**PR = T/OE**, **T%**, **Eiro Sales / Eiro algas**), uzkrājošie rādītāji un dinamikas grafiki.
-                * Ja failā ir vairāki gadi (piem., 24–36 mēneši), virs tabulas automātiski parādās **gadu pāršķiršana** un **Gadu salīdzinājums**.
+                * Līdz **14 mēnešiem** visi mēneši ir redzami vienā skatā. Ja pievienoti **15 vai vairāk mēneši**, varat izvēlēties — pāršķirt tabulu pa gadiem, skatīt gadu salīdzinājumu vai ritināt visus mēnešus horizontāli ar fiksētiem rādītājiem un `KOPĀ` / `AVG` kolonnām.
                 * Augšējā izvēlnē iestatiet **Aktīvo darba periodu** (piem., *Pēdējie 12 mēneši*) — šis periods saglabāsies arī **Scenāriju simulācijā**.
 
                 ---
@@ -1904,7 +1984,7 @@ def render_about_and_help_page() -> None:
                 ---
                 **5. Izmantojiet MI Ekspertu un saglabājiet versijas (`Asistents` un `Atskaites`)**
                 * Jebkurā brīdī atveriet **Asistentu** (rakstiski vai ar balsi), lai noskaidrotu, kas veido konkrētu pozīciju, vai lūgtu pārdēvēt/sakārtot apakšgrupas.
-                * Pēc izmaiņām izmantojiet **Saglabāt izmaiņas / Versiju ▾**, lai saglabātu jaunu versiju, saglabājot oriģinālo atskaiti drošībā arhīvā.
+                * Pēc izmaiņām izmantojiet **Saglabāt skatu / Versiju**, lai saglabātu jaunu versiju, saglabājot oriģinālo atskaiti drošībā arhīvā.
                 """
             )
 
@@ -1932,7 +2012,7 @@ def render_about_and_help_page() -> None:
         with st.expander("4. Vai, mainot apakšgrupas vai izvēloties 12 mēnešus, nepazudīs oriģinālā atskaite?"):
             st.markdown(
                 "**Nē.** Oriģinālā atskaite vienmēr paliek drošībā sadaļā **Atskaites un Simulācijas**. "
-                "Veicot izmaiņas, ar pogu **Saglabāt izmaiņas / Versiju ▾** varat izveidot jaunu atskaites versiju ar savu nosaukumu."
+                "Veicot izmaiņas, ar pogu **Saglabāt izmaiņas / Versiju** varat izveidot jaunu atskaites versiju ar savu nosaukumu."
             )
         with st.expander("5. Vai nākamajā mēnesī visi konti būs jāklasificē no jauna?"):
             st.markdown(
@@ -2290,7 +2370,6 @@ if not S.get("authenticated", False):
                     reg_email = st.text_input("Darba e-pasts", placeholder="vards@uznemums.lv")
                     reg_pw1 = st.text_input("Izvēlieties paroli (vismaz 6 simboli)", type="password")
                     reg_pw2 = st.text_input("Atkārtojiet paroli", type="password")
-                    reg_consult = st.checkbox("Vēlos arī bezmaksas 30 min. ievadkonsultāciju ar B4B ekspertu", value=True)
                     reg_submit = st.form_submit_button(
                         f"Sākt {billing_cfg['trial_days']} dienu bezmaksas izmēģinājumu",
                         type="primary",
@@ -2313,12 +2392,11 @@ if not S.get("authenticated", False):
                             if rc.lower() in existing_names or rc.lower() == "admin":
                                 st.error("Šāds uzņēmuma profils jau pastāv. Lūdzu pieslēdzieties vai izvēlieties citu nosaukumu.")
                             else:
-                                note_extra = "Pieteicās 30 min. ievadkonsultācijai" if reg_consult else "Pašreģistrācija"
-                                structured_n = build_structured_notes("TRIAL", email=re_mail, trial_start=date.today(), free_note=note_extra)
+                                structured_n = build_structured_notes("TRIAL", email=re_mail, trial_start=date.today(), free_note="Pašreģistrācija")
                                 ok_reg, msg_reg = temp_store.create_or_update_company_admin(
                                     company_name=rc,
                                     password=reg_pw1,
-                                    monthly_limit=25,
+                                    monthly_limit=10000,
                                     is_active=True,
                                     notes=structured_n,
                                     reset_usage=True,
@@ -2347,7 +2425,7 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
     top_a1, top_a2 = st.columns([5, 1], vertical_alignment="center")
     with top_a1:
         st.title("THRUVIA — Administratora un abonēšanas panelis")
-        st.caption("Klientu konti, 5 dienu izmēģinājumi, abonementu statusi, kvotas un MI resursu uzskaite.")
+        st.caption("Klientu konti, 5 dienu izmēģinājumi, abonementu statusi un MI API izmaksu pārskats.")
     with top_a2:
         if st.button("Iziet", use_container_width=True):
             st.query_params.clear()
@@ -2366,7 +2444,6 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
         c_copy["free_note"] = extract_free_notes(c.get("notes"))
         enriched.append(c_copy)
 
-    # 1. AUGŠĒJĀ KPI JOSLA
     n_total = len(enriched)
     n_paid = sum(1 for c in enriched if c["plan_code"] == "ACTIVE" and c.get("is_active"))
     n_trial = sum(1 for c in enriched if c["plan_code"] == "TRIAL" and c.get("is_active"))
@@ -2428,9 +2505,9 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
             st.info("Nav klientu, kas atbilst izvēlētajam filtram.")
         else:
             comp_df = pd.DataFrame(filtered_comps)[
-                ["company_name", "plan_label", "is_active", "email", "usage_count", "monthly_limit", "total_cost_eur", "accounts_count", "reports_count", "free_note"]
+                ["company_name", "plan_label", "is_active", "email", "usage_count", "total_cost_eur", "accounts_count", "reports_count", "free_note"]
             ]
-            comp_df.columns = ["Uzņēmums", "Abonements", "Aktīvs", "E-pasts", "Izlietots", "Limits", "API (€)", "Konti", "Atsk.", "Piezīmes"]
+            comp_df.columns = ["Uzņēmums", "Abonements", "Aktīvs", "E-pasts", "Darbības", "API (€)", "Konti", "Atsk.", "Piezīmes"]
             with flt_c3:
                 st.download_button(
                     "CSV eksports",
@@ -2441,7 +2518,6 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
                 )
             st.dataframe(comp_df, use_container_width=True, hide_index=True)
 
-            # ĀTRĀS DARBĪBAS AR IZVĒLĒTO KLIENTU
             st.markdown("#### Ātrā konta un abonementa vadība")
             c_names = [c["company_name"] for c in filtered_comps]
             target_client = st.selectbox("Izvēlieties klientu darbībai", options=c_names, key="adm_target_client_sel")
@@ -2464,7 +2540,7 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
                     admin_store.create_or_update_company_admin(
                         company_name=target_client,
                         password="",
-                        monthly_limit=max(int(sel_obj.get("monthly_limit", 50)), 100),
+                        monthly_limit=10000,
                         is_active=True,
                         notes=new_n,
                         reset_usage=False,
@@ -2477,7 +2553,7 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
                     admin_store.create_or_update_company_admin(
                         company_name=target_client,
                         password="",
-                        monthly_limit=int(sel_obj.get("monthly_limit", 25)),
+                        monthly_limit=10000,
                         is_active=True,
                         notes=new_n,
                         reset_usage=False,
@@ -2490,7 +2566,7 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
                     admin_store.create_or_update_company_admin(
                         company_name=target_client,
                         password="",
-                        monthly_limit=int(sel_obj.get("monthly_limit", 50)),
+                        monthly_limit=10000,
                         is_active=False,
                         notes=new_n,
                         reset_usage=False,
@@ -2548,10 +2624,9 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
             f_pw = st.text_input("Parole (atstājiet tukšu, ja nemaināt)", type="password")
             f_plan_lbl = st.selectbox("Abonementa plāns", options=plan_list, index=def_p_idx)
             f_trial_start = st.date_input("Izmēģinājuma sākuma datums (ja izvēlēts izmēģinājums)", value=date.today())
-            f_limit = st.number_input("Mēneša darbību limits", min_value=1, max_value=10000, value=int(prefill.get("monthly_limit", 50)), step=5)
             f_active = st.checkbox("Profils ir aktīvs", value=bool(prefill.get("is_active", True)))
-            f_reset = st.checkbox("Nullēt izlietoto skaitītāju un tokenus (0)", value=False)
-            f_notes = st.text_input("Piezīmes (konsultācija, adaptācija u.c.)", value=prefill.get("free_note", ""))
+            f_reset = st.checkbox("Nullēt API statistikas skaitītāju (0)", value=False)
+            f_notes = st.text_input("Piezīmes", value=prefill.get("free_note", ""))
             sub_adm = st.form_submit_button("Saglabāt klienta profilu", type="primary", use_container_width=True)
 
             if sub_adm:
@@ -2563,7 +2638,7 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
                 ok_a, msg_a = admin_store.create_or_update_company_admin(
                     company_name=f_cname,
                     password=f_pw,
-                    monthly_limit=int(f_limit),
+                    monthly_limit=10000,
                     is_active=f_active if sel_p_code != "CANCELLED" else False,
                     notes=packed_notes,
                     reset_usage=f_reset,
@@ -2588,7 +2663,6 @@ if "nav_page" not in S:
 if "hide_top_toolbar" not in S:
     S.hide_top_toolbar = False
 
-# Nosakām aktīvā profila abonementa statusu (lai brīdinātu par 5 dienu izmēģinājuma beigām)
 cur_company_row = next(
     (c for c in admin_store.list_all_companies_admin() if c["company_name"] == S.active_profile),
     {},
@@ -2782,7 +2856,7 @@ def _render_assistant_popover_content(form_key: str) -> None:
             st.caption("ℹ️ Vispirms nospiediet sarkano kvadrātiņu (Stop) pie mikrofona, lai pabeigtu balss ierakstu, un tas uzreiz nosūtīsies!")
 
 
-# ------------------------------------------------------------------ 4. TĪRA, PĀRDOMĀTA PELDOŠĀ AUGŠĒJĀ RĪKJOSLA (THRUVIA)
+# ------------------------------------------------------------------ 4. TĪRA PELDOŠĀ AUGŠĒJĀ RĪKJOSLA (BEZ DUBULTĀM BULTIŅĀM)
 PRIMARY_NAV = {
     "overview": "Pārskats",
     "simulation": "Scenāriju simulācija",
@@ -2817,10 +2891,6 @@ def _render_account_menu_popover(key_sfx: str) -> None:
         S.nav_page = "settings"
         st.query_params["p"] = "settings"
         st.rerun()
-    if st.button("Par THRUVIA / Instrukcija / BUJ", key=f"acc_menu_abt_{key_sfx}", use_container_width=True):
-        S.nav_page = "about"
-        st.query_params["p"] = "about"
-        st.rerun()
     if S.get("is_admin", False):
         if st.button("Administratora panelis", key=f"acc_menu_adm_{key_sfx}", type="primary", use_container_width=True):
             S.view_mode = "admin_panel"
@@ -2841,15 +2911,14 @@ with st.container():
             with st.popover("Asistents", use_container_width=True):
                 _render_assistant_popover_content("side_agent_form_min")
         with col_prof:
-            with st.popover("Profils ▾", use_container_width=True):
+            with st.popover("Profils", use_container_width=True):
                 _render_account_menu_popover("min")
         with col_arr:
             if st.button("▼", help="Rādīt rīkjoslu", use_container_width=True):
                 S.hide_top_toolbar = False
                 st.rerun()
     else:
-        # 1. rinda: Zīmols, aktīvā atskaite, un labajā stūrī — Asistents, ? Palīdzība, Profils ▾ un ▲
-        hdr_left, hdr_asist, hdr_help, hdr_prof, hdr_arr = st.columns([4.4, 1.0, 0.85, 0.95, 0.35], vertical_alignment="center")
+        hdr_left, hdr_asist, hdr_about, hdr_prof, hdr_arr = st.columns([4.3, 1.0, 0.95, 0.9, 0.35], vertical_alignment="center")
         with hdr_left:
             st.markdown(
                 f'<div class="top-brand-bar">'
@@ -2861,21 +2930,20 @@ with st.container():
         with hdr_asist:
             with st.popover("Asistents", use_container_width=True):
                 _render_assistant_popover_content("side_agent_form")
-        with hdr_help:
-            help_type = "primary" if S.nav_page == "about" else "secondary"
-            if st.button("? Palīdzība", key="top_help_btn", type=help_type, use_container_width=True, help="Par THRUVIA, instrukcija pa soļiem un BUJ"):
+        with hdr_about:
+            about_type = "primary" if S.nav_page == "about" else "secondary"
+            if st.button("Par THRUVIA", key="top_about_btn", type=about_type, use_container_width=True, help="Par THRUVIA, instrukcija pa soļiem un BUJ"):
                 S.nav_page = "about"
                 st.query_params["p"] = "about"
                 st.rerun()
         with hdr_prof:
-            with st.popover("Profils ▾", use_container_width=True):
+            with st.popover("Profils", use_container_width=True):
                 _render_account_menu_popover("full")
         with hdr_arr:
             if st.button("▲", help="Paslēpt rīkjoslu", use_container_width=True):
                 S.hide_top_toolbar = True
                 st.rerun()
 
-        # 2. rinda: Tikai 5 galvenās, tīrās darba sadaļas
         nav_cols = st.columns([1.0, 1.25, 1.15, 1.35, 1.05])
         for idx_n, (n_key, n_label) in enumerate(PRIMARY_NAV.items()):
             btn_type = "primary" if S.nav_page == n_key else "secondary"
@@ -2884,10 +2952,9 @@ with st.container():
                 st.query_params["p"] = n_key
                 st.rerun()
 
-# Ja beidzies 5 dienu bezmaksas izmēģinājums (ne-admin klientam), draudzīgi aicinām aktivizēt abonementu
 if sub_info["expired"] and not S.get("is_admin", False) and S.nav_page not in ("settings", "about"):
     st.warning(
-        f"**{sub_info['label']}.** Lai turpinātu analizēt datus un modelēt scenārijus, lūdzu aktivizējiet mēneša abonementu sadaļā **Profils ▾ → Uzstādījumi un Abonements**."
+        f"**{sub_info['label']}.** Lai turpinātu analizēt datus un modelēt scenārijus, lūdzu aktivizējiet mēneša abonementu sadaļā **Profils → Uzstādījumi un Abonements**."
     )
     if st.button("Doties uz abonementa aktivizēšanu →", type="primary"):
         S.nav_page = "settings"
@@ -2899,7 +2966,7 @@ if sub_info["expired"] and not S.get("is_admin", False) and S.nav_page not in ("
 # === SĀKAS 3/3 DAĻA ===
 
 # ==============================================================================
-# POSMS 1: PĀRSKATS (OVERVIEW) — AR GADU PĀRŠĶIRŠANU (24–36+ MĒN.) UN VERSIJU SAGLABĀŠANU
+# POSMS 1: PĀRSKATS (OVERVIEW) — 14/15 MĒNEŠU SLIEKSNIS + FIKSĒTAS KOLONNAS
 # ==============================================================================
 if S.nav_page == "overview":
     if "result" not in S or S.result is None:
@@ -2971,11 +3038,10 @@ if S.nav_page == "overview":
         st.warning("Izvēlieties vismaz vienu mēnesi finanšu pārskata tabulai.")
         st.stop()
 
-    # Pilnais darba perioda rezultāts (grafikiem, Excel eksportam un eksperta analīzei)
     view_res = filter_result_by_months(res, fin_selected_months, all_months)
 
     with bar_c3:
-        save_btn_lbl = "💾 Saglabāt izmaiņas / Versiju ▾" if S.get("has_unsaved_changes") else "Saglabāt skatu / Versiju ▾"
+        save_btn_lbl = "💾 Saglabāt izmaiņas / Versiju" if S.get("has_unsaved_changes") else "Saglabāt skatu / Versiju"
         with st.popover(save_btn_lbl, use_container_width=True):
             st.markdown("**Saglabāt pašreizējo pārskatu**")
             st.caption(
@@ -3014,7 +3080,7 @@ if S.nav_page == "overview":
                     st.rerun()
 
     with bar_c4:
-        with st.popover("Lejupielādēt Excel ▾", use_container_width=True):
+        with st.popover("Lejupielādēt Excel", use_container_width=True):
             st.caption("Izvēlieties Excel faila veidu:")
             try:
                 xl_f, xl_v = io.BytesIO(), io.BytesIO()
@@ -3049,7 +3115,7 @@ if S.nav_page == "overview":
                     use_container_width=True,
                 )
 
-    # --- VAIRĀKU GADU (24–36+ MĒNEŠU) PĀRŠĶIRŠANAS UN SALĪDZINĀJUMA REŽĪMS ---
+    # --- 14/15 MĒNEŠU SLIEKSNIS: LĪDZ 14 MĒN. VIENĀ LAPĀ; 15+ MĒN. -> PĀRŠĶIRŠANA VAI RITINĀŠANA AR FIKSĒTĀM MALĀM ---
     sel_by_year: dict[int, list[str]] = {}
     for m_col in fin_selected_months:
         _, yr = parse_period_month_year(m_col)
@@ -3060,19 +3126,27 @@ if S.nav_page == "overview":
     table_res_to_render = view_res
     table_title_suffix = f"{len(fin_selected_months)} mēn."
     show_cum_table = True
+    use_freeze_sides = False
 
-    if len(sel_years_sorted) > 1 and len(fin_selected_months) > 13:
+    if len(fin_selected_months) >= 15:
+        has_multi_years = len(sel_years_sorted) > 1
+        view_opts = (
+            ["Pa gadiem (pāršķirams)", "Visi mēneši (ritināms ar fiksētām malām)", "Gadu salīdzinājums"]
+            if has_multi_years
+            else ["Pa periodiem (12 mēn. lapā)", "Visi mēneši (ritināms ar fiksētām malām)"]
+        )
+
         with st.container(border=True):
-            my_c1, my_c2 = st.columns([1.8, 2.2], vertical_alignment="center")
+            my_c1, my_c2 = st.columns([2.1, 2.2], vertical_alignment="center")
             with my_c1:
                 multi_year_view = st.radio(
-                    "Vairāku gadu tabulas skats",
-                    options=["Pa gadiem (pāršķirams)", "Gadu salīdzinājums", "Visi mēneši kopā"],
+                    f"Tabulas attēlošanas veids ({len(fin_selected_months)} mēneši)",
+                    options=view_opts,
                     horizontal=True,
                     key="ov_multi_year_view",
                 )
             with my_c2:
-                if multi_year_view == "Pa gadiem (pāršķirams)":
+                if multi_year_view == "Pa gadiem (pāršķirams)" and has_multi_years:
                     if "ov_page_year" not in S or S.ov_page_year not in sel_years_sorted:
                         S.ov_page_year = sel_years_sorted[-1]
                     cur_yr_idx = sel_years_sorted.index(S.ov_page_year)
@@ -3125,13 +3199,50 @@ if S.nav_page == "overview":
                         )
                     table_title_suffix = f"{S.ov_page_year}. gads ({len(yr_months_show)} mēn.) no {len(fin_selected_months)} mēn."
 
+                elif multi_year_view == "Pa periodiem (12 mēn. lapā)":
+                    chunks = [fin_selected_months[i : i + 12] for i in range(0, len(fin_selected_months), 12)]
+                    if "ov_chunk_idx" not in S or S.ov_chunk_idx >= len(chunks):
+                        S.ov_chunk_idx = len(chunks) - 1
+                    c_idx = S.ov_chunk_idx
+
+                    pg1, pg2, pg3, pg4 = st.columns([0.85, 1.1, 0.85, 1.5], vertical_alignment="center")
+                    with pg1:
+                        if st.button("◀ Iepriekšējais", disabled=(c_idx == 0), use_container_width=True, key="btn_chk_prev"):
+                            S.ov_chunk_idx = c_idx - 1
+                            st.rerun()
+                    with pg2:
+                        st.markdown(f"<div style='text-align:center;font-weight:600;padding-top:6px;'>Lapa {c_idx + 1} / {len(chunks)}</div>", unsafe_allow_html=True)
+                    with pg3:
+                        if st.button("Nākamais ▶", disabled=(c_idx == len(chunks) - 1), use_container_width=True, key="btn_chk_next"):
+                            S.ov_chunk_idx = c_idx + 1
+                            st.rerun()
+                    with pg4:
+                        keep_all_totals = st.checkbox(
+                            f"KOPĀ / AVG par visu periodu ({len(fin_selected_months)}m)",
+                            value=True,
+                            key="ov_keep_all_chk2",
+                        )
+
+                    ch_months = chunks[c_idx]
+                    table_res_to_render = filter_result_by_months(
+                        res,
+                        ch_months,
+                        all_months,
+                        summary_source_months=fin_selected_months if keep_all_totals else ch_months,
+                        summary_label_prefix=f"Visi ({len(fin_selected_months)}m)" if keep_all_totals else f"Lapa {c_idx + 1}",
+                    )
+                    table_title_suffix = f"{ch_months[0]}–{ch_months[-1]} (no {len(fin_selected_months)} mēn.)"
+
                 elif multi_year_view == "Gadu salīdzinājums":
-                    st.caption("Katra kolonna parāda attiecīgā gada kopsummu — ērts pārskats par 2–3 gadiem bez ritināšanas.")
+                    st.caption("Katra kolonna parāda attiecīgā gada kopsummu — ērts pārskats par vairākiem gadiem bez ritināšanas.")
                     table_res_to_render = aggregate_result_by_years(res, fin_selected_months)
                     table_title_suffix = f"Gadu salīdzinājums ({sel_years_sorted[0]}–{sel_years_sorted[-1]})"
                     show_cum_table = False
+
                 else:
-                    st.caption("Tiek rādīti visi izvēlētā darba perioda mēneši vienā horizontālā tabulā.")
+                    # Visi mēneši (ritināms ar fiksētām malām — Rādītājs kreisajā un KOPĀ/AVG labajā pusē ir sasaldēti!)
+                    st.caption("Ritiniet mēnešus horizontāli — **Rādītāju nosaukumi** (pa kreisi) un **Perioda KOPĀ / AVG** (pa labi) paliek fiksēti!")
+                    use_freeze_sides = True
 
     st.markdown(
         render_unified_toc_tables_html(
@@ -3143,6 +3254,7 @@ if S.nav_page == "overview":
             title_kpi="Produktivitātes un atdeves rādītāji",
             fy_start_month=S.get("fy_start_month", 1),
             show_cumulative=show_cum_table,
+            freeze_sides=use_freeze_sides,
         ),
         unsafe_allow_html=True,
     )
@@ -3226,7 +3338,7 @@ if S.nav_page == "overview":
 
 
 # ==============================================================================
-# POSMS 2: SCENĀRIJU SIMULĀCIJA (PLAŠI RĀDĪTĀJU NOSAUKUMI — 370 PX)
+# POSMS 2: SCENĀRIJU SIMULĀCIJA
 # ==============================================================================
 elif S.nav_page == "simulation":
     st.subheader("Scenāriju simulācija un Jauns projekts")
@@ -3734,7 +3846,7 @@ elif S.nav_page == "simulation":
 
 
 # ==============================================================================
-# POSMS 3: KONTU STRUKTŪRA (BEZ "1. LĪMENIS:", JAUNAIS "NEIEKĻAUTIE KONTI" NOSAUKUMS)
+# POSMS 3: KONTU STRUKTŪRA
 # ==============================================================================
 elif S.nav_page == "accounts_explorer":
     top_exp_c1, top_exp_c2 = st.columns([2.8, 1.2], vertical_alignment="center")
@@ -3745,7 +3857,7 @@ elif S.nav_page == "accounts_explorer":
         )
     with top_exp_c2:
         if S.get("has_unsaved_changes"):
-            with st.popover("💾 Saglabāt veiktās izmaiņas ▾", use_container_width=True):
+            with st.popover("💾 Saglabāt veiktās izmaiņas", use_container_width=True):
                 st.markdown("**Saglabāt kontu un apakšgrupu izmaiņas**")
                 ver_nm_exp = st.text_input("Nosaukums jaunai versijai", value=f"{active_rep_label} (rediģēts)", key="exp_save_ver_nm")
                 if st.button("➕ Saglabāt kā JAUNU versiju (vecā paliek)", type="primary", use_container_width=True):
@@ -4060,6 +4172,7 @@ elif S.nav_page == "archive":
                                 S.pop("working_months_active", None)
                                 S.pop("working_period_preset", None)
                                 S.pop("ov_page_year", None)
+                                S.pop("ov_chunk_idx", None)
                                 comm_clean, acc_snap = unpack_commentary_and_account_details(loaded.get("commentary"))
                                 S.loaded_account_details = acc_snap
                                 if comm_clean:
@@ -4162,7 +4275,7 @@ elif S.nav_page == "archive":
 
 
 # ==============================================================================
-# POSMS 5: JAUNS PZA / KONTU KLASIFIKĀCIJA
+# POSMS 5: JAUNS PZA / KONTU KLASIFIKĀCIJA (BEZ KVOTU IEROBEŽOJUMA)
 # ==============================================================================
 elif S.nav_page == "ingest":
     st.subheader("Jauna PZA faila ielasīšana un kontu klasifikācija")
@@ -4178,11 +4291,6 @@ elif S.nav_page == "ingest":
 
     if uploaded is None:
         st.info("Augšupielādējiet PZA failu, lai sāktu strukturēšanu un kontu klasifikāciju.")
-        st.stop()
-
-    ok_quota, quota_msg = profile.check_quota()
-    if not ok_quota and not S.get("is_admin", False):
-        st.error(quota_msg)
         st.stop()
 
     data = uploaded.getvalue()
@@ -4557,6 +4665,7 @@ elif S.nav_page == "ingest":
         S.pop("working_months_active", None)
         S.pop("working_period_preset", None)
         S.pop("ov_page_year", None)
+        S.pop("ov_chunk_idx", None)
 
         acc_snapshot = build_account_details_snapshot(an.leaves, cls_sorted, an.ex.period_cols)
         S.loaded_account_details = acc_snapshot
@@ -4594,23 +4703,21 @@ elif S.nav_page == "about":
 
 
 # ==============================================================================
-# POSMS 7: UZSTĀDĪJUMI UN ABONEMENTS (AR STRIPE UN B4B KONSULTĀCIJU PIEDĀVĀJUMIEM)
+# POSMS 7: UZSTĀDĪJUMI UN ABONEMENTS (BEZ KVOTĀM UN PAKALPOJUMU KARTĪTĒM)
 # ==============================================================================
 elif S.nav_page == "settings":
     st.subheader(f"Uzstādījumi un Abonements ({S.active_profile})")
 
     with st.container(border=True):
         st.markdown("#### 1. Profila informācija")
-        ok_q, q_info = profile.check_quota()
-        pi1, pi2, pi3, pi4, pi5 = st.columns(5)
+        pi1, pi2, pi3, pi4 = st.columns(4)
         pi1.metric("Uzņēmums / Profils", S.active_profile)
         pi2.metric("Saglabātie konti", saved_acc_count)
         pi3.metric("Finanšu atskaites", len(fin_reports))
         pi4.metric("Saglabātās simulācijas", len(sim_reports))
-        pi5.metric("Mēneša kvota", q_info or "—")
 
     with st.container(border=True):
-        st.markdown("#### 2. Abonements, apmaksa un B4B atbalsts")
+        st.markdown("#### 2. Abonements un apmaksa")
         st.markdown(f"**Pašreizējais statuss:** `{sub_info['label']}`")
         st.caption(
             f"THRUVIA mēneša abonements: **{billing_cfg['monthly_price_eur']} €/mēn.** (automātiska karšu apmaksa caur Stripe, "
@@ -4637,21 +4744,6 @@ elif S.nav_page == "settings":
                 st.link_button("Pārvaldīt vai atcelt abonementu", billing_cfg["stripe_portal_url"], use_container_width=True)
             else:
                 st.caption(f"Abonementa izmaiņām vai rēķiniem rakstiet: **{billing_cfg['support_email']}**")
-
-        st.markdown("---")
-        srv_c1, srv_c2 = st.columns(2)
-        with srv_c1:
-            st.info(
-                "**Bezmaksas 30 min. tiešsaistes konsultācija**  \n"
-                "Reģistrētajiem lietotājiem palīdzēsim uzsākt darbu ar THRUVIA, ielasīt pirmo PZA failu un saprast galvenos rādītājus."
-            )
-            if billing_cfg["consult_booking_url"]:
-                st.link_button("Pieteikt 30 min. konsultāciju", billing_cfg["consult_booking_url"], use_container_width=True)
-        with srv_c2:
-            st.success(
-                "**Individuāla adaptācija un personāla apmācība**  \n"
-                "B4B eksperti pielāgos jūsu uzņēmuma kontu struktūru, piesaistīs PZA datus un apmācīs vadības komandu strādāt ar TOC scenārijiem."
-            )
 
     with st.container(border=True):
         st.markdown("#### 3. Finanšu gada sākums")
@@ -4690,13 +4782,12 @@ elif S.nav_page == "settings":
                 else:
                     all_c = admin_store.list_all_companies_admin()
                     cur_c = next((c for c in all_c if c["company_name"] == S.active_profile), {})
-                    cur_lim = int(cur_c.get("monthly_limit", 50))
                     cur_notes = str(cur_c.get("notes", ""))
                     cur_act = bool(cur_c.get("is_active", True))
                     ok_pw, msg_pw = admin_store.create_or_update_company_admin(
                         company_name=S.active_profile,
                         password=new_pw1.strip(),
-                        monthly_limit=cur_lim,
+                        monthly_limit=10000,
                         is_active=cur_act,
                         notes=cur_notes,
                         reset_usage=False,
