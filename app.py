@@ -1,9 +1,10 @@
 """
-app.py — THRUVIA: MI instruments uzņēmuma finanšu analīzei un vadības lēmumu modelēšanai (v26.3)
-Tīra navigācija bez dubultām bultiņām | 15+ mēnešu sadalījums & fiksētas (sticky) kolonnas | Bez kvotu limitiem
+app.py — THRUVIA: MI instruments uzņēmuma finanšu analīzei un vadības lēmumu modelēšanai (v26.4)
+Publiskā "Par THRUVIA" & Reģistrācija | Interaktīvs 5 soļu Demo Tutorial | PZA pārbaudes rinda (2 varianti) | Juridiskā bāze
 Project ID: amprqueamdcxpjufigvm
 """
 from __future__ import annotations
+import base64
 from dataclasses import dataclass
 from datetime import datetime, date, timedelta
 import hashlib
@@ -49,7 +50,21 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Pārsaucam EXCLUDED grupu par plašāku, korektu nosaukumu (ne tikai amortizācija/virtuālā nauda)
+# Pakalpojuma sniedzēja juridiskie rekvizīti (aizpildāmi ar precīziem SIA datiem pirms publiskas palaišanas)
+LEGAL_PROVIDER_DETAILS = {
+    "company": "SIA B4B (THRUVIA pakalpojuma uzturētājs)",
+    "reg_no": "[Ievietot reģistrācijas numuru]",
+    "address": "[Ievietot juridisko adresi, Rīga, Latvija]",
+    "email": "info@b4b.lv",
+}
+
+LEGAL_DISCLAIMER_SHORT = (
+    "Atruna: THRUVIA ir informatīvs finanšu datu vizualizācijas un vadības scenāriju modelēšanas instruments. "
+    "Sistēma, tās MI funkcijas un pakalpojuma sniedzējs nesniedz licencētas finanšu, investīciju, nodokļu vai grāmatvedības konsultācijas "
+    "un neuzņemas atbildību par lēmumiem, kas pieņemti, balstoties uz sistēmas aprēķiniem."
+)
+
+# Pārsaucam EXCLUDED grupu par plašāku, korektu nosaukumu
 EXCLUDED_LABEL = "Neiekļautie konti (ārpus TOC aprēķina)"
 _old_excl_lbl = SUBGROUP_LABELS.get("EXCLUDED")
 if _old_excl_lbl and _old_excl_lbl != EXCLUDED_LABEL:
@@ -282,7 +297,6 @@ if not API_KEY:
 
 
 def get_billing_config() -> dict:
-    """Nolasa apmaksas/abonēšanas konfigurāciju no Streamlit Secrets (gatavs Stripe pieslēgšanai)."""
     trial_days_str = _get_secret_or_env("TRIAL_DAYS", "5")
     try:
         trial_days = max(1, int(trial_days_str))
@@ -293,20 +307,143 @@ def get_billing_config() -> dict:
         "monthly_price_eur": _get_secret_or_env("SUBSCRIPTION_PRICE_EUR", "49"),
         "stripe_checkout_url": _get_secret_or_env("STRIPE_CHECKOUT_URL", ""),
         "stripe_portal_url": _get_secret_or_env("STRIPE_PORTAL_URL", ""),
-        "support_email": _get_secret_or_env("SUPPORT_EMAIL", "info@b4b.lv"),
+        "support_email": _get_secret_or_env("SUPPORT_EMAIL", LEGAL_PROVIDER_DETAILS["email"]),
     }
 
 
+def extract_note_field(notes: str | None, prefix: str) -> str:
+    s = str(notes or "")
+    m = re.search(rf"{re.escape(prefix)}:([^|\n]+)", s)
+    return m.group(1).strip() if m else ""
+
+
+def extract_free_notes(notes: str | None) -> str:
+    s = str(notes or "").strip()
+    if not s:
+        return ""
+    if "NOTE:" in s:
+        return s.split("NOTE:", 1)[1].strip()
+    parts = [
+        p.strip()
+        for p in s.split("|")
+        if not re.match(r"^(PLAN|ONBOARD|TRIAL_START|EMAIL|PAID_SINCE|LEGAL_OK|CONTACT):", p.strip(), re.I)
+    ]
+    return " | ".join(p for p in parts if p)
+
+
+def build_structured_notes(
+    plan_code: str,
+    email: str = "",
+    trial_start: date | None = None,
+    free_note: str = "",
+    onboard_status: str = "APPROVED",
+    contact_name: str = "",
+    legal_ok_date: str = "",
+) -> str:
+    parts = [f"PLAN:{plan_code}", f"ONBOARD:{onboard_status}"]
+    if trial_start and plan_code == "TRIAL":
+        parts.append(f"TRIAL_START:{trial_start.isoformat()}")
+    if plan_code == "ACTIVE":
+        parts.append(f"PAID_SINCE:{date.today().isoformat()}")
+    if contact_name.strip():
+        parts.append(f"CONTACT:{contact_name.strip()}")
+    if email.strip():
+        parts.append(f"EMAIL:{email.strip()}")
+    if legal_ok_date.strip():
+        parts.append(f"LEGAL_OK:{legal_ok_date.strip()}")
+    if free_note.strip():
+        parts.append(f"NOTE:{free_note.strip()}")
+    return " | ".join(parts)
+
+
+def parse_onboarding_status(notes: str | None) -> str:
+    """
+    Atgriež profila ievadīšanas (onboarding) statusu:
+    - TUTORIAL: jauns klients, iziet 5 soļu Demo apmācību
+    - SUBMIT_PZA: apmācība pabeigta, jāaugšupielādē pirmais PZA
+    - PENDING_WAIT: PZA iesniegts, gaida Admin apstiprinājumu (darbojas Demo režīmā)
+    - PENDING_IMMEDIATE: PZA iesniegts, strādā uzreiz ar brīdinājumu līdz Admin apstiprina
+    - APPROVED: pilnībā pārbaudīts un aktīvs profils (arī visiem esošajiem profiliem bez taga)
+    """
+    val = extract_note_field(notes, "ONBOARD").upper()
+    if val in ("TUTORIAL", "SUBMIT_PZA", "PENDING_WAIT", "PENDING_IMMEDIATE", "APPROVED"):
+        return val
+    return "APPROVED"
+
+
+ONBOARD_LABELS_LV = {
+    "TUTORIAL": "Apmācība (Demo)",
+    "SUBMIT_PZA": "Gaida PZA iesūtīšanu",
+    "PENDING_WAIT": "⏳ Gaida PZA pārbaudi (Demo)",
+    "PENDING_IMMEDIATE": "⚠️ Gaida pārbaudi (Strādā)",
+    "APPROVED": "✅ Apstiprināts",
+}
+
+
+def update_company_onboarding_status(
+    admin_store: SupabaseProfileStore,
+    company_name: str,
+    new_onboard_status: str,
+    reset_trial_today: bool = False,
+) -> bool:
+    """Atjaunina klienta ONBOARD statusu datubāzē, saglabājot visus pārējos profila laukus."""
+    all_c = admin_store.list_all_companies_admin()
+    cur_c = next((c for c in all_c if c["company_name"] == company_name), None)
+    if not cur_c:
+        return False
+    old_notes = str(cur_c.get("notes") or "")
+    plan_code = extract_note_field(old_notes, "PLAN").upper() or "MANAGED"
+    email = extract_note_field(old_notes, "EMAIL")
+    contact = extract_note_field(old_notes, "CONTACT")
+    legal_ok = extract_note_field(old_notes, "LEGAL_OK")
+    free_n = extract_free_notes(old_notes)
+
+    tr_str = extract_note_field(old_notes, "TRIAL_START")
+    tr_date = None
+    if reset_trial_today and plan_code == "TRIAL":
+        tr_date = date.today()
+    elif tr_str:
+        try:
+            tr_date = date.fromisoformat(tr_str)
+        except ValueError:
+            tr_date = date.today()
+
+    new_notes = build_structured_notes(
+        plan_code=plan_code,
+        email=email,
+        trial_start=tr_date,
+        free_note=free_n,
+        onboard_status=new_onboard_status,
+        contact_name=contact,
+        legal_ok_date=legal_ok,
+    )
+    ok_u, _ = admin_store.create_or_update_company_admin(
+        company_name=company_name,
+        password="",
+        monthly_limit=int(cur_c.get("monthly_limit", 10000)),
+        is_active=bool(cur_c.get("is_active", True)),
+        notes=new_notes,
+        reset_usage=False,
+    )
+    return ok_u
+
+
 def parse_subscription_status(notes: str | None, trial_days: int = 5) -> dict:
-    """
-    Nolasa abonementa un 5 dienu izmēģinājuma statusu no profila `notes` lauka.
-    Atbalsta tagus: PLAN:ACTIVE, PLAN:TRIAL, TRIAL_START:YYYY-MM-DD, PLAN:CANCELLED.
-    """
     s = str(notes or "")
     if "PLAN:ACTIVE" in s.upper():
         return {"code": "ACTIVE", "label": "Aktīvs mēneša abonements", "days_left": None, "expired": False}
     if "PLAN:CANCELLED" in s.upper():
         return {"code": "CANCELLED", "label": "Abonements atcelts", "days_left": 0, "expired": True}
+
+    onb = parse_onboarding_status(s)
+    # Kamēr klients gaida Admin apstiprinājumu (Demo vai PZA pārbaude), bezmaksas izmēģinājums nebeidzas
+    if onb in ("TUTORIAL", "SUBMIT_PZA", "PENDING_WAIT"):
+        return {
+            "code": "TRIAL",
+            "label": f"Ievadposms ({trial_days} d. izmēģinājums sāksies pēc PZA apstiprināšanas)",
+            "days_left": trial_days,
+            "expired": False,
+        }
 
     m = re.search(r"TRIAL_START:(\d{4}-\d{2}-\d{2})", s)
     if m:
@@ -432,6 +569,242 @@ def build_account_details_snapshot(leaves, cls_df: pd.DataFrame, period_cols: li
     return snapshot
 
 
+def build_demo_company_data() -> tuple[LoadedReportResult, list[dict]]:
+    """
+    Ģenerē reālistisku 12 mēnešu Latvijas ražošanas/tirdzniecības Demo uzņēmumu ('SIA Demo Ražošana'),
+    lai jaunie klienti interaktīvajā apmācībā un gaidīšanas laikā var droši izmēģināt visas funkcijas.
+    """
+    months = [f"{m:02d}.2026." for m in range(1, 13)]
+    s_rev = [118000, 112000, 134000, 141000, 128000, 149000, 136000, 142000, 158000, 164000, 171000, 185000]
+    s_oth = [2500, 1800, 3200, 2100, 4500, 1900, 2400, 2800, 3100, 2600, 3500, 4200]
+    tvc_mat = [46000, 44500, 51200, 54800, 51000, 56500, 53400, 54200, 59800, 61900, 64500, 69200]
+    tvc_del = [6200, 5900, 7100, 7600, 6800, 8100, 7400, 7800, 8400, 8900, 9200, 10100]
+    oe_adm = [18500, 18500, 19000, 19000, 19200, 19500, 19500, 19500, 20200, 20200, 20500, 22000]
+    oe_wrk = [24000, 23800, 25200, 25600, 25100, 26400, 25800, 26000, 27200, 27600, 28100, 29500]
+    oe_mkt = [8500, 7900, 9400, 10200, 9100, 11500, 8800, 9600, 12100, 12800, 13500, 14800]
+    oe_prem = [7200, 7300, 7100, 6800, 6600, 6500, 6500, 6600, 6900, 7200, 7500, 7800]
+    oe_it = [3400, 3400, 3600, 3500, 3500, 3700, 3600, 3600, 3800, 3800, 3900, 4100]
+    oe_oth = [4900, 4600, 5100, 4800, 5300, 4900, 4700, 5200, 5400, 5100, 5600, 6100]
+
+    lbl_s_rev = SUBGROUP_LABELS["S_REV"]
+    lbl_s_oth = SUBGROUP_LABELS["S_OTHER"]
+    lbl_mat = SUBGROUP_LABELS["TVC_MATERIALS"]
+    lbl_del = SUBGROUP_LABELS["TVC_DELIVERY"]
+    lbl_adm = SUBGROUP_LABELS["OE_ADMIN_WAGES"]
+    lbl_wrk = SUBGROUP_LABELS["OE_WORKER_WAGES"]
+    lbl_mkt = SUBGROUP_LABELS["OE_MARKETING"]
+    lbl_prem = SUBGROUP_LABELS["OE_PREMISES"]
+    lbl_it = SUBGROUP_LABELS["OE_OFFICE_IT"]
+    lbl_oth = SUBGROUP_LABELS["OE_OTHER"]
+
+    s_tot = [a + b for a, b in zip(s_rev, s_oth)]
+    tvc_tot = [a + b for a, b in zip(tvc_mat, tvc_del)]
+    t_tot = [a - b for a, b in zip(s_tot, tvc_tot)]
+    oe_tot = [sum(x) for x in zip(oe_adm, oe_wrk, oe_mkt, oe_prem, oe_it, oe_oth)]
+    np_tot = [a - b for a, b in zip(t_tot, oe_tot)]
+
+    data_rows = {
+        "S": s_tot,
+        lbl_s_rev: s_rev,
+        lbl_s_oth: s_oth,
+        "TVC": tvc_tot,
+        lbl_mat: tvc_mat,
+        lbl_del: tvc_del,
+        "T": t_tot,
+        "OE": oe_tot,
+        lbl_adm: oe_adm,
+        lbl_wrk: oe_wrk,
+        lbl_mkt: oe_mkt,
+        lbl_prem: oe_prem,
+        lbl_it: oe_it,
+        lbl_oth: oe_oth,
+        "NP": np_tot,
+    }
+    row_kinds = {
+        "S": "S",
+        lbl_s_rev: "S_CHILD",
+        lbl_s_oth: "S_CHILD",
+        "TVC": "TVC",
+        lbl_mat: "TVC_CHILD",
+        lbl_del: "TVC_CHILD",
+        "T": "T",
+        "OE": "OE",
+        lbl_adm: "OE_CHILD",
+        lbl_wrk: "OE_CHILD",
+        lbl_mkt: "OE_CHILD",
+        lbl_prem: "OE_CHILD",
+        lbl_it: "OE_CHILD",
+        lbl_oth: "OE_CHILD",
+        "NP": "NP",
+    }
+
+    amounts = pd.DataFrame(data_rows, index=months).T.astype(float)
+    amounts["2026 KOPĀ"] = amounts[months].sum(axis=1)
+    amounts["2026 AVG"] = amounts[months].mean(axis=1)
+
+    main_dict = {}
+    for c in amounts.columns:
+        main_dict[c] = amounts[c]
+        sv = amounts.loc["S", c]
+        main_dict[f"%|{c}"] = np.where(sv != 0, amounts[c] / sv, np.nan)
+    main_df = pd.DataFrame(main_dict, index=amounts.index)
+    kpi_df = pd.DataFrame({c: _calc_kpi_for_series(amounts[c]) for c in amounts.columns})
+
+    res_demo = LoadedReportResult(
+        amounts=amounts,
+        main=main_df,
+        kpi=kpi_df,
+        row_kinds=row_kinds,
+        reconciliation=pd.DataFrame(),
+        by_group={},
+    )
+
+    demo_accounts = [
+        ("demo_1", 4, "Produkcijas pārdošanas ieņēmumi", "Ieņēmumi", "S_REV", s_rev),
+        ("demo_2", 5, "Pārējie saimnieciskie ieņēmumi", "Ieņēmumi", "S_OTHER", s_oth),
+        ("demo_3", 9, "Izejvielu un materiālu iepirkumi", "Pārdotās produkcijas ražošanas izmaksas", "TVC_MATERIALS", [-v for v in tvc_mat]),
+        ("demo_4", 10, "Kurjeru un preču piegādes pakalpojumi", "Pārdošanas izmaksas", "TVC_DELIVERY", [-v for v in tvc_del]),
+        ("demo_5", 14, "Vadības un administrācijas atalgojums (+ VSAOI)", "Administrācijas izmaksas", "OE_ADMIN_WAGES", [-v for v in oe_adm]),
+        ("demo_6", 15, "Ražošanas darbinieku algas (+ VSAOI)", "Ražošanas izmaksas", "OE_WORKER_WAGES", [-v for v in oe_wrk]),
+        ("demo_7", 18, "Digitālais mārketings un reklāma", "Pārdošanas izmaksas", "OE_MARKETING", [-v for v in oe_mkt]),
+        ("demo_8", 21, "Ražošanas un biroja telpu noma, komunālie", "Telpu uzturēšana", "OE_PREMISES", [-v for v in oe_prem]),
+        ("demo_9", 24, "IT programmatūra, serveri un sakari", "Administrācijas izmaksas", "OE_OFFICE_IT", [-v for v in oe_it]),
+        ("demo_10", 27, "Citi saimnieciskie un biroja izdevumi", "Pārējās izmaksas", "OE_OTHER", [-v for v in oe_oth]),
+        ("demo_11", 31, "Pamatlīdzekļu nolietojums (amortizācija)", "Nolietojums", "EXCLUDED", [-4200.0] * 12),
+    ]
+    acc_snap = []
+    for aid, rnum, albl, apath, agrp, avals in demo_accounts:
+        acc_snap.append(
+            {
+                "id": aid,
+                "row": rnum,
+                "label": albl,
+                "display_label": albl,
+                "path": apath,
+                "group": agrp,
+                "months": {months[i]: float(avals[i]) for i in range(12)},
+                "total": float(sum(avals)),
+            }
+        )
+
+    return res_demo, acc_snap
+
+
+def submit_pza_for_admin_review(
+    profile_store: SupabaseProfileStore,
+    filename: str,
+    file_bytes: bytes,
+    mode: str,
+    user_note: str = "",
+) -> tuple[bool, str]:
+    """
+    Saglabā klienta pirmreizējo PZA failu Supabase (kodētu base64) ar prefiksu 'PENDING_PZA::',
+    lai Administrators to var lejupielādēt, pārbaudīt un ievietot profilā.
+    """
+    if len(file_bytes) > 6 * 1024 * 1024:
+        return False, "Fails ir lielāks par 6 MB. Lūdzu saglabājiet PZA bez liekām darblapām un mēģiniet vēlreiz."
+    try:
+        b64_str = base64.b64encode(file_bytes).decode("ascii")
+        payload = json.dumps(
+            {
+                "filename": filename,
+                "b64": b64_str,
+                "mode": mode,
+                "user_note": user_note.strip(),
+                "submitted_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
+                "size_kb": round(len(file_bytes) / 1024.0, 1),
+            },
+            ensure_ascii=False,
+        )
+        dummy_am = pd.DataFrame({"Pārbaude": [0.0]}, index=["S"])
+        dummy_main = pd.DataFrame({"Pārbaude": [0.0], "%|Pārbaude": [0.0]}, index=["S"])
+        dummy_kpi = pd.DataFrame({"Pārbaude": [0.0]}, index=["PR = T/OE"])
+        dummy_res = LoadedReportResult(
+            amounts=dummy_am,
+            main=dummy_main,
+            kpi=dummy_kpi,
+            row_kinds={"S": "S"},
+            reconciliation=pd.DataFrame(),
+            by_group={},
+        )
+        ok_s, _ = profile_store.save_report(
+            report_name=f"[PZA PĀRBAUDEI] {filename}",
+            file_name=f"PENDING_PZA::{filename}",
+            res_obj=dummy_res,
+            commentary=payload,
+        )
+        if not ok_s:
+            return False, f"Neizdevās saglabāt failu pārbaudei: {profile_store.last_error}"
+        return True, "PZA fails veiksmīgi nosūtīts pārbaudei!"
+    except Exception as e:
+        return False, f"Kļūda faila nosūtīšanā: {e}"
+
+
+def render_legal_documents_tabs(compact: bool = False) -> None:
+    """Pilni juridiskie teksti: Lietošanas noteikumi + Atbildības ierobežojums un Privātuma politika (VDAR/GDPR)."""
+    t_terms, t_priv, t_disc = st.tabs(
+        [
+            "Atbildības ierobežojums",
+            "Lietošanas noteikumi",
+            "Privātuma politika (VDAR)",
+        ]
+    )
+    prov = LEGAL_PROVIDER_DETAILS
+
+    with t_disc:
+        st.markdown(
+            f"""
+            **Atbildības ierobežojums un finanšu padomu atruna**
+
+            1. **Tikai informatīvs un modelēšanas nolūks:** Sistēma **THRUVIA**, tās aprēķini, grafiki, scenāriju simulācijas un mākslīgā intelekta (MI) asistenta/eksperta komentāri ir paredzēti **tikai iekšējai informatīvai analīzei un vadības lēmumu modelēšanai**, balstoties uz Caurlaidības grāmatvedības (*Throughput Accounting*) metodoloģiju.
+            2. **Nav finanšu, nodokļu vai grāmatvedības konsultācija:** Ne sistēma THRUVIA, ne **{prov['company']}** nesniedz licencētas finanšu, investīciju, nodokļu, juridiskās vai zvērinātu revidentu konsultācijas. Sistēma neaizstāj oficiālo grāmatvedības uzskaiti un normatīvos pārskatus.
+            3. **Datu precizitāte un MI ierobežojumi:** Aprēķinu precizitāte ir tieši atkarīga no Lietotāja augšupielādēto datu pareizības un kontu klasifikācijas. Mākslīgā intelekta atbildēs vai automātiskajā sākotnējā kontu grupēšanā var rasties neprecizitātes, tādēļ Lietotājs apņemas patstāvīgi pārbaudīt ievadītos skaitļus pirms biznesa lēmumu pieņemšanas.
+            4. **Atbildības neuzņemšanās:** Pakalpojuma sniedzējs neuzņemas nekādu tiesisku vai finansiālu atbildību par tiešiem vai netiešiem zaudējumiem, negūtu peļņu vai citiem rezultātiem, kas radušies, Lietotājam pieņemot vadības, cenu noteikšanas vai finanšu lēmumus, balstoties uz THRUVIA sniegto informāciju.
+            """
+        )
+
+    with t_terms:
+        st.markdown(
+            f"""
+            **THRUVIA Lietošanas noteikumi** *(saīsinātā redakcija)*
+
+            * **Pakalpojuma sniedzējs:** {prov['company']}, reģ. nr. {prov['reg_no']}, adrese: {prov['address']}, e-pasts: `{prov['email']}`.
+            * **Pakalpojuma būtība:** Pakalpojuma sniedzējs nodrošina piekļuvi tīmekļa lietotnei THRUVIA uz abonementa pamata (SaaS). Pirmreizējiem lietotājiem tiek nodrošināts bezmaksas izmēģinājuma periods (5 dienas pēc pirmā PZA pārbaudes apstiprināšanas vai aktivizēšanas).
+            * **Abonēšana un atteikšanās:** Pēc izmēģinājuma perioda beigām piekļuve tiek turpināta par spēkā esošo mēneša abonementa maksu ar automātisku karšu apmaksu (Stripe). Lietotājs var jebkurā brīdī atcelt abonementu sadaļā *Profils → Uzstādījumi un Abonements* — piekļuve saglabājas līdz apmaksātā perioda beigām, un nākamais maksājums netiek ieturēts.
+            * **Lietotāja pienākumi:** Lietotājs ir atbildīgs par savas paroles konfidencialitāti un par to, ka viņam ir tiesības augšupielādēt attiecīgā uzņēmuma finanšu pārskatus.
+            * **Intelektuālais īpašums:** Visas tiesības uz THRUVIA programmatūru, dizainu un metodoloģiskajiem risinājumiem pieder pakalpojuma sniedzējam. Lietotāja augšupielādētie finanšu dati pilnībā pieder Lietotājam.
+            """
+        )
+
+    with t_priv:
+        st.markdown(
+            f"""
+            **Privātuma politika un personas datu apstrāde (VDAR / GDPR)**
+
+            * **Datu pārzinis:** {prov['company']}, reģ. nr. {prov['reg_no']}, adrese: {prov['address']}, saziņa datu aizsardzības jautājumos: `{prov['email']}`.
+            * **Apstrādātie dati:**
+              * *Konta dati:* uzņēmuma nosaukums, kontaktpersonas vārds, darba e-pasts, šifrēta parole.
+              * *Finanšu dati:* Lietotāja augšupielādētie PZA faili, kontu klasifikācijas un izveidotās simulācijas.
+              * *Norēķinu dati:* maksājumu kartes datus apstrādā tikai sertificēts maksājumu apstrādātājs **Stripe** (THRUVIA neglabā karšu numurus).
+            * **Apstrādes mērķis un tiesiskais pamats:** Līguma izpilde (pakalpojuma un pirmreizējās PZA struktūras pārbaudes nodrošināšana) un grāmatvedības normatīvo aktu izpilde (rēķinu izrakstīšana).
+            * **Datu drošība un apakšapstrādātāji:**
+              * Datubāze tiek glabāta drošā **Supabase** mākoņinfrastruktūrā (ES/GDPR standarti).
+              * MI funkcionalitātei tiek izmantots **Anthropic Claude API** — saskaņā ar API komerciālajiem noteikumiem **Lietotāja finanšu dati netiek izmantoti MI modeļu apmācībai**.
+            * **Glabāšanas termiņš un Lietotāja tiesības:** Dati tiek glabāti aktīva konta darbības laikā. Lietotājam ir tiesības pieprasīt piekļuvi saviem datiem, to labošanu, eksportu vai pilnīgu konta un visu augšupielādēto finanšu datu dzēšanu, rakstot uz `{prov['email']}`.
+            """
+        )
+
+
+def render_app_footer_disclaimer() -> None:
+    st.markdown(
+        f'<div style="margin-top:36px; padding-top:12px; border-top:1px solid rgba(120,120,120,0.22); '
+        f'font-size:11.5px; opacity:0.72; text-align:center; line-height:1.45;">'
+        f'{LEGAL_DISCLAIMER_SHORT} &nbsp;|&nbsp; © {datetime.now().year} THRUVIA ({LEGAL_PROVIDER_DETAILS["company"]})'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def fmt_num(x) -> str:
     return "" if pd.isna(x) else f"{x:,.0f}".replace(",", " ")
 
@@ -460,18 +833,9 @@ def _safe_line_stats(vals) -> tuple[float, float]:
 
 
 MONTH_NAMES_LV = {
-    1: "Janvāris",
-    2: "Februāris",
-    3: "Marts",
-    4: "Aprīlis",
-    5: "Maijs",
-    6: "Jūnijs",
-    7: "Jūlijs",
-    8: "Augusts",
-    9: "Septembris",
-    10: "Oktobris",
-    11: "Novembris",
-    12: "Decembris",
+    1: "Janvāris", 2: "Februāris", 3: "Marts", 4: "Aprīlis",
+    5: "Maijs", 6: "Jūnijs", 7: "Jūlijs", 8: "Augusts",
+    9: "Septembris", 10: "Oktobris", 11: "Novembris", 12: "Decembris",
 }
 
 LV_MONTH_PARSE = {
@@ -618,6 +982,8 @@ def save_report_as_new_or_update(
     new_report_name: str,
     acc_details: list[dict] | None = None,
 ) -> tuple[bool, int | None]:
+    if st.session_state.get("is_demo_mode", False):
+        return False, None
     rep_meta = st.session_state.get("loaded_report_meta") or {}
     packed_c = pack_commentary_with_account_details(
         st.session_state.get("commentary", ""),
@@ -684,7 +1050,7 @@ def rename_subgroup_everywhere(old_name: str, new_name: str, profile_store: Supa
         st.session_state["custom_row_order"][mc_k] = [new_clean if x == old_clean else x for x in ord_list]
 
     st.session_state["has_unsaved_changes"] = True
-    return True, f"Apakšgrupa **'{old_clean}'** pārdēvēta par **'{new_clean}'**! (Varat saglabāt šo kā jaunu versiju vai pārrakstīt esošo atskaiti.)"
+    return True, f"Apakšgrupa **'{old_clean}'** pārdēvēta par **'{new_clean}'**!"
 
 
 def merge_subgroups_everywhere(source_sub_label: str, target_sub_label: str, profile_store: SupabaseProfileStore) -> tuple[bool, str]:
@@ -732,7 +1098,8 @@ def merge_subgroups_everywhere(source_sub_label: str, target_sub_label: str, pro
             reported = an.ex.lines[pos].vals if pos is not None else None
             S_loc.result = compute_toc_with_dynamic_subgroups(an.leaves, mapping_upd, an.ex.period_cols, reported)
             S_loc.loaded_account_details = build_account_details_snapshot(an.leaves, S_loc.cls_df, an.ex.period_cols)
-            profile_store.save(an.leaves, mapping_upd)
+            if not S_loc.get("is_demo_mode", False):
+                profile_store.save(an.leaves, mapping_upd)
 
     elif S_loc.get("loaded_account_details") and src_key:
         snap_list = S_loc.get("loaded_account_details") or []
@@ -757,7 +1124,7 @@ def merge_subgroups_everywhere(source_sub_label: str, target_sub_label: str, pro
                 new_main_d[f"%|{c}"] = np.where(sv != 0, res.amounts[c] / sv, np.nan)
             res.main = pd.DataFrame(new_main_d, index=res.amounts.index)
 
-    if src_key:
+    if src_key and not S_loc.get("is_demo_mode", False):
         saved_m = profile_store.list_saved_mappings()
         db_upd = [
             {"id": int(m["id"]), "toc_group": tgt_key}
@@ -825,7 +1192,8 @@ def move_specific_accounts_to_subgroup(
             reported = an.ex.lines[pos].vals if pos is not None else None
             S_loc.result = compute_toc_with_dynamic_subgroups(an.leaves, mapping_upd, an.ex.period_cols, reported)
             S_loc.loaded_account_details = build_account_details_snapshot(an.leaves, S_loc.cls_df, an.ex.period_cols)
-            profile_store.save(an.leaves, mapping_upd)
+            if not S_loc.get("is_demo_mode", False):
+                profile_store.save(an.leaves, mapping_upd)
 
     elif S_loc.get("loaded_account_details"):
         snap_list = S_loc.get("loaded_account_details") or []
@@ -841,18 +1209,19 @@ def move_specific_accounts_to_subgroup(
         if S_loc.get("result") is not None:
             S_loc.result = rebuild_report_from_account_snapshot(S_loc.result, snap_list)
 
-    saved_m = profile_store.list_saved_mappings()
-    db_updates = []
-    for m_row in saved_m:
-        if (
-            str(m_row.get("account_label", "")).strip().lower() in targets_low
-            or str(m_row.get("id", "")).strip().lower() in targets_low
-        ):
-            db_updates.append({"id": int(m_row["id"]), "toc_group": target_g_key})
-    if db_updates:
-        profile_store.update_saved_mappings_direct(db_updates)
-        if moved_cnt == 0:
-            moved_cnt = len(db_updates)
+    if not S_loc.get("is_demo_mode", False):
+        saved_m = profile_store.list_saved_mappings()
+        db_updates = []
+        for m_row in saved_m:
+            if (
+                str(m_row.get("account_label", "")).strip().lower() in targets_low
+                or str(m_row.get("id", "")).strip().lower() in targets_low
+            ):
+                db_updates.append({"id": int(m_row["id"]), "toc_group": target_g_key})
+        if db_updates:
+            profile_store.update_saved_mappings_direct(db_updates)
+            if moved_cnt == 0:
+                moved_cnt = len(db_updates)
 
     S_loc["has_unsaved_changes"] = True
     return True, f"Pārvietoti **{fmt_acc_count_lv(moved_cnt)}** uz apakšgrupu **'{clean_target}'**!"
@@ -1083,44 +1452,6 @@ def _compute_linear_trend(y_vals: list[float]) -> list[float]:
 
 # === BEIDZAS 1/3 DAĻA (zem šīs rindas līmēsi 2/3 daļu) ===
 # === SĀKAS 2/3 DAĻA ===
-
-def extract_note_field(notes: str | None, prefix: str) -> str:
-    s = str(notes or "")
-    m = re.search(rf"{re.escape(prefix)}:([^|\n]+)", s)
-    return m.group(1).strip() if m else ""
-
-
-def extract_free_notes(notes: str | None) -> str:
-    s = str(notes or "").strip()
-    if not s:
-        return ""
-    if "NOTE:" in s:
-        return s.split("NOTE:", 1)[1].strip()
-    parts = [
-        p.strip()
-        for p in s.split("|")
-        if not re.match(r"^(PLAN|TRIAL_START|EMAIL|PAID_SINCE):", p.strip(), re.I)
-    ]
-    return " | ".join(p for p in parts if p)
-
-
-def build_structured_notes(
-    plan_code: str,
-    email: str = "",
-    trial_start: date | None = None,
-    free_note: str = "",
-) -> str:
-    parts = [f"PLAN:{plan_code}"]
-    if trial_start and plan_code == "TRIAL":
-        parts.append(f"TRIAL_START:{trial_start.isoformat()}")
-    if plan_code == "ACTIVE":
-        parts.append(f"PAID_SINCE:{date.today().isoformat()}")
-    if email.strip():
-        parts.append(f"EMAIL:{email.strip()}")
-    if free_note.strip():
-        parts.append(f"NOTE:{free_note.strip()}")
-    return " | ".join(parts)
-
 
 def render_overview_charts(amounts_df: pd.DataFrame, kpi_df: pd.DataFrame, fy_start_month: int = 1) -> None:
     """
@@ -1435,11 +1766,6 @@ def render_unified_toc_tables_html(
     lbl_width_px: int | None = None,
     freeze_sides: bool = False,
 ) -> str:
-    """
-    Ģenerē TOC finanšu, KPI un uzkrājošo rādītāju tabulas.
-    Ja `freeze_sides=True` (ritināmajā 15+ mēnešu skatā), tad Rādītāju kolonna paliek fiksēta kreisajā pusē,
-    bet KOPĀ un AVG kolonnas paliek fiksētas labajā pusē!
-    """
     valid_rows = [
         r for r in amounts_df.index
         if row_kinds.get(r) not in ("EXCL", "EXCLUDED")
@@ -1467,10 +1793,9 @@ def render_unified_toc_tables_html(
 
     use_freeze = bool(freeze_sides and n_per >= 4)
 
-    # Fiksētie pikseļu platumi ritināmajam skatam ar sticky kreiso un labajām kolonnām
     m_val_w, m_pct_w = 80, 42
     sum_val_w, sum_pct_w = 88, 42
-    sum_pair_w = sum_val_w + sum_pct_w  # 130px
+    sum_pair_w = sum_val_w + sum_pct_w
 
     def _build_two_subcol_colgroup(num_periods: int, total_ref_periods: int) -> tuple[str, str]:
         if use_freeze:
@@ -1533,7 +1858,6 @@ def render_unified_toc_tables_html(
         if p_idx == total_p - 1:
             r_px = 0 if is_pct else sum_pct_w
             return f"position: sticky; right: {r_px}px; z-index: 5; background-color: {bg};"
-        # p_idx == total_p - 2 (KOPĀ)
         if is_pct:
             return f"position: sticky; right: {sum_pair_w}px; z-index: 5; background-color: {bg};"
         return f"position: sticky; right: {sum_pair_w + sum_pct_w}px; z-index: 5; background-color: {bg}; box-shadow: -3px 0 6px rgba(0,0,0,0.15);"
@@ -1566,66 +1890,41 @@ def render_unified_toc_tables_html(
         font-size: 12px;
         border: 2.5px solid #000000 !important;
     }
-    table.toc-unified.toc-freeze {
-        border-collapse: separate !important;
-        border-spacing: 0 !important;
-    }
-    table.toc-unified th, table.toc-unified td {
-        box-sizing: border-box !important;
-    }
+    table.toc-unified.toc-freeze { border-collapse: separate !important; border-spacing: 0 !important; }
+    table.toc-unified th, table.toc-unified td { box-sizing: border-box !important; }
     table.toc-unified th {
-        background-color: #E2E8F0;
-        color: #000000 !important;
-        font-weight: 700;
-        text-align: center;
-        padding: 6px 5px;
-        border-top: 2.5px solid #000000 !important;
-        border-bottom: 2.5px solid #000000 !important;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        background-color: #E2E8F0; color: #000000 !important; font-weight: 700; text-align: center;
+        padding: 6px 5px; border-top: 2.5px solid #000000 !important; border-bottom: 2.5px solid #000000 !important;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     table.toc-unified td {
-        padding: 4px 6px;
-        white-space: nowrap;
-        color: #000000 !important;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        border-top: 1px solid #222222 !important;
-        border-bottom: 1px solid #222222 !important;
+        padding: 4px 6px; white-space: nowrap; color: #000000 !important; overflow: hidden;
+        text-overflow: ellipsis; border-top: 1px solid #222222 !important; border-bottom: 1px solid #222222 !important;
     }
     table.toc-unified tr.thick-bottom td { border-bottom: 2.5px solid #000000 !important; }
     table.toc-unified tr.wage-block-bottom td { border-bottom: 1.8px solid #1E293B !important; }
     table.toc-unified tr.new-prod-sep td { border-top: 1.5px solid #000000 !important; }
     table.toc-unified td.lbl-main {
         text-align: left; font-weight: 700; padding-left: 8px; padding-right: 8px;
-        border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important;
-        color: #000000 !important;
+        border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important; color: #000000 !important;
     }
     table.toc-unified td.lbl-sub {
         text-align: left; font-weight: 400; padding-left: 14px; padding-right: 8px;
-        border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important;
-        color: #000000 !important;
+        border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important; color: #000000 !important;
     }
     table.toc-unified td.lbl-sub-wage {
         text-align: left; font-weight: 500; padding-left: 14px; padding-right: 8px;
-        border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important;
-        color: #000000 !important;
+        border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important; color: #000000 !important;
     }
     table.toc-unified td.lbl-sub-l1 {
         text-align: left; font-weight: 600; padding-left: 14px; padding-right: 8px;
-        border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important;
-        color: #000000 !important;
+        border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important; color: #000000 !important;
     }
     table.toc-unified td.lbl-sub-l2 {
         text-align: left; font-weight: 400; padding-left: 24px; padding-right: 8px;
-        border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important;
-        color: #1E293B !important;
+        border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important; color: #1E293B !important;
     }
-    span.sub-tree-bar {
-        display: inline-block; border-left: 2px solid rgba(0, 0, 0, 0.38);
-        padding-left: 7px; line-height: 1.15;
-    }
+    span.sub-tree-bar { display: inline-block; border-left: 2px solid rgba(0, 0, 0, 0.38); padding-left: 7px; line-height: 1.15; }
     table.toc-unified td.val-col {
         text-align: right; border-left: 1px solid #222222 !important; border-right: 1px solid #222222 !important;
         font-variant-numeric: tabular-nums; color: #000000 !important;
@@ -1636,8 +1935,7 @@ def render_unified_toc_tables_html(
         color: #000000 !important; font-variant-numeric: tabular-nums;
     }
     table.toc-unified td.kpi-col {
-        text-align: right; padding: 4px 8px;
-        border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important;
+        text-align: right; padding: 4px 8px; border-left: 2.5px solid #000000 !important; border-right: 2.5px solid #000000 !important;
         font-weight: 400; font-variant-numeric: tabular-nums; color: #000000 !important;
     }
     table.toc-unified th.th-kpi {
@@ -1710,25 +2008,15 @@ def render_unified_toc_tables_html(
         disp_rn = display_row_name(rname)
 
         if kind in l1_medium_kinds:
-            font_w = "600"
-            lbl_cls = "lbl-sub-l1"
-            lbl_inner = disp_rn
+            font_w, lbl_cls, lbl_inner = "600", "lbl-sub-l1", disp_rn
         elif kind in l2_detail_kinds:
-            font_w = "400"
-            lbl_cls = "lbl-sub-l2"
-            lbl_inner = f'<span class="sub-tree-bar">{disp_rn}</span>'
+            font_w, lbl_cls, lbl_inner = "400", "lbl-sub-l2", f'<span class="sub-tree-bar">{disp_rn}</span>'
         elif is_bold:
-            font_w = "700"
-            lbl_cls = "lbl-main"
-            lbl_inner = disp_rn
+            font_w, lbl_cls, lbl_inner = "700", "lbl-main", disp_rn
         elif is_wage_row:
-            font_w = "500"
-            lbl_cls = "lbl-sub-wage"
-            lbl_inner = disp_rn
+            font_w, lbl_cls, lbl_inner = "500", "lbl-sub-wage", disp_rn
         else:
-            font_w = "400"
-            lbl_cls = "lbl-sub"
-            lbl_inner = disp_rn
+            font_w, lbl_cls, lbl_inner = "400", "lbl-sub", disp_rn
 
         row_bg_css = f"#{'F1C7A8' if is_wage_row else fill_hex}"
         row_style = f"background-color: {row_bg_css}; color: #000000; font-weight: {font_w};"
@@ -1757,7 +2045,6 @@ def render_unified_toc_tables_html(
 
     html.append("</tbody></table></div>")
 
-    # 2. KPI TABULA
     kpi_periods = [p for p in periods if p in kpi_df.columns]
     n_kpi_p = len(kpi_periods)
     kpi_colgroup, kpi_tbl_style = _build_single_col_kpi_colgroup(n_kpi_p, n_per)
@@ -1781,7 +2068,6 @@ def render_unified_toc_tables_html(
         html.append(
             f'<td class="lbl-main" style="font-weight: 700; color: #000000; {_sticky_left_style("#F1F5F9")}" title="{idx_name}">{idx_name}</td>'
         )
-
         row_month_vals = [kpi_df.loc[idx_name, mp] for mp in month_only_kpi_cols] if month_only_kpi_cols else list(kpi_df.loc[idx_name].values)
 
         for p_idx, p in enumerate(kpi_periods):
@@ -1792,7 +2078,6 @@ def render_unified_toc_tables_html(
                 s = f"{v * 100:.0f}%"
             else:
                 s = f"{v:.2f}"
-
             bg_cell = "#E2E8F0" if p in grey_cols else _kpi_cond_color(idx_name, v, row_month_vals)
             st_r = _sticky_right_single(p_idx, n_kpi_p, bg_cell)
             html.append(f'<td class="kpi-col" style="background-color: {bg_cell}; {st_r}">{s}</td>')
@@ -1800,7 +2085,6 @@ def render_unified_toc_tables_html(
 
     html.append("</tbody></table></div>")
 
-    # 3. UZKRĀJOŠO RĀDĪTĀJU TABULA
     if show_cumulative:
         cum_df, cum_periods, _ = compute_cumulative_toc_df(amounts_df, fy_start_month=fy_start_month)
         html.append('<div class="toc-sec-heading">Uzkrājošie rādītāji</div>')
@@ -1879,30 +2163,29 @@ def render_unified_toc_tables_html(
     return "".join(html)
 
 
-# ------------------------------------------------------------------ THRUVIA: PAR SISTĒMU, INSTRUKCIJA UN BUJ
-def render_login_intro_expander() -> None:
-    with st.expander("Kas ir THRUVIA?", expanded=False):
-        st.markdown(
-            """
-            **THRUVIA** ir MI rīks uzņēmuma finanšu analīzei un vadības lēmumu modelēšanai,
-            kas balstīts uz **Caurlaidības grāmatvedību (*TOC Throughput Accounting*)**.
-
-            * Strādā ar uzņēmumā **jau esošajiem PZA datiem** (Excel vai CSV) — bez jaunas uzskaites sistēmas ieviešanas.
-            * Sakārto finanšu datus 3 skaidros rādītājos: **S** (Ieņēmumi), **TVC** (Pilnībā mainīgās izmaksas) un **OE** (Darbības izmaksas).
-            * Ļauj dažu minūšu laikā izspēlēt nākotnes scenārijus un redzēt to ietekmi uz **Caurlaidību (T)** un **TOC Neto peļņu (NP)**.
-            """
-        )
-
-
-def render_about_and_help_page() -> None:
+# ------------------------------------------------------------------ THRUVIA: PAR SISTĒMU, INSTRUKCIJA, BUJ UN JURIDISKIE NOTEIKUMI
+def render_about_and_help_page(is_public_view: bool = False) -> None:
     st.subheader("THRUVIA — Par sistēmu, Instrukcija un BUJ")
     st.caption("MI instruments uzņēmuma finanšu analīzei un vadības lēmumu modelēšanai, balstoties uz TOC Caurlaidības grāmatvedību.")
 
-    tab_about, tab_guide, tab_faq = st.tabs(
+    if is_public_view:
+        cta_l, cta_r = st.columns([2.6, 1.4], vertical_alignment="center")
+        with cta_l:
+            st.info(
+                "Izmēģiniet **THRUVIA** ar interaktīvu Demo piemēru uzreiz pēc reģistrācijas, iesniedziet sava uzņēmuma PZA "
+                "pārbaudei un saņemiet **5 dienas bez maksas** darbam ar saviem datiem!"
+            )
+        with cta_r:
+            if st.button("Reģistrēties (5 dienas bez maksas) →", key="pub_about_cta_top", type="primary", use_container_width=True):
+                st.session_state.public_view = "register"
+                st.rerun()
+
+    tab_about, tab_guide, tab_faq, tab_legal = st.tabs(
         [
             "Par THRUVIA",
             "Instrukcija pa soļiem",
             "Biežāk uzdotie jautājumi (BUJ)",
+            "Juridiskie noteikumi & Privātums",
         ]
     )
 
@@ -1941,7 +2224,7 @@ def render_about_and_help_page() -> None:
                     **THRUVIA** nepieprasa mainīt grāmatvedības procesus — oficiālā grāmatvedība turpina kontēšanu, nodokļu un normatīvo atskaišu sagatavošanu.
 
                     * Sistēma ielasa uzņēmumā jau pieejamos **PZA failus** (Excel/CSV), MI palīdz saklasificēt kontus un sagatavo pārskatu ar dinamikas grafikiem.
-                    * Datus var analizēt pa mēnešiem, ceturkšņiem, gadiem vai rotējošajiem 12 mēnešiem, izlīdzinot maksājumu laika nobīdes.
+                    * Pirmreizējiem klientiem mēs pārbaudām un sakārtojam PZA struktūru, lai visi rādītāji būtu maksimāli precīzi.
                     """
                 )
         with col_a2:
@@ -1961,30 +2244,28 @@ def render_about_and_help_page() -> None:
         with st.container(border=True):
             st.markdown(
                 """
-                **1. Augšupielādējiet PZA failu (`+ Jauns PZA`)**
-                * Eksportējiet no grāmatvedības programmas mēnešu PZA pārskatu (**Excel** vai **CSV**) un augšupielādējiet to sistēmā.
-                * Nospiediet **Klasificēt kontus** — MI automātiski sadalīs pamatkontus pa **S**, **TVC**, **OE** un neiekļautajām pozīcijām. Neskaidros gadījumos atbildiet uz īsu precizējošu jautājumu un apstipriniet.
+                **1. Reģistrācija un interaktīvā Demo apmācība**
+                * Pēc reģistrācijas jūs 2 minūtēs iziesiet 5 soļu interaktīvu apmācību uz reālistiska Demo uzņēmuma piemēra, lai pilnībā izprastu visas iespējas.
 
                 ---
-                **2. Analizējiet rezultātus un izvēlieties darba periodu (`Pārskats`)**
+                **2. Pirmā PZA faila nosūtīšana pārbaudei**
+                * Eksportējiet no grāmatvedības programmas mēnešu PZA (**Excel** vai **CSV**) un pievienojiet to sistēmā.
+                * Varat izvēlēties **nosūtīt pārbaudei un gaidīt apstiprinājumu** (tikmēr darbojoties Demo režīmā) vai **sākt darboties uzreiz** (ņemot vērā brīdinājumu, līdz struktūra ir pārbaudīta).
+
+                ---
+                **3. Analizējiet rezultātus un izvēlieties darba periodu (`Pārskats`)**
                 * Pārskatā redzama galvenā TA tabula, produktivitātes koeficienti (**PR = T/OE**, **T%**, **Eiro Sales / Eiro algas**), uzkrājošie rādītāji un dinamikas grafiki.
-                * Līdz **14 mēnešiem** visi mēneši ir redzami vienā skatā. Ja pievienoti **15 vai vairāk mēneši**, varat izvēlēties — pāršķirt tabulu pa gadiem, skatīt gadu salīdzinājumu vai ritināt visus mēnešus horizontāli ar fiksētiem rādītājiem un `KOPĀ` / `AVG` kolonnām.
-                * Augšējā izvēlnē iestatiet **Aktīvo darba periodu** (piem., *Pēdējie 12 mēneši*) — šis periods saglabāsies arī **Scenāriju simulācijā**.
+                * Līdz **14 mēnešiem** visi mēneši ir vienā skatā; no **15 mēnešiem** varat pāršķirt pa gadiem, salīdzināt gadus vai ritināt horizontāli ar fiksētām malām.
 
                 ---
-                **3. Pārbaudiet un pielāgojiet kontus (`Kontu struktūra`)**
-                * Atveriet kontu struktūru (*Lielā grupa → Apakšgrupa → Konkrētais PZA konts ar mēnešu summām*), lai pārliecinātos par datu precizitāti.
+                **4. Pārbaudiet un pielāgojiet kontus (`Kontu struktūra`)**
+                * Atveriet kontu struktūru (*Lielā grupa → Apakšgrupa → Konkrētais PZA konts ar mēnešu summām*).
                 * Augšējā panelī varat **pārvietot kontus**, **apvienot apakšgrupas**, **izveidot jaunu** vai **pārdēvēt** esošu apakšgrupu.
 
                 ---
-                **4. Modelējiet scenārijus un jaunus projektus (`Scenāriju simulācija`)**
-                * Mainiet esošo darbību tabulā (% vai +/- €), aprakstiet situāciju tekstā vai ierunājiet ar mikrofonu.
-                * Ieslēdziet **Jauns produkts / projekts**, lai tabulā atsevišķi redzētu esošo darbību, jaunā projekta Caurlaidību (**T**) un kopējo rezultātu.
-
-                ---
-                **5. Izmantojiet MI Ekspertu un saglabājiet versijas (`Asistents` un `Atskaites`)**
-                * Jebkurā brīdī atveriet **Asistentu** (rakstiski vai ar balsi), lai noskaidrotu, kas veido konkrētu pozīciju, vai lūgtu pārdēvēt/sakārtot apakšgrupas.
-                * Pēc izmaiņām izmantojiet **Saglabāt skatu / Versiju**, lai saglabātu jaunu versiju, saglabājot oriģinālo atskaiti drošībā arhīvā.
+                **5. Modelējiet lēmumus un izmantojiet MI Ekspertu (`Scenāriju simulācija` & `Asistents`)**
+                * Mainiet esošo darbību (% vai +/- €), pievienojiet **Jaunu produktu / projektu** vai aprakstiet situāciju ar balsi/tekstu.
+                * Jebkurā brīdī atveriet **Asistentu** augšējā labajā stūrī, lai uzdotu jautājumus par skaitļiem vai sakārtotu grupas.
                 """
             )
 
@@ -2009,15 +2290,26 @@ def render_about_and_help_page() -> None:
                 "* **1.00 ≤ PR < 1.15** — darbības izmaksas tiek segtas, bet drošības rezerve ir neliela.\n"
                 "* **PR ≥ 1.15** — stabila, veselīga caurlaidības atdeve."
             )
-        with st.expander("4. Vai, mainot apakšgrupas vai izvēloties 12 mēnešus, nepazudīs oriģinālā atskaite?"):
+        with st.expander("4. Kāpēc pirmais PZA fails tiek nosūtīts pārbaudei?"):
             st.markdown(
-                "**Nē.** Oriģinālā atskaite vienmēr paliek drošībā sadaļā **Atskaites un Simulācijas**. "
-                "Veicot izmaiņas, ar pogu **Saglabāt izmaiņas / Versiju** varat izveidot jaunu atskaites versiju ar savu nosaukumu."
+                "Katram uzņēmumam grāmatvedības kontu plāns un PZA struktūra ir nedaudz atšķirīga. Pārbaudot pirmo failu, "
+                "mēs pārliecināmies, ka starpsummas, ieņēmumi un izmaksu grupas nolasās 100% precīzi — un jūsu 5 bezmaksas izmēģinājuma dienas sākas tikai pēc apstiprināšanas!"
             )
-        with st.expander("5. Vai nākamajā mēnesī visi konti būs jāklasificē no jauna?"):
+        with st.expander("5. Vai mani finanšu dati ir drošībā?"):
             st.markdown(
-                "**Nē.** THRUVIA saglabā jūsu uzņēmuma kontu atmiņu — nākamajos failos jau zināmie konti tiek sakārtoti automātiski, un MI izvērtē tikai jaunos."
+                "Jā — dati tiek glabāti izolētā jūsu uzņēmuma profilā, un saskaņā ar API komerciālajiem noteikumiem jūsu PZA skaitļi **nekad netiek izmantoti MI modeļu apmācībai**."
             )
+
+    with tab_legal:
+        render_legal_documents_tabs()
+
+    if is_public_view:
+        st.markdown("---")
+        _, c_mid, _ = st.columns([1.2, 1.6, 1.2])
+        with c_mid:
+            if st.button("Izveidot bezmaksas kontu un izmēģināt Demo →", key="pub_about_cta_bottom", type="primary", use_container_width=True):
+                st.session_state.public_view = "register"
+                st.rerun()
 
 
 knowledge_file = None
@@ -2032,7 +2324,7 @@ for c_key, (c_lbl, c_mc) in S.get("custom_subgroups", {}).items():
     register_custom_subgroup(c_key, c_lbl, c_mc)
 
 
-# ------------------------------------------------------------------ PELDOŠA RĪKJOSLA UN DINAMISKS ASISTENTA LOGA IZMĒRS
+# ------------------------------------------------------------------ PELDOŠA RĪKJOSLA, TUTORIĀLA IZCĒLUMI UN ASISTENTA LOGS
 is_expanded_asist = bool(S.get("assistant_expanded", False))
 pop_min_w = "600px" if is_expanded_asist else "390px"
 pop_max_w = "660px" if is_expanded_asist else "430px"
@@ -2044,7 +2336,7 @@ st.markdown(
         display: none !important;
     }}
     .block-container {{
-        padding-top: 2.8rem !important;
+        padding-top: 2.6rem !important;
         padding-bottom: 2.5rem !important;
         max-width: 97% !important;
     }}
@@ -2069,7 +2361,7 @@ st.markdown(
     }}
     div[data-testid="stVerticalBlock"] > div:has(div.sticky-nav-marker) {{
         position: sticky !important;
-        top: 2.6rem !important;
+        top: 2.5rem !important;
         z-index: 999 !important;
         background-color: var(--secondary-background-color, #F4F3EE) !important;
         border: 1px solid rgba(120, 120, 120, 0.25) !important;
@@ -2117,6 +2409,46 @@ st.markdown(
         background-color: #DBEAFE; color: #1E40AF; border: 1px solid #93C5FD;
         padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600;
     }}
+    .demo-pill {{
+        background-color: #EDE9FE; color: #5B21B6; border: 1px solid #A78BFA;
+        padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 700;
+    }}
+    .tut-banner {{
+        background: linear-gradient(135deg, #EEF2FF 0%, #FFFBEB 100%);
+        border: 2px solid #4F46E5;
+        border-radius: 12px;
+        padding: 14px 18px;
+        margin-bottom: 14px;
+        box-shadow: 0 4px 14px rgba(79, 70, 229, 0.12);
+    }}
+    .tut-step-badge {{
+        display: inline-block;
+        background-color: #4F46E5;
+        color: #FFFFFF;
+        font-size: 11px;
+        font-weight: 700;
+        padding: 3px 10px;
+        border-radius: 999px;
+        letter-spacing: 0.3px;
+        margin-bottom: 6px;
+    }}
+    .tut-highlight-zone {{
+        border: 2.5px solid #4F46E5;
+        border-radius: 10px;
+        padding: 10px 14px;
+        background-color: rgba(79, 70, 229, 0.05);
+        margin: 8px 0 12px 0;
+        font-size: 13px;
+        color: #1E1B4B;
+    }}
+    .disclaimer-urgent-box {{
+        background-color: #FEF2F2;
+        border: 2px solid #DC2626;
+        border-radius: 10px;
+        padding: 12px 16px;
+        color: #7F1D1D;
+        margin-bottom: 14px;
+    }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -2125,6 +2457,8 @@ st.markdown(
 
 def build_global_diagnostic_context(profile_store: SupabaseProfileStore) -> str:
     parts = [f"Aktīvais uzņēmuma profils: {S.get('active_profile', 'Nav')}"]
+    if S.get("is_demo_mode"):
+        parts.append("REŽĪMS: Demo piemērs (SIA Demo Ražošana — mācību dati)")
     parts.append(f"Pašreizējā atvērtā sadaļa aplikācijā: {S.get('nav_page', 'overview')}")
     parts.append(f"Aktīvā atskaite: {S.get('loaded_report_meta', {}).get('report_name', 'Jauna atskaite')}")
     parts.append(
@@ -2150,7 +2484,7 @@ def build_global_diagnostic_context(profile_store: SupabaseProfileStore) -> str:
             )
         sub_lines = [f"Apakšgrupa {sg} ({len(al)} konti):\n" + "\n".join(al) for sg, al in by_sub.items()]
         parts.append("\n--- KAS SLĒPJAS ZEM KATRAS APAKŠGRUPAS (PZA PAMATKONTI UN TO SUMMAS) ---\n" + "\n\n".join(sub_lines))
-    else:
+    elif not S.get("is_demo_mode"):
         saved_m = profile_store.list_saved_mappings()
         if saved_m:
             by_sub_db: dict[str, list[str]] = {}
@@ -2178,7 +2512,7 @@ TOC_CORE_EXPERT_KNOWLEDGE = """
 2. Galvenie rādītāji:
    - S (Sales) — realizācijas ieņēmumi.
    - TVC (Totally Variable Costs) — pilnībā mainīgās izmaksas (1:1 ar pārdošanu: izejvielas, materiāli, tiešā piegāde, pārdošanas komisija). Darba algas, elektrība, noma un administrācija NEKAD nav TVC — tās ir OE.
-   - OE (Operating Expenses) — darbības nodrošināšanas izmaksas. Tās nemainās automātiski līdzi apjomam, bet mainās "pakāpienos" pēc vadības lēmumiem (piem., algu fonda pārskatīšana, jauna komanda, jaunas telpas).
+   - OE (Operating Expenses) — darbības nodrošināšanas izmaksas. Tās nemainās automātiski līdzi apjomam, bet mainās "pakāpienos" pēc vadības lēmumiem.
    - T = S - TVC — Caurlaidība (Throughput).
    - NP = T - OE — TOC Neto peļņa (bez netiešo izmaksu sadalīšanas pa produktiem).
 3. Attiecību rādītāji (RATIO):
@@ -2186,11 +2520,11 @@ TOC_CORE_EXPERT_KNOWLEDGE = """
    - T% = T / S (Caurlaidības īpatsvars apgrozījumā).
    - Eiro Sales / Eiro algas (kopā, administrācija, strādnieki) — algu atdeves dinamika.
 4. Periodu skatījums: Garākos periodos (ceturkšņi, gadi, rotējošie 12 mēneši) izlīdzinās maksājumu un izejvielu iepirkumu laika nobīdes.
-5. Lēmumu prioritāte un prognozēšana: T ↑ -> I ↓ -> OE ↓; operatīvā formula ΔT - ΔOE > 0. Pēc lūzuma punkta (T = OE) sasniegšanas katrs nākamais T eiro pārvēršas tīrajā peļņā NP.
-6. SVARĪGS AIZLIEGUMS: Nekad nespried par "mārketinga kampaņu efektivitāti" vai reklāmas atdevi (no PZA vien to objektīvi nomērīt nevar). Fokusējies uz Caurlaidību (T un T%), OE struktūru, algu atdevi, PR = T/OE un scenāriju modelēšanu.
+5. Lēmumu prioritāte: T ↑ -> I ↓ -> OE ↓; operatīvā formula ΔT - ΔOE > 0.
+6. SVARĪGS AIZLIEGUMS: Nekad nespried par "mārketinga kampaņu efektivitāti" vai reklāmas atdevi (no PZA vien to objektīvi nomērīt nevar). Tāpat vienmēr atceries, ka tu sniedz informatīvu TOC analīzi, nevis licencētus finanšu vai nodokļu padomus.
 
 === DARBĪBAS (ACTIONS), KO TU KĀ THRUVIA ASISTENTS VARI AUTOMĀTISKI IZPILDĪT ===
-Pievieno JSON bloku tagos `<ACTION>...</ACTION>` pašās atbildes beigās, kad lietotājs vēlas veikt izmaiņas (lietotājam parādīsies apstiprinājuma poga):
+Pievieno JSON bloku tagos `<ACTION>...</ACTION>` pašās atbildes beigās, kad lietotājs vēlas veikt izmaiņas:
 1) PĀRDĒVĒT APAKŠGRUPU: <ACTION>{"type": "rename_subgroup", "summary": "...", "old_name": "...", "new_name": "..."}</ACTION>
 2) APVIENOT APAKŠGRUPAS: <ACTION>{"type": "merge_subgroups", "summary": "...", "source_subgroup": "...", "target_subgroup": "..."}</ACTION>
 3) PĀRVIETOT KONTUS / IZVEIDOT APAKŠGRUPU: <ACTION>{"type": "split_or_move_accounts", "summary": "...", "main_code": "OE", "new_subgroup": "...", "accounts": ["..."]}</ACTION>
@@ -2243,7 +2577,7 @@ def ask_global_assistant(user_question: str, profile_store: SupabaseProfileStore
         f"{know}\n"
         "SVARĪGI NOTEIKUMI ČATA STILAM UN DARBĪBĀM:\n"
         "1. Raksti viegli lasāmā ČATA FORMĀTĀ: īsas rindkopas (1–2 teikumi), ar atstarpēm un aizzīmēm (•).\n"
-        "2. Nekad nespried par mārketinga efektivitāti — skaidro TOC rādītājus (T, T%, OE vadības lēmumu dabu, PR = T/OE, Eiro Sales / Eiro algas un rotējošo 12 mēnešu tendenci).\n"
+        "2. Nekad nespried par mārketinga efektivitāti — skaidro TOC rādītājus (T, T%, OE vadības lēmumu dabu, PR = T/OE, Eiro Sales / Eiro algas).\n"
         "3. Tu MĀKI un VARI: a) pārdēvēt apakšgrupu (`rename_subgroup`), b) apvienot apakšgrupas (`merge_subgroups`), c) pārvietot kontus vai izveidot apakšgrupu (`split_or_move_accounts`), d) sakārtot tabulu (`reorder_subgroups`), e) atvērt sadaļu (`navigate`).\n"
         "4. Kad lietotājs palūdz kādu darbību, laipni apstiprini un pašās atbildes beigās pievieno `<ACTION>{...}</ACTION>` JSON bloku!"
     )
@@ -2320,23 +2654,49 @@ if not S.get("authenticated", False):
             S.auto_loaded_latest = False
 
 
-# ------------------------------------------------------------------ 1. LOGIN UN 5 DIENU BEZMAKSAS REĢISTRĀCIJA
+# ------------------------------------------------------------------ 1. PUBLISKĀ IEEJA: PIESLĒGTIES / PAR THRUVIA / REĢISTRĒTIES
 billing_cfg = get_billing_config()
 
 if not S.get("authenticated", False):
-    _, col_l2, _ = st.columns([1.05, 1.5, 1.05])
-    with col_l2:
-        st.write("")
-        with st.container(border=True):
-            st.subheader("THRUVIA")
-            st.caption("MI instruments uzņēmuma finanšu analīzei un vadības lēmumu modelēšanai")
-            temp_store = SupabaseProfileStore()
+    if "public_view" not in S:
+        S.public_view = "login"
 
-            tab_login, tab_reg = st.tabs(
-                ["Pieslēgties", f"Reģistrēties ({billing_cfg['trial_days']} dienas bez maksas)"]
+    # Augšējā publiskā rīkjosla pirmreizējiem apmeklētājiem
+    with st.container(border=True):
+        pb1, pb2, pb3, pb4 = st.columns([3.4, 1.0, 1.1, 1.2], vertical_alignment="center")
+        with pb1:
+            st.markdown(
+                '<div class="top-brand-bar">'
+                '<span class="top-brand-title">THRUVIA</span>'
+                '<span class="top-brand-sub">MI finanšu analīze un vadības lēmumu modelēšana (TOC)</span>'
+                '</div>',
+                unsafe_allow_html=True,
             )
+        with pb2:
+            if st.button("Pieslēgties", type="primary" if S.public_view == "login" else "secondary", use_container_width=True, key="pub_nav_login"):
+                S.public_view = "login"
+                st.rerun()
+        with pb3:
+            if st.button("Par THRUVIA", type="primary" if S.public_view == "about" else "secondary", use_container_width=True, key="pub_nav_about"):
+                S.public_view = "about"
+                st.rerun()
+        with pb4:
+            if st.button("Reģistrēties", type="primary" if S.public_view == "register" else "secondary", use_container_width=True, key="pub_nav_reg"):
+                S.public_view = "register"
+                st.rerun()
 
-            with tab_login:
+    if S.public_view == "about":
+        render_about_and_help_page(is_public_view=True)
+        render_app_footer_disclaimer()
+        st.stop()
+
+    _, col_l2, _ = st.columns([0.9, 1.8, 0.9])
+    with col_l2:
+        temp_store = SupabaseProfileStore()
+        if S.public_view == "login":
+            with st.container(border=True):
+                st.subheader("Pieslēgties THRUVIA")
+                st.caption("Ievadiet sava uzņēmuma piekļuves datus vai izveidojiet jaunu kontu.")
                 with st.form("login_form"):
                     login_company = st.text_input("Lietotājvārds / Uzņēmums")
                     login_password = st.text_input("Parole", type="password")
@@ -2360,39 +2720,76 @@ if not S.get("authenticated", False):
                         else:
                             st.error(msg)
 
-            with tab_reg:
+                st.markdown("---")
+                lc1, lc2 = st.columns(2)
+                with lc1:
+                    if st.button("Kas ir THRUVIA? Uzzināt vairāk", use_container_width=True, key="login_to_about"):
+                        S.public_view = "about"
+                        st.rerun()
+                with lc2:
+                    if st.button("Reģistrēties (5 dienas bez maksas)", type="primary", use_container_width=True, key="login_to_reg"):
+                        S.public_view = "register"
+                        st.rerun()
+
+        else:
+            with st.container(border=True):
+                st.subheader(f"Reģistrēties THRUVIA ({billing_cfg['trial_days']} dienas bez maksas)")
                 st.caption(
-                    f"Izmēģiniet THRUVIA **{billing_cfg['trial_days']} dienas bez maksas** ar sava uzņēmuma PZA datiem. "
-                    f"Pēc izmēģinājuma: **{billing_cfg['monthly_price_eur']} €/mēn.** (var atcelt jebkurā brīdī)."
+                    "1. Izveidojiet profilu → 2. Iziet 2 min. interaktīvo Demo apmācību → "
+                    "3. Iesniedziet sava uzņēmuma PZA pārbaudei → 4. Saņemiet 5 bezmaksas dienas saviem datiem "
+                    f"(pēc tam **{billing_cfg['monthly_price_eur']} €/mēn.**, atceļams jebkurā brīdī)."
                 )
                 with st.form("register_trial_form"):
-                    reg_company = st.text_input("Uzņēmuma nosaukums", placeholder="piem., SIA Mans Uzņēmums")
-                    reg_email = st.text_input("Darba e-pasts", placeholder="vards@uznemums.lv")
-                    reg_pw1 = st.text_input("Izvēlieties paroli (vismaz 6 simboli)", type="password")
-                    reg_pw2 = st.text_input("Atkārtojiet paroli", type="password")
+                    r_col1, r_col2 = st.columns(2)
+                    with r_col1:
+                        reg_company = st.text_input("Uzņēmuma nosaukums *", placeholder="piem., SIA Mans Uzņēmums")
+                        reg_contact = st.text_input("Kontaktpersona (vārds, uzvārds) *", placeholder="piem., Jānis Bērziņš")
+                    with r_col2:
+                        reg_email = st.text_input("Darba e-pasts *", placeholder="janis@uznemums.lv")
+                        reg_pw1 = st.text_input("Izvēlieties paroli (vismaz 6 simboli) *", type="password")
+                    reg_pw2 = st.text_input("Atkārtojiet paroli *", type="password")
+
+                    reg_agree_terms = st.checkbox(
+                        "Piekrītu THRUVIA Lietošanas noteikumiem un Privātuma politikai (VDAR), kā arī apliecinu, "
+                        "ka saprotu — sistēma ir informatīvs analīzes rīks un nesniedz licencētas finanšu, nodokļu vai investīciju konsultācijas. *",
+                        value=False,
+                    )
                     reg_submit = st.form_submit_button(
-                        f"Sākt {billing_cfg['trial_days']} dienu bezmaksas izmēģinājumu",
+                        "Izveidot profilu un sākt Demo apmācību →",
                         type="primary",
                         use_container_width=True,
                     )
 
                     if reg_submit:
                         rc = reg_company.strip()
+                        rcont = reg_contact.strip()
                         re_mail = reg_email.strip()
                         if not rc or len(rc) < 2:
                             st.error("Lūdzu ievadiet uzņēmuma nosaukumu.")
-                        elif "@" not in re_mail:
-                            st.error("Lūdzu ievadiet derīgu e-pasta adresi.")
+                        elif not rcont or len(rcont) < 2:
+                            st.error("Lūdzu ievadiet kontaktpersonas vārdu un uzvārdu.")
+                        elif "@" not in re_mail or "." not in re_mail:
+                            st.error("Lūdzu ievadiet derīgu darba e-pasta adresi.")
                         elif len(reg_pw1) < 6:
                             st.error("Parolei jābūt vismaz 6 simbolus garai.")
                         elif reg_pw1 != reg_pw2:
                             st.error("Ievadītās paroles nesakrīt.")
+                        elif not reg_agree_terms:
+                            st.error("Lai reģistrētos, lūdzu apstipriniet piekrišanu Lietošanas noteikumiem, Privātuma politikai un atbildības ierobežojumam.")
                         else:
                             existing_names = {c["company_name"].strip().lower() for c in temp_store.list_all_companies_admin()}
                             if rc.lower() in existing_names or rc.lower() == "admin":
                                 st.error("Šāds uzņēmuma profils jau pastāv. Lūdzu pieslēdzieties vai izvēlieties citu nosaukumu.")
                             else:
-                                structured_n = build_structured_notes("TRIAL", email=re_mail, trial_start=date.today(), free_note="Pašreģistrācija")
+                                structured_n = build_structured_notes(
+                                    plan_code="TRIAL",
+                                    email=re_mail,
+                                    trial_start=date.today(),
+                                    free_note="Jauns klients (pašreģistrācija)",
+                                    onboard_status="TUTORIAL",
+                                    contact_name=rcont,
+                                    legal_ok_date=date.today().isoformat(),
+                                )
                                 ok_reg, msg_reg = temp_store.create_or_update_company_admin(
                                     company_name=rc,
                                     password=reg_pw1,
@@ -2406,7 +2803,8 @@ if not S.get("authenticated", False):
                                     S.is_admin = False
                                     S.active_profile = rc
                                     S.view_mode = "workspace"
-                                    S.nav_page = "ingest"
+                                    S.nav_page = "overview"
+                                    S.tutorial_step = 1
                                     S.auto_loaded_latest = False
                                     st.query_params["u"] = rc
                                     st.query_params["t"] = _make_auth_token(rc, False)
@@ -2414,18 +2812,21 @@ if not S.get("authenticated", False):
                                 else:
                                     st.error(msg_reg)
 
-            render_login_intro_expander()
+                with st.expander("Lasīt Lietošanas noteikumus, Privātuma politiku (VDAR) un Atbildības ierobežojumu"):
+                    render_legal_documents_tabs(compact=True)
+
+    render_app_footer_disclaimer()
     st.stop()
 
 
-# ------------------------------------------------------------------ 2. PILNVĒRTĪGS ADMINISTRATORA PANELIS (KONTI + ABONĒŠANA)
+# ------------------------------------------------------------------ 2. ADMINISTRATORA PANELIS (AR PZA PĀRBAUDES RINDU)
 admin_store = SupabaseProfileStore()
 
 if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
     top_a1, top_a2 = st.columns([5, 1], vertical_alignment="center")
     with top_a1:
         st.title("THRUVIA — Administratora un abonēšanas panelis")
-        st.caption("Klientu konti, 5 dienu izmēģinājumi, abonementu statusi un MI API izmaksu pārskats.")
+        st.caption("Pirmreizējo PZA failu pārbaude, klientu profili, abonementi un MI API resursu pārskats.")
     with top_a2:
         if st.button("Iziet", use_container_width=True):
             st.query_params.clear()
@@ -2436,18 +2837,21 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
     enriched = []
     for c in companies:
         sub_st = parse_subscription_status(c.get("notes"), trial_days=billing_cfg["trial_days"])
+        onb_st = parse_onboarding_status(c.get("notes"))
         c_copy = dict(c)
         c_copy["plan_code"] = sub_st["code"]
         c_copy["plan_label"] = sub_st["label"]
-        c_copy["days_left"] = sub_st["days_left"]
+        c_copy["onboard_status"] = onb_st
+        c_copy["onboard_label"] = ONBOARD_LABELS_LV.get(onb_st, onb_st)
         c_copy["email"] = extract_note_field(c.get("notes"), "EMAIL")
+        c_copy["contact"] = extract_note_field(c.get("notes"), "CONTACT")
         c_copy["free_note"] = extract_free_notes(c.get("notes"))
         enriched.append(c_copy)
 
+    pending_review_clients = [c for c in enriched if c["onboard_status"] in ("PENDING_WAIT", "PENDING_IMMEDIATE")]
     n_total = len(enriched)
     n_paid = sum(1 for c in enriched if c["plan_code"] == "ACTIVE" and c.get("is_active"))
     n_trial = sum(1 for c in enriched if c["plan_code"] == "TRIAL" and c.get("is_active"))
-    n_exp = sum(1 for c in enriched if c["plan_code"] in ("TRIAL_EXPIRED", "CANCELLED") or not c.get("is_active"))
     tot_api_eur = sum(float(c.get("total_cost_eur") or 0.0) for c in enriched)
     try:
         mrr_eur = n_paid * float(billing_cfg["monthly_price_eur"])
@@ -2456,18 +2860,83 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
 
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Klienti kopā", n_total)
-    k2.metric("Aktīvi maksas abon.", n_paid)
-    k3.metric("Izmēģinājumā (5d)", n_trial)
-    k4.metric("Beidzies / Apturēti", n_exp)
+    k2.metric("Gaida PZA pārbaudi", len(pending_review_clients))
+    k3.metric("Aktīvi maksas abon.", n_paid)
+    k4.metric("Izmēģinājumā (5d)", n_trial)
     k5.metric("Prognozētais MRR / API", f"{mrr_eur:,.0f} €", delta=f"API: -{tot_api_eur:.2f} €", delta_color="off")
 
+    # PZA PĀRBAUDES RINDA (PIRMREIZĒJO KLIENTU IESŪTĪTIE FAILI)
+    if pending_review_clients:
+        st.markdown("---")
+        st.subheader(f"📥 PZA pārbaudes rinda ({len(pending_review_clients)})")
+        st.caption("Lejupielādējiet klienta iesūtīto failu, atveriet viņa profilu, augšupielādējiet un pārbaudiet grupēšanu, tad apstipriniet profilu.")
+        for pc in pending_review_clients:
+            pc_name = pc["company_name"]
+            pc_store = SupabaseProfileStore(company_name=pc_name)
+            pc_reps = pc_store.list_reports()
+            pending_files = [r for r in pc_reps if str(r.get("file_name", "")).startswith("PENDING_PZA::")]
+
+            with st.container(border=True):
+                r1, r2, r3, r4 = st.columns([2.2, 1.1, 1.1, 1.1], vertical_alignment="center")
+                with r1:
+                    st.markdown(f"**{pc_name}** &nbsp;|&nbsp; `{pc['onboard_label']}`")
+                    contact_line = f"{pc['contact']} ({pc['email']})" if pc["contact"] else (pc["email"] or "Nav e-pasta")
+                    st.caption(f"Kontakts: {contact_line}")
+
+                    latest_payload = None
+                    latest_pending_id = None
+                    if pending_files:
+                        latest_pending_id = pending_files[0]["id"]
+                        loaded_p = pc_store.load_report(latest_pending_id)
+                        if loaded_p:
+                            try:
+                                latest_payload = json.loads(loaded_p.get("commentary") or "{}")
+                            except Exception:
+                                latest_payload = None
+                    if latest_payload:
+                        st.caption(
+                            f"Fails: **{latest_payload.get('filename')}** ({latest_payload.get('size_kb', '?')} KB) | "
+                            f"Iesūtīts: {latest_payload.get('submitted_at', '—')}"
+                            + (f" | Piezīme: *{latest_payload.get('user_note')}*" if latest_payload.get("user_note") else "")
+                        )
+                with r2:
+                    if latest_payload and latest_payload.get("b64"):
+                        raw_bytes = base64.b64decode(latest_payload["b64"])
+                        st.download_button(
+                            "Lejupielādēt PZA",
+                            data=raw_bytes,
+                            file_name=latest_payload.get("filename", "klienta_PZA.xlsx"),
+                            key=f"adm_dl_pza_{pc_name}",
+                            use_container_width=True,
+                        )
+                    else:
+                        st.caption("Fails nav pievienots")
+                with r3:
+                    if st.button("Atvērt & Ievietot PZA", key=f"adm_open_rev_{pc_name}", use_container_width=True):
+                        S.active_profile = pc_name
+                        S.view_mode = "workspace"
+                        S.nav_page = "ingest"
+                        S.auto_loaded_latest = False
+                        S.pop("result", None)
+                        S.pop("cls_df", None)
+                        S.pop("loaded_report_meta", None)
+                        st.rerun()
+                with r4:
+                    if st.button("Apstiprināt PZA ✅", key=f"adm_approve_pza_{pc_name}", type="primary", use_container_width=True):
+                        update_company_onboarding_status(admin_store, pc_name, "APPROVED", reset_trial_today=True)
+                        for pf in pending_files:
+                            pc_store.delete_report(pf["id"])
+                        st.toast(f"Klienta '{pc_name}' PZA apstiprināts! Sākas 5 bezmaksas izmēģinājuma dienas.")
+                        st.rerun()
+
+    st.markdown("---")
     stripe_ok = bool(billing_cfg["stripe_checkout_url"] and billing_cfg["stripe_portal_url"])
     if stripe_ok:
         st.success("Stripe apmaksas un abonementa pārvaldības saites ir aktīvas.")
     else:
         st.info(
-            "Stripe automatizētajai karšu apmaksai Streamlit Secrets pievienojiet `STRIPE_CHECKOUT_URL`, `STRIPE_PORTAL_URL` "
-            "un `SUBSCRIPTION_PRICE_EUR`. Līdz tam abonementus varat pilnvērtīgi aktivizēt un pagarināt manuāli ar 1 klikšķi zemāk."
+            "Stripe karšu apmaksai Streamlit Secrets pievienojiet `STRIPE_CHECKOUT_URL`, `STRIPE_PORTAL_URL` "
+            "un `SUBSCRIPTION_PRICE_EUR`. Līdz tam abonementus varat aktivizēt un pagarināt ar 1 klikšķi zemāk."
         )
 
     col_adm_left, col_adm_right = st.columns([1.85, 1.15])
@@ -2477,8 +2946,8 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
         flt_c1, flt_c2, flt_c3 = st.columns([1.2, 1.4, 0.8], vertical_alignment="bottom")
         with flt_c1:
             adm_filter = st.selectbox(
-                "Filtrs pēc plāna",
-                options=["Visi klienti", "Aktīvi maksas", "Izmēģinājumā (5d)", "Beidzies / Neaktīvi", "B4B pārvaldītie"],
+                "Filtrs pēc statusa",
+                options=["Visi klienti", "Gaida PZA pārbaudi", "Aktīvi maksas", "Izmēģinājumā (5d)", "Beidzies / Neaktīvi", "B4B pārvaldītie"],
                 key="adm_plan_filter",
             )
         with flt_c2:
@@ -2486,6 +2955,8 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
 
         filtered_comps = []
         for c in enriched:
+            if adm_filter == "Gaida PZA pārbaudi" and c["onboard_status"] not in ("PENDING_WAIT", "PENDING_IMMEDIATE"):
+                continue
             if adm_filter == "Aktīvi maksas" and not (c["plan_code"] == "ACTIVE" and c.get("is_active")):
                 continue
             if adm_filter == "Izmēģinājumā (5d)" and not (c["plan_code"] == "TRIAL" and c.get("is_active")):
@@ -2496,7 +2967,7 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
                 continue
             if adm_search.strip():
                 q_low = adm_search.strip().lower()
-                hay = f"{c['company_name']} {c['email']} {c['free_note']} {c['plan_label']}".lower()
+                hay = f"{c['company_name']} {c['contact']} {c['email']} {c['free_note']} {c['plan_label']} {c['onboard_label']}".lower()
                 if q_low not in hay:
                     continue
             filtered_comps.append(c)
@@ -2505,9 +2976,9 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
             st.info("Nav klientu, kas atbilst izvēlētajam filtram.")
         else:
             comp_df = pd.DataFrame(filtered_comps)[
-                ["company_name", "plan_label", "is_active", "email", "usage_count", "total_cost_eur", "accounts_count", "reports_count", "free_note"]
+                ["company_name", "onboard_label", "plan_label", "is_active", "email", "total_cost_eur", "accounts_count", "reports_count", "free_note"]
             ]
-            comp_df.columns = ["Uzņēmums", "Abonements", "Aktīvs", "E-pasts", "Darbības", "API (€)", "Konti", "Atsk.", "Piezīmes"]
+            comp_df.columns = ["Uzņēmums", "PZA statuss", "Abonements", "Aktīvs", "E-pasts", "API (€)", "Konti", "Atsk.", "Piezīmes"]
             with flt_c3:
                 st.download_button(
                     "CSV eksports",
@@ -2535,8 +3006,14 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
                     S.pop("loaded_report_meta", None)
                     st.rerun()
             with qa2:
-                if st.button("Aktivizēt abon.", use_container_width=True, help="Pārslēgt uz aktīvu maksas abonementu"):
-                    new_n = build_structured_notes("ACTIVE", email=sel_obj.get("email", ""), free_note=sel_obj.get("free_note", ""))
+                if st.button("Aktivizēt abon.", use_container_width=True):
+                    new_n = build_structured_notes(
+                        "ACTIVE",
+                        email=sel_obj.get("email", ""),
+                        free_note=sel_obj.get("free_note", ""),
+                        onboard_status="APPROVED",
+                        contact_name=sel_obj.get("contact", ""),
+                    )
                     admin_store.create_or_update_company_admin(
                         company_name=target_client,
                         password="",
@@ -2548,8 +3025,15 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
                     st.toast(f"Klientam '{target_client}' aktivizēts maksas abonements!")
                     st.rerun()
             with qa3:
-                if st.button("+5d izmēģināj.", use_container_width=True, help="Piešķirt svaigu 5 dienu izmēģinājumu no šodienas"):
-                    new_n = build_structured_notes("TRIAL", email=sel_obj.get("email", ""), trial_start=date.today(), free_note=sel_obj.get("free_note", ""))
+                if st.button("+5d izmēģināj.", use_container_width=True):
+                    new_n = build_structured_notes(
+                        "TRIAL",
+                        email=sel_obj.get("email", ""),
+                        trial_start=date.today(),
+                        free_note=sel_obj.get("free_note", ""),
+                        onboard_status=sel_obj.get("onboard_status", "APPROVED"),
+                        contact_name=sel_obj.get("contact", ""),
+                    )
                     admin_store.create_or_update_company_admin(
                         company_name=target_client,
                         password="",
@@ -2561,8 +3045,14 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
                     st.toast(f"Klientam '{target_client}' piešķirtas +5 izmēģinājuma dienas!")
                     st.rerun()
             with qa4:
-                if st.button("Apturēt piekļ.", use_container_width=True, help="Atcelt abonementu un bloķēt piekļuvi"):
-                    new_n = build_structured_notes("CANCELLED", email=sel_obj.get("email", ""), free_note=sel_obj.get("free_note", ""))
+                if st.button("Apturēt piekļ.", use_container_width=True):
+                    new_n = build_structured_notes(
+                        "CANCELLED",
+                        email=sel_obj.get("email", ""),
+                        free_note=sel_obj.get("free_note", ""),
+                        onboard_status=sel_obj.get("onboard_status", "APPROVED"),
+                        contact_name=sel_obj.get("contact", ""),
+                    )
                     admin_store.create_or_update_company_admin(
                         company_name=target_client,
                         password="",
@@ -2618,12 +3108,23 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
             cur_p_code = "TRIAL"
         def_p_idx = plan_list.index(plan_opts_map.get(cur_p_code, plan_list[0]))
 
+        onb_keys = list(ONBOARD_LABELS_LV.keys())
+        cur_onb_k = prefill.get("onboard_status", "APPROVED")
+        def_onb_idx = onb_keys.index(cur_onb_k) if cur_onb_k in onb_keys else onb_keys.index("APPROVED")
+
         with st.form("admin_manage_client_form"):
             f_cname = st.text_input("Lietotājvārds / Uzņēmums", value=prefill.get("company_name", ""), placeholder="piem., SIA Klients")
+            f_contact = st.text_input("Kontaktpersona", value=prefill.get("contact", ""), placeholder="piem., Jānis Bērziņš")
             f_email = st.text_input("Klienta e-pasts", value=prefill.get("email", ""), placeholder="klients@uznemums.lv")
             f_pw = st.text_input("Parole (atstājiet tukšu, ja nemaināt)", type="password")
             f_plan_lbl = st.selectbox("Abonementa plāns", options=plan_list, index=def_p_idx)
-            f_trial_start = st.date_input("Izmēģinājuma sākuma datums (ja izvēlēts izmēģinājums)", value=date.today())
+            f_onb_key = st.selectbox(
+                "PZA / Ievadposma statuss",
+                options=onb_keys,
+                index=def_onb_idx,
+                format_func=lambda k: ONBOARD_LABELS_LV[k],
+            )
+            f_trial_start = st.date_input("Izmēģinājuma sākuma datums", value=date.today())
             f_active = st.checkbox("Profils ir aktīvs", value=bool(prefill.get("is_active", True)))
             f_reset = st.checkbox("Nullēt API statistikas skaitītāju (0)", value=False)
             f_notes = st.text_input("Piezīmes", value=prefill.get("free_note", ""))
@@ -2631,10 +3132,14 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
 
             if sub_adm:
                 sel_p_code = rev_plan_map[f_plan_lbl]
-                if sel_p_code == "MANAGED":
-                    packed_notes = f"EMAIL:{f_email.strip()} | NOTE:{f_notes.strip()}" if f_email.strip() else f_notes.strip()
-                else:
-                    packed_notes = build_structured_notes(sel_p_code, email=f_email, trial_start=f_trial_start, free_note=f_notes)
+                packed_notes = build_structured_notes(
+                    plan_code=sel_p_code,
+                    email=f_email,
+                    trial_start=f_trial_start,
+                    free_note=f_notes,
+                    onboard_status=f_onb_key,
+                    contact_name=f_contact,
+                )
                 ok_a, msg_a = admin_store.create_or_update_company_admin(
                     company_name=f_cname,
                     password=f_pw,
@@ -2651,7 +3156,7 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
     st.stop()
 
 
-# ------------------------------------------------------------------ 3. PROFILA IELĀDE UN ABONEMENTA STATUSS
+# ------------------------------------------------------------------ 3. PROFILA IELĀDE, ONBOARDING UN DEMO REŽĪMS
 profile = SupabaseProfileStore(company_name=S.active_profile)
 
 if "fy_start_month" not in S:
@@ -2667,39 +3172,67 @@ cur_company_row = next(
     (c for c in admin_store.list_all_companies_admin() if c["company_name"] == S.active_profile),
     {},
 )
+onboard_status = parse_onboarding_status(cur_company_row.get("notes"))
 sub_info = parse_subscription_status(cur_company_row.get("notes"), trial_days=billing_cfg["trial_days"])
+S.onboard_status = onboard_status
 S.subscription_info = sub_info
 S.company_email = extract_note_field(cur_company_row.get("notes"), "EMAIL")
 
+# Ja klients (ne-admin) atrodas Apmācības, PZA iesniegšanas vai Gaidīšanas posmā -> Demo režīms!
+is_demo_mode = (not S.get("is_admin", False)) and (onboard_status in ("TUTORIAL", "SUBMIT_PZA", "PENDING_WAIT"))
+S.is_demo_mode = is_demo_mode
+
 all_saved_items = profile.list_reports()
-fin_reports = [r for r in all_saved_items if not str(r.get("file_name", "")).startswith("SIM::")]
+fin_reports = [r for r in all_saved_items if not str(r.get("file_name", "")).startswith(("SIM::", "PENDING_PZA::"))]
 sim_reports = [r for r in all_saved_items if str(r.get("file_name", "")).startswith("SIM::")]
 saved_acc_count = profile.count_saved()
 
-if not S.get("auto_loaded_latest", False):
-    S.auto_loaded_latest = True
-    if "result" not in S and fin_reports:
-        latest_rep_id = fin_reports[0]["id"]
-        loaded_init = profile.load_report(latest_rep_id)
-        if loaded_init:
-            init_res = LoadedReportResult(
-                amounts=loaded_init["amounts"],
-                main=loaded_init["main"],
-                kpi=loaded_init["kpi"],
-                row_kinds=loaded_init["row_kinds"],
-                reconciliation=loaded_init["reconciliation"],
-                by_group={},
-            )
-            S.result = apply_custom_row_order_to_result(strip_excluded_rows(init_res))
-            S.loaded_report_meta = loaded_init
-            S.current_report_id = loaded_init["id"]
-            S.has_unsaved_changes = False
-            comm_clean, acc_snap = unpack_commentary_and_account_details(loaded_init.get("commentary"))
-            S.loaded_account_details = acc_snap
-            if comm_clean:
-                S.commentary = comm_clean
-            else:
-                S.pop("commentary", None)
+if is_demo_mode:
+    if not S.get("demo_initialized", False) or S.get("loaded_report_meta", {}).get("file_name") != "DEMO::DATA":
+        demo_res, demo_acc = build_demo_company_data()
+        S.result = apply_custom_row_order_to_result(demo_res)
+        S.loaded_account_details = demo_acc
+        S.loaded_report_meta = {
+            "id": None,
+            "report_name": "SIA Demo Ražošana (2026. gads)",
+            "file_name": "DEMO::DATA",
+        }
+        S.current_report_id = None
+        S.has_unsaved_changes = False
+        S.demo_initialized = True
+        S.pop("cls_df", None)
+        S.pop("analysis", None)
+else:
+    if S.get("demo_initialized", False):
+        S.demo_initialized = False
+        S.pop("result", None)
+        S.pop("loaded_report_meta", None)
+        S.auto_loaded_latest = False
+
+    if not S.get("auto_loaded_latest", False):
+        S.auto_loaded_latest = True
+        if "result" not in S and fin_reports:
+            latest_rep_id = fin_reports[0]["id"]
+            loaded_init = profile.load_report(latest_rep_id)
+            if loaded_init:
+                init_res = LoadedReportResult(
+                    amounts=loaded_init["amounts"],
+                    main=loaded_init["main"],
+                    kpi=loaded_init["kpi"],
+                    row_kinds=loaded_init["row_kinds"],
+                    reconciliation=loaded_init["reconciliation"],
+                    by_group={},
+                )
+                S.result = apply_custom_row_order_to_result(strip_excluded_rows(init_res))
+                S.loaded_report_meta = loaded_init
+                S.current_report_id = loaded_init["id"]
+                S.has_unsaved_changes = False
+                comm_clean, acc_snap = unpack_commentary_and_account_details(loaded_init.get("commentary"))
+                S.loaded_account_details = acc_snap
+                if comm_clean:
+                    S.commentary = comm_clean
+                else:
+                    S.pop("commentary", None)
 
 
 # ------------------------------------------------------------------ VIENOTS DARBA PERIODA SINHRONIZATORS
@@ -2828,7 +3361,6 @@ def _render_assistant_popover_content(form_key: str) -> None:
                 key=f"send_voice_always_{form_key}",
                 type="primary",
                 use_container_width=True,
-                help="Pabeidziet ierunāt mikrofonā (nospiediet Stop) vai spiediet šeit, lai nosūtītu balss jautājumu.",
             )
 
         if asist_audio is not None:
@@ -2856,14 +3388,22 @@ def _render_assistant_popover_content(form_key: str) -> None:
             st.caption("ℹ️ Vispirms nospiediet sarkano kvadrātiņu (Stop) pie mikrofona, lai pabeigtu balss ierakstu, un tas uzreiz nosūtīsies!")
 
 
-# ------------------------------------------------------------------ 4. TĪRA PELDOŠĀ AUGŠĒJĀ RĪKJOSLA (BEZ DUBULTĀM BULTIŅĀM)
-PRIMARY_NAV = {
-    "overview": "Pārskats",
-    "simulation": "Scenāriju simulācija",
-    "accounts_explorer": "Kontu struktūra",
-    "archive": "Atskaites un Simulācijas",
-    "ingest": "+ Jauns PZA",
-}
+# ------------------------------------------------------------------ 4. PELDOŠĀ AUGŠĒJĀ RĪKJOSLA (THRUVIA)
+if is_demo_mode:
+    PRIMARY_NAV = {
+        "overview": "Pārskats (Demo)",
+        "simulation": "Scenāriju simulācija (Demo)",
+        "accounts_explorer": "Kontu struktūra (Demo)",
+        "submit_pza": "📤 Iesniegt savu PZA",
+    }
+else:
+    PRIMARY_NAV = {
+        "overview": "Pārskats",
+        "simulation": "Scenāriju simulācija",
+        "accounts_explorer": "Kontu struktūra",
+        "archive": "Atskaites un Simulācijas",
+        "ingest": "+ Jauns PZA",
+    }
 
 active_rep_label = (
     S.loaded_report_meta.get("report_name")
@@ -2873,12 +3413,13 @@ active_rep_label = (
 
 unsaved_badge_html = (
     '&nbsp; <span class="unsaved-pill">● Nesaglabātas izmaiņas</span>'
-    if S.get("has_unsaved_changes")
+    if (S.get("has_unsaved_changes") and not is_demo_mode)
     else ""
 )
+demo_badge_html = '&nbsp; <span class="demo-pill">DEMO APMĀCĪBAS REŽĪMS</span>' if is_demo_mode else ""
 trial_badge_html = (
     f'&nbsp; <span class="trial-pill">Izmēģinājums: {sub_info["days_left"]} d.</span>'
-    if (sub_info["code"] == "TRIAL" and sub_info["days_left"] is not None)
+    if (not is_demo_mode and sub_info["code"] == "TRIAL" and sub_info["days_left"] is not None)
     else ""
 )
 
@@ -2923,7 +3464,7 @@ with st.container():
             st.markdown(
                 f'<div class="top-brand-bar">'
                 f'<span class="top-brand-title">THRUVIA</span>'
-                f'<span class="top-brand-sub"><b>{S.active_profile}</b> &nbsp;|&nbsp; Atskaite: <b>{active_rep_label}</b>{unsaved_badge_html}{trial_badge_html}</span>'
+                f'<span class="top-brand-sub"><b>{S.active_profile}</b> &nbsp;|&nbsp; Atskaite: <b>{active_rep_label}</b>{demo_badge_html}{unsaved_badge_html}{trial_badge_html}</span>'
                 f'</div>',
                 unsafe_allow_html=True,
             )
@@ -2932,7 +3473,7 @@ with st.container():
                 _render_assistant_popover_content("side_agent_form")
         with hdr_about:
             about_type = "primary" if S.nav_page == "about" else "secondary"
-            if st.button("Par THRUVIA", key="top_about_btn", type=about_type, use_container_width=True, help="Par THRUVIA, instrukcija pa soļiem un BUJ"):
+            if st.button("Par THRUVIA", key="top_about_btn", type=about_type, use_container_width=True):
                 S.nav_page = "about"
                 st.query_params["p"] = "about"
                 st.rerun()
@@ -2944,7 +3485,8 @@ with st.container():
                 S.hide_top_toolbar = True
                 st.rerun()
 
-        nav_cols = st.columns([1.0, 1.25, 1.15, 1.35, 1.05])
+        nav_widths = [1.05, 1.3, 1.25, 1.25] if is_demo_mode else [1.0, 1.25, 1.15, 1.35, 1.05]
+        nav_cols = st.columns(nav_widths)
         for idx_n, (n_key, n_label) in enumerate(PRIMARY_NAV.items()):
             btn_type = "primary" if S.nav_page == n_key else "secondary"
             if nav_cols[idx_n].button(n_label, key=f"top_nav_{n_key}", type=btn_type, use_container_width=True):
@@ -2952,13 +3494,158 @@ with st.container():
                 st.query_params["p"] = n_key
                 st.rerun()
 
+
+# ------------------------------------------------------------------ 5. INTERAKTĪVĀ 5 SOĻU DEMO APMĀCĪBA & GAIDĪŠANAS / BRĪDINĀJUMA JOSLAS
+TUTORIAL_STEPS = [
+    {
+        "step": 1,
+        "page": "overview",
+        "title": "1. solis no 5 — Galvenā TOC finanšu tabula un Darba periods",
+        "body": (
+            "Apskatiet krāsaino tabulu zemāk (parauga uzņēmums **SIA Demo Ražošana**). "
+            "**S** (dzeltens) = Ieņēmumi, **TVC** (brūns) = pilnībā mainīgās izmaksas, **T** (zils) = Caurlaidība (`S − TVC`), "
+            "**OE** (persiku) = darbības uzturēšanas izmaksas (algas vienmēr pašā augšā!) un **NP** (zaļš) = TOC Neto peļņa. "
+            "Virs tabulas varat mainīt **Aktīvo darba periodu** (piem., pēdējie 6 mēneši) un lejupielādēt Excel."
+        ),
+        "focus_hint": "Pievērsiet uzmanību izceltajai zonai zemāk — galvenajai TOC tabulai un Produktivitātes rādītājiem (`PR = T/OE`).",
+    },
+    {
+        "step": 2,
+        "page": "overview",
+        "title": "2. solis no 5 — Dinamikas grafiki un TOC eksperta secinājumi",
+        "body": (
+            "Pavirziet lapu nedaudz uz leju! Tur redzēsiet **Galveno rādītāju dinamikas grafiku** (pārslēdzams starp ikmēneša un uzkrājošajiem rādītājiem), "
+            "**Produktivitātes (`PR = T/OE`)** un **Algu atdeves** grafikus, kā arī pogu **Pieprasīt eksperta ieteikumus**, "
+            "kas izskaidro galvenos secinājumus par izvēlēto periodu."
+        ),
+        "focus_hint": "Paskatieties uz grafikiem zem tabulas — tur uzskatāmi redzams, kā T (zilā līnija) virzās pret OE (oranžo līniju).",
+    },
+    {
+        "step": 3,
+        "page": "accounts_explorer",
+        "title": "3. solis no 5 — Kontu struktūra un apakšgrupu pielāgošana",
+        "body": (
+            "Šajā sadaļā vienmēr varat pārbaudīt, **kuri konkrētie PZA konti** veido katru tabulas rindu. "
+            "Augšējā panelī **Ātrā apakšgrupu un kontu vadība** ar dažiem klikšķiem varat pārvietot kontus citā grupā, "
+            "apvienot apakšgrupas, izveidot jaunu apakšgrupu vai pārdēvēt esošo."
+        ),
+        "focus_hint": "Izmēģiniet atvērt kādu no apakšgrupām zemāk (piem., 'Administrācijas algas') vai pamēģiniet pārdēvēt grupu!",
+    },
+    {
+        "step": 4,
+        "page": "simulation",
+        "title": "4. solis no 5 — Scenāriju simulācija un Jauns projekts",
+        "body": (
+            "Spēcīgākais THRUVIA rīks vadības sapulcēm! Šeit varat **ievadīt izmaiņas tabulā (% vai +/- €)**, "
+            "**aprakstīt scenāriju brīvā tekstā vai ar balsi** (piem., *'Paceļam apgrozījumu par 10% un palielinām algas par 5 000 €'*), "
+            "vai ieslēgt sadaļu **Jauns produkts / projekts** — un uzreiz redzēt, kā mainās T, NP un `PR`."
+        ),
+        "focus_hint": "Izmēģiniet dubultklikšķi uz 'Izmaiņa %' šūnas vai ierakstiet situāciju augšējā MI laukā!",
+    },
+    {
+        "step": 5,
+        "page": "overview",
+        "title": "5. solis no 5 — MI Asistents (augšā labajā stūrī) un savs PZA!",
+        "body": (
+            "Jebkurā lapā augšējā labajā stūrī atrodas poga **Asistents**. Atveriet to un pajautājiet (rakstiski vai ar balsi) "
+            "jebko par saviem skaitļiem vai palūdziet sakārtot/pārdēvēt rindas. "
+            "**Apmācība pabeigta!** Nospiediet zaļo pogu pa labi, lai augšupielādētu sava uzņēmuma PZA pārbaudei."
+        ),
+        "focus_hint": "Spiediet 'Asistents' augšējā labajā stūrī vai pārejiet uz sava uzņēmuma PZA pievienošanu!",
+    },
+]
+
+# 5A. INTERAKTĪVĀS APMĀCĪBAS BANERIS (ONBOARD == TUTORIAL)
+if not S.get("is_admin", False) and onboard_status == "TUTORIAL" and S.nav_page not in ("submit_pza", "about", "settings"):
+    cur_t_step = int(S.get("tutorial_step", 1))
+    cur_t_step = max(1, min(5, cur_t_step))
+    t_cfg = TUTORIAL_STEPS[cur_t_step - 1]
+
+    # Ja lietotājs spiež "Nākamais / Iepriekšējais", automātiski aizvedam uz pareizo sadaļu
+    st.markdown(
+        f'<div class="tut-banner">'
+        f'<span class="tut-step-badge">INTERAKTĪVĀ APMĀCĪBA — SOLIS {cur_t_step} / 5</span>'
+        f'<div style="font-size:16px; font-weight:700; color:#1E1B4B; margin-bottom:4px;">{t_cfg["title"]}</div>'
+        f'<div style="font-size:13.5px; color:#1E293B; line-height:1.5;">{t_cfg["body"]}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+    st.progress(cur_t_step / 5.0)
+
+    tb1, tb2, tb3, tb4 = st.columns([1.0, 1.3, 1.3, 1.4], vertical_alignment="center")
+    with tb1:
+        if cur_t_step > 1 and st.button("◀ Iepriekšējais solis", use_container_width=True, key="tut_prev_btn"):
+            new_s = cur_t_step - 1
+            S.tutorial_step = new_s
+            S.nav_page = TUTORIAL_STEPS[new_s - 1]["page"]
+            st.rerun()
+    with tb2:
+        if cur_t_step < 5:
+            if st.button("Nākamais solis ▶", type="primary", use_container_width=True, key="tut_next_btn"):
+                new_s = cur_t_step + 1
+                S.tutorial_step = new_s
+                S.nav_page = TUTORIAL_STEPS[new_s - 1]["page"]
+                st.rerun()
+        else:
+            if st.button("Pabeigt un pievienot savu PZA →", type="primary", use_container_width=True, key="tut_finish_btn"):
+                update_company_onboarding_status(admin_store, S.active_profile, "SUBMIT_PZA")
+                S.nav_page = "submit_pza"
+                st.rerun()
+    with tb3:
+        if S.nav_page != t_cfg["page"]:
+            if st.button(f"Atvērt šī soļa sadaļu", use_container_width=True, key="tut_goto_page"):
+                S.nav_page = t_cfg["page"]
+                st.rerun()
+    with tb4:
+        if cur_t_step < 5 and st.button("Izlaist apmācību → Pievienot PZA", use_container_width=True, key="tut_skip_btn"):
+            update_company_onboarding_status(admin_store, S.active_profile, "SUBMIT_PZA")
+            S.nav_page = "submit_pza"
+            st.rerun()
+
+# 5B. PZA IESNIEGTS — GAIDĪŠANAS REŽĪMS (DEMO)
+elif not S.get("is_admin", False) and onboard_status == "PENDING_WAIT" and S.nav_page not in ("submit_pza", "about", "settings"):
+    with st.container(border=True):
+        pw_c1, pw_c2 = st.columns([2.6, 1.4], vertical_alignment="center")
+        with pw_c1:
+            st.markdown(
+                "**⏳ Jūsu PZA fails ir nosūtīts pārbaudei!**  \n"
+                "Mēs šobrīd pārbaudām jūsu PZA struktūru un kontu grupēšanu, lai visi rādītāji būtu 100% precīzi. "
+                "Tikmēr droši turpiniet izpētīt sistēmu **Demo režīmā** — jūsu 5 bezmaksas dienas sāksies tikai pēc apstiprināšanas!"
+            )
+        with pw_c2:
+            if billing_cfg["stripe_checkout_url"]:
+                st.link_button("💳 Pievienot karti / Abonēt", billing_cfg["stripe_checkout_url"], type="primary", use_container_width=True)
+            if st.button("Iesniegt citu PZA / Mainīt režīmu", use_container_width=True, key="pw_goto_sub"):
+                S.nav_page = "submit_pza"
+                st.rerun()
+
+# 5C. PZA IESNIEGTS — STRĀDĀ UZREIZ AR LIELU BRĪDINĀJUMU (PENDING_IMMEDIATE)
+elif not S.get("is_admin", False) and onboard_status == "PENDING_IMMEDIATE" and S.nav_page not in ("about", "settings"):
+    st.markdown(
+        '<div class="disclaimer-urgent-box">'
+        '<b>⚠️ BRĪDINĀJUMS — PZA struktūra vēl nav pārbaudīta!</b><br>'
+        'Jūs izvēlējāties sākt darbu uzreiz, kamēr mūsu speciālists vēl pārbauda jūsu iesūtīto PZA failu. '
+        'Līdz pārbaudes apstiprināšanai <b>automātiskā kontu grupēšana, starpsummu atpazīšana un aprēķini var saturēt neprecizitātes</b>. '
+        'Tiklīdz pārbaude būs pabeigta, šis brīdinājums pazudīs un jūsu profilā būs apstiprinātie dati.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+# 5D. JA PABEIGTA APMĀCĪBA UN VĒL NAV IESNIEGTS PZA -> AUTOMĀTISKI ATVERAM PZA IESNIEGŠANAS LOGU
+if not S.get("is_admin", False) and onboard_status == "SUBMIT_PZA" and S.nav_page not in ("submit_pza", "about", "settings"):
+    S.nav_page = "submit_pza"
+
+# Ja beidzies 5 dienu bezmaksas izmēģinājums (ne-admin klientam), aicinām aktivizēt abonementu
 if sub_info["expired"] and not S.get("is_admin", False) and S.nav_page not in ("settings", "about"):
     st.warning(
         f"**{sub_info['label']}.** Lai turpinātu analizēt datus un modelēt scenārijus, lūdzu aktivizējiet mēneša abonementu sadaļā **Profils → Uzstādījumi un Abonements**."
     )
-    if st.button("Doties uz abonementa aktivizēšanu →", type="primary"):
+    if billing_cfg["stripe_checkout_url"]:
+        st.link_button("💳 Aktivizēt mēneša abonementu (Stripe)", billing_cfg["stripe_checkout_url"], type="primary")
+    elif st.button("Doties uz abonementa aktivizēšanu →", type="primary"):
         S.nav_page = "settings"
         st.rerun()
+    render_app_footer_disclaimer()
     st.stop()
 
 
@@ -2966,14 +3653,164 @@ if sub_info["expired"] and not S.get("is_admin", False) and S.nav_page not in ("
 # === SĀKAS 3/3 DAĻA ===
 
 # ==============================================================================
+# POSMS 0: PIRMREIZĒJĀ PZA IESNIEGŠANA PĀRBAUDEI (2 VARIANTI + ABONEMENTS)
+# ==============================================================================
+if S.nav_page == "submit_pza":
+    st.subheader("Iesniedziet sava uzņēmuma PZA failu pārbaudei")
+    st.caption(
+        "Lai jūsu pirmie rezultāti būtu maksimāli precīzi, mēs pārbaudām katra jaunā uzņēmuma PZA faila struktūru, "
+        "starpsummas un kontu grupēšanu. Augšupielādējiet sava uzņēmuma mēnešu PZA (Excel vai CSV) un izvēlieties vēlamo režīmu."
+    )
+
+    if onboard_status == "PENDING_WAIT":
+        st.success(
+            "Jūsu PZA fails jau ir iesniegts pārbaudei! Kamēr pārbaudām un sakārtojam kontus, varat turpināt darboties **Demo režīmā** "
+            "vai iesniegt atjaunotu failu zemāk."
+        )
+
+    sub_left, sub_right = st.columns([1.85, 1.15], vertical_alignment="top")
+
+    with sub_left:
+        with st.container(border=True):
+            st.markdown("#### 1. Pievienojiet sava uzņēmuma PZA failu")
+            first_pza_file = st.file_uploader(
+                "Peļņas vai zaudējumu aprēķins pa mēnešiem (Excel vai CSV)",
+                type=["xlsx", "xlsm", "xls", "csv"],
+                key="onboarding_pza_uploader",
+            )
+            first_pza_note = st.text_area(
+                "Komentārs vai norādes mūsu speciālistam (neobligāti)",
+                placeholder="Piemēram: Kurā darblapā ir aktuālais PZA, vai kādi specifiski konti, kuriem pievērst uzmanību...",
+                height=78,
+                key="onboarding_pza_note",
+            )
+
+            st.markdown("#### 2. Izvēlieties, kā vēlaties rīkoties pārbaudes laikā")
+            submit_choice = st.radio(
+                "Pārbaudes režīms",
+                options=[
+                    "Nosūtīt pārbaudei un gaidīt rezultātus (Ieteicams — tikmēr darbojos Demo versijā)",
+                    "Nosūtīt pārbaudei un sākt darboties ar savu failu uzreiz",
+                ],
+                key="onboarding_submit_mode_radio",
+            )
+
+            is_immediate_choice = submit_choice.startswith("Nosūtīt pārbaudei un sākt")
+            imm_ack = True
+
+            if is_immediate_choice:
+                st.markdown(
+                    '<div class="disclaimer-urgent-box">'
+                    '<b>⚠️ SVARĪGS BRĪDINĀJUMS (DISCLAIMER)</b><br>'
+                    'Jūsu uzņēmuma PZA faila struktūra vēl <b>nav pārbaudīta un apstiprināta</b>. '
+                    'Sākot darbu uzreiz, automātiskā datu nolasīšana, starpsummu atdalīšana un kontu grupēšana '
+                    '<b>var būt neprecīza vai kļūdaina</b>. Pirms pieņemt jebkādus biznesa lēmumus, sagaidiet mūsu apstiprinājumu! '
+                    'Fails tiks paralēli nosūtīts arī mums pārbaudei.'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+                imm_ack = st.checkbox(
+                    "Saprotu un piekrītu, ka līdz PZA struktūras pārbaudei automātiskā nolasīšana un kontu grupēšana var saturēt kļūdas.",
+                    value=False,
+                    key="onboarding_imm_disclaimer_chk",
+                )
+
+            st.write("")
+            btn_label = (
+                "Nosūtīt pārbaudei un sākt darboties uzreiz →"
+                if is_immediate_choice
+                else "Nosūtīt PZA pārbaudei un turpināt Demo režīmā →"
+            )
+            if st.button(btn_label, type="primary", use_container_width=True, key="onboarding_submit_btn"):
+                if first_pza_file is None:
+                    st.error("Lūdzu vispirms augšupielādējiet sava uzņēmuma PZA failu (Excel vai CSV).")
+                elif is_immediate_choice and not imm_ack:
+                    st.error("Lai sāktu darboties uzreiz bez iepriekšējas pārbaudes, lūdzu atzīmējiet brīdinājuma apstiprinājumu.")
+                else:
+                    raw_bytes = first_pza_file.getvalue()
+                    mode_tag = "IMMEDIATE" if is_immediate_choice else "WAIT"
+                    with st.spinner("Nosūta PZA failu pārbaudei..."):
+                        ok_sub, msg_sub = submit_pza_for_admin_review(
+                            profile,
+                            first_pza_file.name,
+                            raw_bytes,
+                            mode=mode_tag,
+                            user_note=first_pza_note,
+                        )
+                    if ok_sub:
+                        new_status = "PENDING_IMMEDIATE" if is_immediate_choice else "PENDING_WAIT"
+                        update_company_onboarding_status(
+                            admin_store,
+                            S.active_profile,
+                            new_status,
+                            reset_trial_today=is_immediate_choice,
+                        )
+                        if is_immediate_choice:
+                            S.demo_initialized = False
+                            S.pop("result", None)
+                            S.pop("loaded_report_meta", None)
+                            S.preloaded_pza_name = first_pza_file.name
+                            S.preloaded_pza_bytes = raw_bytes
+                            S.nav_page = "ingest"
+                        else:
+                            S.pza_just_submitted = True
+                            S.nav_page = "overview"
+                        st.toast(msg_sub)
+                        st.rerun()
+                    else:
+                        st.error(msg_sub)
+
+        if st.button("← Atgriezties uz Demo apmācību", use_container_width=False, key="back_to_demo_from_sub"):
+            update_company_onboarding_status(admin_store, S.active_profile, "TUTORIAL")
+            S.tutorial_step = 1
+            S.nav_page = "overview"
+            st.rerun()
+
+    with sub_right:
+        with st.container(border=True):
+            st.markdown("#### 💳 Abonements un kartes pievienošana")
+            st.markdown(
+                f"Pēc jūsu pirmā PZA apstiprināšanas jums sāksies **{billing_cfg['trial_days']} dienu bezmaksas izmēģinājums** ar jūsu uzņēmuma datiem."
+            )
+            st.markdown(
+                f"Pēc izmēģinājuma perioda: **{billing_cfg['monthly_price_eur']} €/mēn.** (automātiska apmaksa caur Stripe, "
+                "rēķini uz e-pastu un iespēja atcelt jebkurā brīdī)."
+            )
+            st.caption("Maksājumu karti varat pievienot jau tagad vai arī vēlāk sadaļā **Profils → Uzstādījumi un Abonements**.")
+
+            if billing_cfg["stripe_checkout_url"]:
+                chk_url = billing_cfg["stripe_checkout_url"]
+                if S.get("company_email") and "prefilled_email" not in chk_url:
+                    sep = "&" if "?" in chk_url else "?"
+                    chk_url = f"{chk_url}{sep}prefilled_email={S['company_email']}"
+                st.link_button("💳 Pievienot karti / Aktivizēt abonementu", chk_url, type="primary", use_container_width=True)
+            else:
+                st.info(f"Karšu apmaksas saite tiks pieslēgta drīzumā. Jautājumiem: **{billing_cfg['support_email']}**")
+
+        with st.container(border=True):
+            st.markdown("#### 🔒 Datu drošība")
+            st.caption(
+                "Jūsu augšupielādētais PZA fails tiek izmantots tikai jūsu profila iestatīšanai un analīzei. "
+                "Uzņēmuma finanšu dati nekad netiek izmantoti MI modeļu apmācībai."
+            )
+
+
+# ==============================================================================
 # POSMS 1: PĀRSKATS (OVERVIEW) — 14/15 MĒNEŠU SLIEKSNIS + FIKSĒTAS KOLONNAS
 # ==============================================================================
-if S.nav_page == "overview":
+elif S.nav_page == "overview":
+    if S.pop("pza_just_submitted", False):
+        st.success(
+            "Paldies! Jūsu PZA fails ir veiksmīgi nosūtīts pārbaudei. Tiklīdz būsim pārbaudījuši un sakārtojuši kontus, "
+            "jūsu profils tiks aktivizēts. Tikmēr varat brīvi izpētīt Demo versiju!"
+        )
+
     if "result" not in S or S.result is None:
         st.info("Šajā profilā vēl nav nevienas saglabātas atskaites. Pārejiet uz sadaļu **+ Jauns PZA**, lai augšupielādētu pirmo PZA failu.")
         if st.button("Doties uz PZA faila augšupielādi →", type="primary"):
             S.nav_page = "ingest"
             st.rerun()
+        render_app_footer_disclaimer()
         st.stop()
 
     res = apply_custom_row_order_to_result(strip_excluded_rows(S.result))
@@ -3012,6 +3849,22 @@ if S.nav_page == "overview":
         else:
             S.working_period_preset = "Manuāla mēnešu izlase"
 
+    # Apmācības izcēlums 1. un 5. solim
+    if not S.get("is_admin", False) and onboard_status == "TUTORIAL":
+        t_step_now = int(S.get("tutorial_step", 1))
+        if t_step_now == 1:
+            st.markdown(
+                '<div class="tut-highlight-zone">👇 <b>1. soļa fokuss:</b> Šeit izvēlaties <b>Aktīvo darba periodu</b> '
+                '(tas pats periods darbosies arī Simulācijā) un redzat galveno TOC tabulu ar <b>S, TVC, T, OE, NP</b> un produktivitātes rādītājiem.</div>',
+                unsafe_allow_html=True,
+            )
+        elif t_step_now == 5:
+            st.markdown(
+                '<div class="tut-highlight-zone">👆 <b>5. soļa fokuss:</b> Augšējā labajā stūrī nospiediet <b>Asistents</b> — '
+                'pajautājiet, piemēram: <i>"Kāpēc aprīlī vai maijā mainījās PR?"</i> vai <i>"Sakārto OE izmaksas dilstošā secībā"</i>!</div>',
+                unsafe_allow_html=True,
+            )
+
     bar_c1, bar_c2, bar_c3, bar_c4, _ = st.columns([1.4, 1.2, 1.45, 1.1, 0.85], vertical_alignment="bottom")
     with bar_c1:
         st.selectbox(
@@ -3041,43 +3894,46 @@ if S.nav_page == "overview":
     view_res = filter_result_by_months(res, fin_selected_months, all_months)
 
     with bar_c3:
-        save_btn_lbl = "💾 Saglabāt izmaiņas / Versiju" if S.get("has_unsaved_changes") else "Saglabāt skatu / Versiju"
-        with st.popover(save_btn_lbl, use_container_width=True):
-            st.markdown("**Saglabāt pašreizējo pārskatu**")
-            st.caption(
-                "Oriģinālā atskaite arhīvā vienmēr paliek drošībā! Šeit varat saglabāt savas kontu izmaiņas vai izvēlēto mēnešu periodu kā **jaunu atskaites versiju** vai atjaunināt esošo."
-            )
-            default_ver_name = (
-                f"{active_rep_label} ({fin_selected_months[0]}–{fin_selected_months[-1]})"
-                if len(fin_selected_months) < len(all_months)
-                else f"{active_rep_label} (v2)"
-            )
-            new_ver_name_in = st.text_input("Nosaukums jaunai versijai", value=default_ver_name, key="ov_save_ver_name")
-            save_scope = st.radio(
-                "Ko iekļaut saglabātajā atskaitē?",
-                options=[
-                    f"Tikai izvēlēto darba periodu ({len(fin_selected_months)} mēn.)",
-                    f"Visus faila mēnešus ({len(all_months)} mēn.)",
-                ],
-                key="ov_save_scope_radio",
-            )
-            target_res_obj = view_res if save_scope.startswith("Tikai") else res
+        if is_demo_mode:
+            st.button("Demo skats (bez saglabāšanas)", disabled=True, use_container_width=True)
+        else:
+            save_btn_lbl = "💾 Saglabāt izmaiņas / Versiju" if S.get("has_unsaved_changes") else "Saglabāt skatu / Versiju"
+            with st.popover(save_btn_lbl, use_container_width=True):
+                st.markdown("**Saglabāt pašreizējo pārskatu**")
+                st.caption(
+                    "Oriģinālā atskaite arhīvā vienmēr paliek drošībā! Šeit varat saglabāt savas kontu izmaiņas vai izvēlēto mēnešu periodu kā **jaunu atskaites versiju** vai atjaunināt esošo."
+                )
+                default_ver_name = (
+                    f"{active_rep_label} ({fin_selected_months[0]}–{fin_selected_months[-1]})"
+                    if len(fin_selected_months) < len(all_months)
+                    else f"{active_rep_label} (v2)"
+                )
+                new_ver_name_in = st.text_input("Nosaukums jaunai versijai", value=default_ver_name, key="ov_save_ver_name")
+                save_scope = st.radio(
+                    "Ko iekļaut saglabātajā atskaitē?",
+                    options=[
+                        f"Tikai izvēlēto darba periodu ({len(fin_selected_months)} mēn.)",
+                        f"Visus faila mēnešus ({len(all_months)} mēn.)",
+                    ],
+                    key="ov_save_scope_radio",
+                )
+                target_res_obj = view_res if save_scope.startswith("Tikai") else res
 
-            if st.button("➕ Saglabāt kā JAUNU atskaiti (vecā paliek arhīvā)", type="primary", use_container_width=True):
-                ok_sv, _ = save_report_as_new_or_update(profile, target_res_obj, new_ver_name_in.strip())
-                if ok_sv:
-                    if save_scope.startswith("Tikai"):
-                        S.result = view_res
-                        S.pop("working_months_active", None)
-                        S.pop("working_period_preset", None)
-                    st.toast(f"Jauna atskaites versija '{new_ver_name_in}' saglabāta! Vecā versija joprojām ir atrodama arhīvā.")
-                    st.rerun()
+                if st.button("➕ Saglabāt kā JAUNU atskaiti (vecā paliek arhīvā)", type="primary", use_container_width=True):
+                    ok_sv, _ = save_report_as_new_or_update(profile, target_res_obj, new_ver_name_in.strip())
+                    if ok_sv:
+                        if save_scope.startswith("Tikai"):
+                            S.result = view_res
+                            S.pop("working_months_active", None)
+                            S.pop("working_period_preset", None)
+                        st.toast(f"Jauna atskaites versija '{new_ver_name_in}' saglabāta! Vecā versija joprojām ir atrodama arhīvā.")
+                        st.rerun()
 
-            if S.get("current_report_id") and st.button("🔄 Pārrakstīt pašreizējo atskaiti", use_container_width=True):
-                ok_up, _ = save_report_as_new_or_update(profile, target_res_obj, active_rep_label)
-                if ok_up:
-                    st.toast(f"Atskaite '{active_rep_label}' atjaunināta!")
-                    st.rerun()
+                if S.get("current_report_id") and st.button("🔄 Pārrakstīt pašreizējo atskaiti", use_container_width=True):
+                    ok_up, _ = save_report_as_new_or_update(profile, target_res_obj, active_rep_label)
+                    if ok_up:
+                        st.toast(f"Atskaite '{active_rep_label}' atjaunināta!")
+                        st.rerun()
 
     with bar_c4:
         with st.popover("Lejupielādēt Excel", use_container_width=True):
@@ -3240,7 +4096,6 @@ if S.nav_page == "overview":
                     show_cum_table = False
 
                 else:
-                    # Visi mēneši (ritināms ar fiksētām malām — Rādītājs kreisajā un KOPĀ/AVG labajā pusē ir sasaldēti!)
                     st.caption("Ritiniet mēnešus horizontāli — **Rādītāju nosaukumi** (pa kreisi) un **Perioda KOPĀ / AVG** (pa labi) paliek fiksēti!")
                     use_freeze_sides = True
 
@@ -3258,6 +4113,13 @@ if S.nav_page == "overview":
         ),
         unsafe_allow_html=True,
     )
+
+    if not S.get("is_admin", False) and onboard_status == "TUTORIAL" and int(S.get("tutorial_step", 1)) == 2:
+        st.markdown(
+            '<div class="tut-highlight-zone">👇 <b>2. soļa fokuss:</b> Šeit redzama <b>Galveno rādītāju dinamika</b> (var pārslēgt uz <i>Uzkrājošie rādītāji</i>), '
+            'kā arī <b>Produktivitātes</b> un <b>Algu atdeves</b> grafiki. Zemāk varat nospiest <b>Pieprasīt eksperta ieteikumus</b>!</div>',
+            unsafe_allow_html=True,
+        )
 
     render_overview_charts(view_res.amounts, view_res.kpi, fy_start_month=S.get("fy_start_month", 1))
 
@@ -3309,7 +4171,7 @@ if S.nav_page == "overview":
                 u_c = getattr(r, "usage", None)
                 tok_c = (getattr(u_c, "input_tokens", 800) + getattr(u_c, "output_tokens", 800)) if u_c else 1600
                 profile.log_api_usage(tok_c, tok_c * 0.000009)
-                if S.get("current_report_id"):
+                if S.get("current_report_id") and not is_demo_mode:
                     packed_c = pack_commentary_with_account_details(S.commentary, S.get("loaded_account_details"))
                     profile.update_report_commentary(S.current_report_id, packed_c)
                     st.toast("TOC eksperta ieteikumi saglabāti pie atskaites!")
@@ -3320,21 +4182,23 @@ if S.nav_page == "overview":
     if S.get("commentary"):
         with st.container(border=True):
             st.markdown(S.commentary)
-            with st.expander("Rediģēt vai papildināt TOC eksperta ieteikumus un saglabāt", expanded=False):
-                edited_comm = st.text_area("Ieteikumu teksts", value=S.commentary, height=240)
-                if st.button("Saglabāt ieteikumus atskaitē", type="primary"):
-                    S.commentary = edited_comm
-                    if S.get("current_report_id"):
-                        packed_c = pack_commentary_with_account_details(edited_comm, S.get("loaded_account_details"))
-                        profile.update_report_commentary(S.current_report_id, packed_c)
-                        if S.get("loaded_report_meta"):
-                            S.loaded_report_meta["commentary"] = packed_c
-                        st.success("Ieteikumi saglabāti datubāzē!")
-                    else:
-                        st.toast("Ieteikumi atjaunināti sesijā.")
-                    st.rerun()
+            st.caption(LEGAL_DISCLAIMER_SHORT)
+            if not is_demo_mode:
+                with st.expander("Rediģēt vai papildināt TOC eksperta ieteikumus un saglabāt", expanded=False):
+                    edited_comm = st.text_area("Ieteikumu teksts", value=S.commentary, height=240)
+                    if st.button("Saglabāt ieteikumus atskaitē", type="primary"):
+                        S.commentary = edited_comm
+                        if S.get("current_report_id"):
+                            packed_c = pack_commentary_with_account_details(edited_comm, S.get("loaded_account_details"))
+                            profile.update_report_commentary(S.current_report_id, packed_c)
+                            if S.get("loaded_report_meta"):
+                                S.loaded_report_meta["commentary"] = packed_c
+                            st.success("Ieteikumi saglabāti datubāzē!")
+                        else:
+                            st.toast("Ieteikumi atjaunināti sesijā.")
+                        st.rerun()
     else:
-        st.caption("Nospiediet pogu **Pieprasīt eksperta ieteikumus**, lai saņemtu un saglabātu TOC diagnostiku.")
+        st.caption("Nospiediet pogu **Pieprasīt eksperta ieteikumus**, lai saņemtu TOC diagnostiku par izvēlēto periodu.")
 
 
 # ==============================================================================
@@ -3344,7 +4208,16 @@ elif S.nav_page == "simulation":
     st.subheader("Scenāriju simulācija un Jauns projekts")
     if "result" not in S or S.result is None:
         st.info("Vispirms ielādējiet vai izveidojiet finanšu atskaiti, lai veiktu simulāciju.")
+        render_app_footer_disclaimer()
         st.stop()
+
+    if not S.get("is_admin", False) and onboard_status == "TUTORIAL" and int(S.get("tutorial_step", 1)) == 4:
+        st.markdown(
+            '<div class="tut-highlight-zone">👇 <b>4. soļa fokuss:</b> Aprakstiet izmaiņas tekstā (vai ar balsi), '
+            'veiciet dubultklikšķi tabulā uz <b>Izmaiņa %</b> / <b>Izmaiņa +/- €</b> vai pievienojiet <b>Jaunu produktu</b> — '
+            'tabula zemāk uzreiz pārrēķinās T, NP un PR!</div>',
+            unsafe_allow_html=True,
+        )
 
     res = apply_custom_row_order_to_result(strip_excluded_rows(S.result))
     all_months = [c for c in res.amounts.columns if not ("YTD" in c or "AVG" in c or "KOPĀ" in c or "TOTAL" in c)]
@@ -3808,55 +4681,66 @@ elif S.nav_page == "simulation":
     )
 
     st.markdown("---")
-    sv_c1, sv_c2 = st.columns([2, 1], vertical_alignment="bottom")
-    with sv_c1:
-        sim_save_name = st.text_input(
-            "Simulācijas nosaukums saglabāšanai",
-            value=f"Simulācija ({datetime.now().strftime('%d.%m.%Y %H:%M')})",
-        )
-    with sv_c2:
-        if st.button("Saglabāt simulāciju arhīvā", type="primary", use_container_width=True):
-            sim_payload_json = json.dumps(
-                {
-                    "pct_changes": pct_changes,
-                    "eur_changes": eur_changes,
-                    "situation_description": str(S.get("sim_situation_text") or "").strip(),
-                    "selected_months": selected_months,
-                    "new_product": {
-                        "enabled": np_enable,
-                        "name": S.get("np_name", ""),
-                        "s_eur": np_s_val,
-                        "tvc_mat_eur": np_mat_val,
-                        "tvc_deliv_eur": np_deliv_val,
+    if is_demo_mode:
+        st.caption("Demo režīmā simulāciju var brīvi testēt; simulāciju saglabāšana arhīvā būs pieejama pēc jūsu uzņēmuma PZA aktivizēšanas.")
+    else:
+        sv_c1, sv_c2 = st.columns([2, 1], vertical_alignment="bottom")
+        with sv_c1:
+            sim_save_name = st.text_input(
+                "Simulācijas nosaukums saglabāšanai",
+                value=f"Simulācija ({datetime.now().strftime('%d.%m.%Y %H:%M')})",
+            )
+        with sv_c2:
+            if st.button("Saglabāt simulāciju arhīvā", type="primary", use_container_width=True):
+                sim_payload_json = json.dumps(
+                    {
+                        "pct_changes": pct_changes,
+                        "eur_changes": eur_changes,
+                        "situation_description": str(S.get("sim_situation_text") or "").strip(),
+                        "selected_months": selected_months,
+                        "new_product": {
+                            "enabled": np_enable,
+                            "name": S.get("np_name", ""),
+                            "s_eur": np_s_val,
+                            "tvc_mat_eur": np_mat_val,
+                            "tvc_deliv_eur": np_deliv_val,
+                        },
                     },
-                },
-                ensure_ascii=False,
-            )
-            ok_s, _ = profile.save_report(
-                report_name=sim_save_name.strip() or "Simulācija",
-                file_name="SIM::SCENARIO",
-                res_obj=res,
-                commentary=sim_payload_json,
-            )
-            if ok_s:
-                st.toast("Simulācija un situācijas apraksts saglabāts arhīvā!")
-                st.rerun()
-            else:
-                st.error(f"Neizdevās saglabāt simulāciju: {profile.last_error}")
+                    ensure_ascii=False,
+                )
+                ok_s, _ = profile.save_report(
+                    report_name=sim_save_name.strip() or "Simulācija",
+                    file_name="SIM::SCENARIO",
+                    res_obj=res,
+                    commentary=sim_payload_json,
+                )
+                if ok_s:
+                    st.toast("Simulācija un situācijas apraksts saglabāts arhīvā!")
+                    st.rerun()
+                else:
+                    st.error(f"Neizdevās saglabāt simulāciju: {profile.last_error}")
 
 
 # ==============================================================================
 # POSMS 3: KONTU STRUKTŪRA
 # ==============================================================================
 elif S.nav_page == "accounts_explorer":
+    if not S.get("is_admin", False) and onboard_status == "TUTORIAL" and int(S.get("tutorial_step", 1)) == 3:
+        st.markdown(
+            '<div class="tut-highlight-zone">👇 <b>3. soļa fokuss:</b> Augšējā vadības panelī varat pārvietot kontus, '
+            'apvienot, izveidot vai pārdēvēt apakšgrupas, bet zemāk — atvērt jebkuru apakšgrupu un apskatīt katru PZA kontu!</div>',
+            unsafe_allow_html=True,
+        )
+
     top_exp_c1, top_exp_c2 = st.columns([2.8, 1.2], vertical_alignment="center")
     with top_exp_c1:
         st.subheader("Kontu struktūra un Apakšgrupu vadība")
         st.caption(
-            f"Aktīvā atskaite: **{active_rep_label}** — visas izmaiņas varat saglabāt kā jaunu versiju vai atjaunināt esošo."
+            f"Aktīvā atskaite: **{active_rep_label}**"
+            + (" *(Demo parauga dati — izmaiņas ir īslaicīgas izmēģinājumam)*" if is_demo_mode else " — visas izmaiņas varat saglabāt kā jaunu versiju vai atjaunināt esošo.")
         )
     with top_exp_c2:
-        if S.get("has_unsaved_changes"):
+        if S.get("has_unsaved_changes") and not is_demo_mode:
             with st.popover("💾 Saglabāt veiktās izmaiņas", use_container_width=True):
                 st.markdown("**Saglabāt kontu un apakšgrupu izmaiņas**")
                 ver_nm_exp = st.text_input("Nosaukums jaunai versijai", value=f"{active_rep_label} (rediģēts)", key="exp_save_ver_nm")
@@ -3873,7 +4757,7 @@ elif S.nav_page == "accounts_explorer":
 
     has_live_pza = ("cls_df" in S and S.cls_df is not None and not S.cls_df.empty and "analysis" in S and S.analysis is not None)
     snap_details: list[dict] = S.get("loaded_account_details") or []
-    saved_maps = profile.list_saved_mappings()
+    saved_maps = [] if is_demo_mode else profile.list_saved_mappings()
     res_for_exp = S.get("result")
     res_month_cols = (
         [c for c in res_for_exp.amounts.columns if not ("YTD" in str(c).upper() or "AVG" in str(c).upper() or "KOPĀ" in str(c).upper())]
@@ -3883,6 +4767,7 @@ elif S.nav_page == "accounts_explorer":
 
     if not has_live_pza and not snap_details and not saved_maps:
         st.info("Šajā profilā vēl nav saglabātu kontu. Augšupielādējiet PZA failu sadaļā **+ Jauns PZA**.")
+        render_app_footer_disclaimer()
         st.stop()
 
     if has_live_pza:
@@ -4289,15 +5174,27 @@ elif S.nav_page == "ingest":
 
     uploaded = st.file_uploader("Augšupielādējiet PZA failu (CSV vai Excel)", type=["csv", "xlsx", "xlsm", "xls"])
 
-    if uploaded is None:
+    active_file_name = None
+    active_file_bytes = None
+    if uploaded is not None:
+        active_file_name = uploaded.name
+        active_file_bytes = uploaded.getvalue()
+        S.pop("preloaded_pza_name", None)
+        S.pop("preloaded_pza_bytes", None)
+    elif S.get("preloaded_pza_bytes") and S.get("preloaded_pza_name"):
+        active_file_name = S["preloaded_pza_name"]
+        active_file_bytes = S["preloaded_pza_bytes"]
+        st.info(f"Tiek apstrādāts jūsu tikko iesūtītais PZA fails: **{active_file_name}**")
+
+    if active_file_bytes is None or active_file_name is None:
         st.info("Augšupielādējiet PZA failu, lai sāktu strukturēšanu un kontu klasifikāciju.")
+        render_app_footer_disclaimer()
         st.stop()
 
-    data = uploaded.getvalue()
-    fid = hashlib.md5(data).hexdigest()
+    fid = hashlib.md5(active_file_bytes).hexdigest()
     if S.get("fid") != fid:
         S.fid = fid
-        S.grids = load_grids(uploaded.name, data)
+        S.grids = load_grids(active_file_name, active_file_bytes)
         S.pop("structure", None)
         S.pop("analysis", None)
         S.pop("cls_df", None)
@@ -4443,6 +5340,7 @@ elif S.nav_page == "ingest":
                     st.rerun()
                 except Exception as e:
                     st.error(f"Kļūda klasifikācijā: {e}")
+        render_app_footer_disclaimer()
         st.stop()
 
     cls_df: pd.DataFrame = S.cls_df.copy()
@@ -4524,6 +5422,7 @@ elif S.nav_page == "ingest":
             S.clarifications_done = True
             S.editor_v = S.get("editor_v", 0) + 1
             st.rerun()
+        render_app_footer_disclaimer()
         st.stop()
 
     st.markdown("#### Kontu sadalījums pa Lielajām grupām un Apakšgrupām")
@@ -4635,7 +5534,7 @@ elif S.nav_page == "ingest":
 
     st.markdown("#### 2. Aprēķins un saglabāšana")
 
-    default_rep_name = f"{Path(uploaded.name).stem} ({datetime.now().strftime('%d.%m.%Y')})"
+    default_rep_name = f"{Path(active_file_name).stem} ({datetime.now().strftime('%d.%m.%Y')})"
     col_rn, col_btn = st.columns([2, 1], vertical_alignment="bottom")
     with col_rn:
         report_custom_name = st.text_input("Atskaites nosaukums", value=default_rep_name)
@@ -4666,6 +5565,8 @@ elif S.nav_page == "ingest":
         S.pop("working_period_preset", None)
         S.pop("ov_page_year", None)
         S.pop("ov_chunk_idx", None)
+        S.pop("preloaded_pza_name", None)
+        S.pop("preloaded_pza_bytes", None)
 
         acc_snapshot = build_account_details_snapshot(an.leaves, cls_sorted, an.ex.period_cols)
         S.loaded_account_details = acc_snapshot
@@ -4675,7 +5576,7 @@ elif S.nav_page == "ingest":
             packed_init_comm = pack_commentary_with_account_details("", acc_snapshot)
             ok_rep, rep_id = profile.save_report(
                 report_name=report_custom_name.strip() or default_rep_name,
-                file_name=uploaded.name,
+                file_name=active_file_name,
                 res_obj=res,
                 commentary=packed_init_comm,
             )
@@ -4684,7 +5585,7 @@ elif S.nav_page == "ingest":
             S.loaded_report_meta = {
                 "id": rep_id,
                 "report_name": report_custom_name.strip() or default_rep_name,
-                "file_name": uploaded.name,
+                "file_name": active_file_name,
                 "periods_label": f"{len(an.ex.period_cols)} periodi",
             }
             if ok_map and ok_rep:
@@ -4696,14 +5597,14 @@ elif S.nav_page == "ingest":
 
 
 # ==============================================================================
-# POSMS 6: PAR THRUVIA (PRIEKŠVARDS, INSTRUKCIJA PA SOĻIEM UN BUJ)
+# POSMS 6: PAR THRUVIA (PRIEKŠVARDS, INSTRUKCIJA, BUJ UN JURIDISKIE NOTEIKUMI)
 # ==============================================================================
 elif S.nav_page == "about":
-    render_about_and_help_page()
+    render_about_and_help_page(is_public_view=False)
 
 
 # ==============================================================================
-# POSMS 7: UZSTĀDĪJUMI UN ABONEMENTS (BEZ KVOTĀM UN PAKALPOJUMU KARTĪTĒM)
+# POSMS 7: UZSTĀDĪJUMI UN ABONEMENTS
 # ==============================================================================
 elif S.nav_page == "settings":
     st.subheader(f"Uzstādījumi un Abonements ({S.active_profile})")
@@ -4719,6 +5620,7 @@ elif S.nav_page == "settings":
     with st.container(border=True):
         st.markdown("#### 2. Abonements un apmaksa")
         st.markdown(f"**Pašreizējais statuss:** `{sub_info['label']}`")
+        st.markdown(f"**PZA pārbaudes statuss:** `{ONBOARD_LABELS_LV.get(onboard_status, onboard_status)}`")
         st.caption(
             f"THRUVIA mēneša abonements: **{billing_cfg['monthly_price_eur']} €/mēn.** (automātiska karšu apmaksa caur Stripe, "
             f"rēķini uz e-pastu un iespēja atcelt jebkurā brīdī)."
@@ -4796,5 +5698,12 @@ elif S.nav_page == "settings":
                         st.success("Parole veiksmīgi nomainīta!")
                     else:
                         st.error(msg_pw)
+
+    with st.expander("Juridiskie noteikumi, Privātuma politika (VDAR) un Atbildības ierobežojums"):
+        render_legal_documents_tabs()
+
+
+# ------------------------------------------------------------------ JURIDISKĀ KĀJENE VISĀS LAPĀS
+render_app_footer_disclaimer()
 
 # === BEIDZAS 3/3 DAĻA (FAILA BEIGAS) ===
