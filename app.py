@@ -1,6 +1,6 @@
 """
-app.py — THRUVIA: Finanšu analīzes un vadības lēmumu modelēšanas sistēma (v26.6)
-Moderns biznesa UI (Dark/Light safe) | TOC Ievadlapa | 8 soļu inline Demo | CRM Klientu kartītes Admin panelī
+app.py — THRUVIA: Finanšu analīzes un vadības lēmumu modelēšanas sistēma (v26.7)
+Sinhronizēta tabulu ritināšana | Moduļi (Ventiļi, Investīcijas I, Noliktava I) | Izmaiņu vēsture | CRM Admin
 Project ID: amprqueamdcxpjufigvm
 """
 from __future__ import annotations
@@ -68,7 +68,7 @@ LEGAL_DISCLAIMER_SHORT = (
     "un neuzņemas atbildību par lēmumiem, kas pieņemti, balstoties uz sistēmas aprēķiniem."
 )
 
-# Pārsaucam EXCLUDED grupu par plašāku, korektu nosaukumu
+# Pārsaucam EXCLUDED grupu un reģistrējam atsevišķo Investīciju (I) grupu ārpus OE
 EXCLUDED_LABEL = "Neiekļautie konti (ārpus TOC aprēķina)"
 _old_excl_lbl = SUBGROUP_LABELS.get("EXCLUDED")
 if _old_excl_lbl and _old_excl_lbl != EXCLUDED_LABEL:
@@ -76,6 +76,12 @@ if _old_excl_lbl and _old_excl_lbl != EXCLUDED_LABEL:
 GROUPS["EXCLUDED"] = (EXCLUDED_LABEL, "EXCL")
 SUBGROUP_LABELS["EXCLUDED"] = EXCLUDED_LABEL
 LABEL_TO_KEY[EXCLUDED_LABEL] = "EXCLUDED"
+
+INVESTMENT_LABEL = "Investīcijas (I — ārpus OE)"
+GROUPS["INV_CAPEX"] = (INVESTMENT_LABEL, "INV")
+SUBGROUP_LABELS["INV_CAPEX"] = INVESTMENT_LABEL
+LABEL_TO_KEY[INVESTMENT_LABEL] = "INV_CAPEX"
+MAIN_GROUP_TO_DEFAULT_SUB["INV"] = "INV_CAPEX"
 
 if "T_CHILD" not in FILLS:
     FILLS["T_CHILD"] = ("DAEEF3", False, "000000")
@@ -114,6 +120,12 @@ if "OE_OPER_OTHER" in GROUPS:
     if _dup_lbl:
         LABEL_TO_KEY.pop(_dup_lbl, None)
 
+WAREHOUSE_CATEGORIES = [
+    ("raw", "Izejvielas un materiāli"),
+    ("wip", "Nepabeigtie ražojumi (WIP)"),
+    ("finished", "Gatavā produkcija / Preces"),
+]
+
 
 def now_riga() -> datetime:
     try:
@@ -126,9 +138,9 @@ def fmt_iso_dt_lv(iso_str: str | None) -> str:
     s = str(iso_str or "").strip()
     if not s:
         return "—"
-    for fmt in ("%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+    for fmt, slen in (("%Y-%m-%dT%H:%M", 16), ("%Y-%m-%d %H:%M", 16), ("%Y-%m-%d", 10)):
         try:
-            dt = datetime.strptime(s[: len(fmt.replace("%Y", "2026").replace("%m", "01").replace("%d", "01").replace("%H", "00").replace("%M", "00"))], fmt)
+            dt = datetime.strptime(s[:slen], fmt)
             return dt.strftime("%d.%m.%Y. %H:%M") if "H" in fmt else dt.strftime("%d.%m.%Y.")
         except Exception:
             pass
@@ -176,6 +188,15 @@ MAIN_GROUP_OPTIONS = [
     "Neiekļaut (ārpus TOC aprēķina)",
 ]
 
+INVESTMENT_MAIN_OPTION = "Investīcijas (I — ārpus OE)"
+
+
+def get_active_main_group_options(include_investments: bool = False) -> list[str]:
+    if include_investments:
+        return MAIN_GROUP_OPTIONS[:3] + [INVESTMENT_MAIN_OPTION, MAIN_GROUP_OPTIONS[3]]
+    return list(MAIN_GROUP_OPTIONS)
+
+
 GROUP_SORT_ORDER = {
     "S": 1,
     "S_REV": 1,
@@ -192,6 +213,7 @@ GROUP_SORT_ORDER = {
     "OE_ADMIN_OTHER": 12,
     "OE_SALES_OTHER": 13,
     "OE_OTHER": 14,
+    "INV_CAPEX": 90,
     "EXCLUDED": 99,
 }
 
@@ -218,6 +240,8 @@ def get_main_cat(group_key: str) -> str:
         return MAIN_GROUP_OPTIONS[0]
     if code == "TVC":
         return MAIN_GROUP_OPTIONS[1]
+    if code == "INV":
+        return INVESTMENT_MAIN_OPTION
     if code == "EXCL":
         return MAIN_GROUP_OPTIONS[3]
     return MAIN_GROUP_OPTIONS[2]
@@ -444,7 +468,6 @@ def update_company_onboarding_status(
     mark_login: bool = False,
     mark_activity: bool = False,
 ) -> tuple[bool, datetime | None]:
-    """Atjaunina klienta statusu un aktivitātes laikus, saglabājot visus pārējos metadatus."""
     all_c = admin_store.list_all_companies_admin()
     cur_c = next((c for c in all_c if c["company_name"] == company_name), None)
     if not cur_c:
@@ -534,13 +557,12 @@ def update_company_onboarding_status(
 
 
 def parse_subscription_status(notes: str | None, trial_days: int = 5) -> dict:
-    """Aprēķina abonementa statusu, atlikušās dienas/stundas un precīzu pirmās iekasēšanas datumu + laiku."""
     s = str(notes or "")
     if "PLAN:ACTIVE" in s.upper():
         paid_s = extract_note_field(s, "PAID_SINCE")
         return {
             "code": "ACTIVE",
-            "label": f"Aktīvs mēneša abonements" + (f" (kopš {fmt_iso_dt_lv(paid_s)})" if paid_s else ""),
+            "label": "Aktīvs mēneša abonements" + (f" (kopš {fmt_iso_dt_lv(paid_s)})" if paid_s else ""),
             "days_left": None,
             "time_left_str": "",
             "first_charge_str": "",
@@ -618,6 +640,257 @@ def parse_subscription_status(notes: str | None, trial_days: int = 5) -> dict:
         "time_left_str": "",
         "first_charge_str": "",
         "expired": False,
+    }
+
+
+# ------------------------------------------------------------------ MODUĻU (VENTIĻI, INVESTĪCIJAS, NOLIKTAVA) UN VĒSTURES GLABĀŠANA
+def default_workspace_cfg() -> dict:
+    return {
+        "modules": {"valves": False, "investments": False, "warehouse": False},
+        "valves": {},  # {oe_row_label: {month_label: limit_eur, "__default__": default_eur}}
+        "investments": {"manual": []},  # [{"id": ..., "name": ..., "month": ..., "amount": ..., "note": ...}]
+        "warehouse": {
+            "categories": {"raw": True, "wip": False, "finished": True},
+            "values": {},  # {cat_key: {month_label: eur_val}}
+        },
+        "audit_log": [],  # [{"ts": ..., "actor": ..., "section": ..., "item": ..., "old": ..., "new": ..., "note": ...}]
+    }
+
+
+def _merge_workspace_cfg(raw: dict | None) -> dict:
+    base = default_workspace_cfg()
+    if not isinstance(raw, dict):
+        return base
+    if isinstance(raw.get("modules"), dict):
+        for k in ("valves", "investments", "warehouse"):
+            base["modules"][k] = bool(raw["modules"].get(k, False))
+    if isinstance(raw.get("valves"), dict):
+        base["valves"] = raw["valves"]
+    if isinstance(raw.get("investments"), dict) and isinstance(raw["investments"].get("manual"), list):
+        base["investments"]["manual"] = raw["investments"]["manual"]
+    if isinstance(raw.get("warehouse"), dict):
+        if isinstance(raw["warehouse"].get("categories"), dict):
+            for ck, _ in WAREHOUSE_CATEGORIES:
+                base["warehouse"]["categories"][ck] = bool(raw["warehouse"]["categories"].get(ck, base["warehouse"]["categories"][ck]))
+        if isinstance(raw["warehouse"].get("values"), dict):
+            base["warehouse"]["values"] = raw["warehouse"]["values"]
+    if isinstance(raw.get("audit_log"), list):
+        base["audit_log"] = raw["audit_log"][:500]
+    return base
+
+
+def load_workspace_cfg(profile_store: SupabaseProfileStore, all_reports: list[dict]) -> dict:
+    """Ielādē profila moduļu iestatījumus, ventiļus, investīcijas, noliktavu un izmaiņu vēsturi."""
+    S_loc = st.session_state
+    prof_key = str(S_loc.get("active_profile", ""))
+    if S_loc.get("ws_cfg_loaded_for") == prof_key and isinstance(S_loc.get("ws_cfg"), dict):
+        return S_loc["ws_cfg"]
+
+    meta_rows = [r for r in all_reports if str(r.get("file_name", "")) == "META::WORKSPACE_CFG"]
+    if meta_rows:
+        rep_id = meta_rows[0]["id"]
+        loaded = profile_store.load_report(rep_id)
+        parsed = None
+        if loaded and loaded.get("commentary"):
+            try:
+                parsed = json.loads(loaded["commentary"])
+            except Exception:
+                parsed = None
+        cfg = _merge_workspace_cfg(parsed)
+        S_loc["ws_cfg_rep_id"] = rep_id
+    else:
+        cfg = default_workspace_cfg()
+        S_loc["ws_cfg_rep_id"] = None
+
+    S_loc["ws_cfg"] = cfg
+    S_loc["ws_cfg_loaded_for"] = prof_key
+    return cfg
+
+
+def save_workspace_cfg(profile_store: SupabaseProfileStore, cfg: dict) -> bool:
+    """Saglabā moduļu iestatījumus un izmaiņu vēsturi Supabase (bez SQL shēmas maiņas)."""
+    S_loc = st.session_state
+    S_loc["ws_cfg"] = cfg
+    if S_loc.get("is_demo_mode", False) or not profile_store.is_connected:
+        return True
+    try:
+        payload = json.dumps(cfg, ensure_ascii=False)
+        rep_id = S_loc.get("ws_cfg_rep_id")
+        if rep_id:
+            profile_store.update_report_commentary(rep_id, payload)
+            return True
+        dummy_am = pd.DataFrame({"Cfg": [0.0]}, index=["S"])
+        dummy_main = pd.DataFrame({"Cfg": [0.0], "%|Cfg": [0.0]}, index=["S"])
+        dummy_kpi = pd.DataFrame({"Cfg": [0.0]}, index=["PR = T/OE"])
+        dummy_res = LoadedReportResult(
+            amounts=dummy_am, main=dummy_main, kpi=dummy_kpi,
+            row_kinds={"S": "S"}, reconciliation=pd.DataFrame(), by_group={},
+        )
+        ok_s, new_id = profile_store.save_report(
+            report_name="[SISTĒMA] Moduļi un izmaiņu vēsture",
+            file_name="META::WORKSPACE_CFG",
+            res_obj=dummy_res,
+            commentary=payload,
+        )
+        if ok_s and new_id:
+            S_loc["ws_cfg_rep_id"] = new_id
+        return ok_s
+    except Exception:
+        return False
+
+
+def get_current_actor_label() -> str:
+    S_loc = st.session_state
+    if S_loc.get("is_admin", False):
+        return f"Administrators ({S_loc.get('active_profile', '')})"
+    cont = str(S_loc.get("company_contact") or "").strip()
+    prof = str(S_loc.get("active_profile") or "").strip()
+    return f"{cont} ({prof})" if cont else prof
+
+
+def append_audit_event(
+    profile_store: SupabaseProfileStore,
+    section: str,
+    item: str,
+    old_val: str,
+    new_val: str,
+    note: str = "",
+    persist: bool = True,
+) -> None:
+    S_loc = st.session_state
+    cfg = S_loc.get("ws_cfg")
+    if not isinstance(cfg, dict):
+        cfg = default_workspace_cfg()
+        S_loc["ws_cfg"] = cfg
+    entry = {
+        "ts": now_riga().strftime("%d.%m.%Y. %H:%M"),
+        "actor": get_current_actor_label(),
+        "section": section,
+        "item": item,
+        "old": str(old_val),
+        "new": str(new_val),
+        "note": str(note),
+    }
+    cfg.setdefault("audit_log", []).insert(0, entry)
+    cfg["audit_log"] = cfg["audit_log"][:500]
+    if persist:
+        save_workspace_cfg(profile_store, cfg)
+
+
+def compute_valves_summary(
+    amounts_df: pd.DataFrame,
+    row_kinds: dict[str, str],
+    selected_months: list[str],
+    valves_cfg: dict,
+) -> dict:
+    """Aprēķina OE ventiļu kopsavilkumu un pārsniegto kategoriju skaitu izvēlētajam periodam."""
+    oe_rows = [r for r in amounts_df.index if row_kinds.get(r) == "OE_CHILD"]
+    rows_out = []
+    tot_limit = 0.0
+    tot_fact = 0.0
+    exceeded_cnt = 0
+    configured_cnt = 0
+
+    for r_lbl in oe_rows:
+        r_cfg = valves_cfg.get(r_lbl, {}) if isinstance(valves_cfg, dict) else {}
+        def_lim = float(r_cfg.get("__default__", 0.0) or 0.0)
+        row_lim_sum = 0.0
+        has_any_lim = False
+        for m in selected_months:
+            if m in r_cfg and r_cfg[m] is not None:
+                m_lim = float(r_cfg[m])
+            else:
+                m_lim = def_lim
+            if m_lim > 0:
+                has_any_lim = True
+            row_lim_sum += max(m_lim, 0.0)
+
+        fact_sum = float(amounts_df.loc[r_lbl, selected_months].astype(float).sum()) if selected_months else 0.0
+        if has_any_lim:
+            configured_cnt += 1
+            tot_limit += row_lim_sum
+            tot_fact += fact_sum
+            rem = row_lim_sum - fact_sum
+            pct_used = (fact_sum / row_lim_sum * 100.0) if row_lim_sum > 0 else 0.0
+            if fact_sum > row_lim_sum + 0.5:
+                status = "Pārsniegts"
+                exceeded_cnt += 1
+            elif pct_used >= 90.0:
+                status = "Tuvojas limitam"
+            else:
+                status = "Normā"
+        else:
+            rem = np.nan
+            pct_used = np.nan
+            status = "Nav limita"
+
+        rows_out.append(
+            {
+                "OE pozīcija": r_lbl,
+                "Limits (€)": row_lim_sum if has_any_lim else np.nan,
+                "Fakts (€)": fact_sum,
+                "Atlikums / Pārtēriņš (€)": rem,
+                "Izpilde (%)": pct_used,
+                "Statuss": status,
+                "has_limit": has_any_lim,
+            }
+        )
+
+    return {
+        "rows": rows_out,
+        "total_limit": tot_limit,
+        "total_fact_limited": tot_fact,
+        "total_remaining": tot_limit - tot_fact,
+        "exceeded_count": exceeded_cnt,
+        "configured_count": configured_cnt,
+    }
+
+
+def compute_pza_investments_by_month(acc_details: list[dict], months: list[str]) -> tuple[pd.Series, list[dict]]:
+    """Saskaita visus PZA kontus, kas klasificēti grupā INV_CAPEX ('Investīcijas (I — ārpus OE)')."""
+    inv_series = pd.Series(0.0, index=months, dtype=float)
+    inv_accounts = []
+    for it in acc_details or []:
+        if get_main_code(it.get("group", "")) == "INV":
+            inv_accounts.append(it)
+            m_map = it.get("months", {}) or {}
+            for m in months:
+                inv_series[m] += abs(float(m_map.get(m, 0.0) or 0.0))
+    return inv_series, inv_accounts
+
+
+def compute_warehouse_summary(
+    amounts_df: pd.DataFrame,
+    selected_months: list[str],
+    wh_cfg: dict,
+) -> dict:
+    """Aprēķina aktīvo noliktavas kategoriju kopsummu, pēdējā mēneša atlikumu un Krājumu dienas."""
+    cats = wh_cfg.get("categories", {}) if isinstance(wh_cfg, dict) else {}
+    vals = wh_cfg.get("values", {}) if isinstance(wh_cfg, dict) else {}
+    active_cats = [(k, lbl) for k, lbl in WAREHOUSE_CATEGORIES if cats.get(k, False)]
+
+    totals = pd.Series(0.0, index=selected_months, dtype=float)
+    cat_series = {}
+    for ck, clbl in active_cats:
+        c_map = vals.get(ck, {}) or {}
+        s_cat = pd.Series([float(c_map.get(m, 0.0) or 0.0) for m in selected_months], index=selected_months, dtype=float)
+        cat_series[ck] = s_cat
+        totals = totals + s_cat
+
+    last_val = float(totals.iloc[-1]) if len(totals) > 0 else 0.0
+    prev_val = float(totals.iloc[-2]) if len(totals) > 1 else last_val
+    avg_val = float(totals.mean()) if len(totals) > 0 else 0.0
+    avg_tvc = float(amounts_df.loc["TVC", selected_months].astype(float).mean()) if ("TVC" in amounts_df.index and selected_months) else 0.0
+    inv_days = (last_val / avg_tvc * 30.0) if avg_tvc > 0 and last_val > 0 else np.nan
+
+    return {
+        "active_cats": active_cats,
+        "cat_series": cat_series,
+        "totals": totals,
+        "last_val": last_val,
+        "delta_last": last_val - prev_val,
+        "avg_val": avg_val,
+        "inv_days": inv_days,
     }
 
 
@@ -742,7 +1015,7 @@ def enforce_obvious_classification_rules(label: str, path: str, grp: str, questi
     if "transport" in low_lbl and "administrāc" in low_path:
         return "OE_ADMIN_OTHER", ""
 
-    if q and grp.startswith("OE_") and not any(w in q.lower() for w in ("tvc", "mainīg", "nolietoj", "amortiz", "virtuāl", "izslēg", "ieņēmum")):
+    if q and grp.startswith("OE_") and not any(w in q.lower() for w in ("tvc", "mainīg", "nolietoj", "amortiz", "virtuāl", "izslēg", "ieņēmum", "investīc")):
         q = ""
 
     return grp, q
@@ -774,7 +1047,8 @@ def smart_classify_accounts(client: anthropic.Anthropic, model: str, leaves: lis
         "4. `OE_OTHER`: 'Pārējās saimnieciskās darbības izmaksas' un citi vispārējie OE konti.\n"
         "5. `TVC_MATERIALS` / `TVC_DELIVERY`: TIKAI 1:1 mainīgās izmaksas (izejvielas, preces pārdošanai, tiešā piegāde klientam).\n"
         "6. `EXCLUDED`: pamatlīdzekļu amortizācija, nolietojums, uzkrājumi, pārvērtēšana.\n"
-        "7. `question`: Atstāj `\"\"` visiem acīmredzamiem kontiem! Uzdod īsu jautājumu TIKAI tad, ja konts ir patiesi neskaidrs starp lielajām grupām (piem., TVC pret OE vai nolietojums).\n\n"
+        "7. `INV_CAPEX`: acīmredzami kapitālieguldījumi / pamatlīdzekļu iegāde vai investīciju projekti (ārpus ikdienas OE).\n"
+        "8. `question`: Atstāj `\"\"` visiem acīmredzamiem kontiem! Uzdod īsu jautājumu TIKAI tad, ja konts ir patiesi neskaidrs starp lielajām grupām.\n\n"
         'Atgriez TIKAI derīgu JSON masīvu: [{"id": "...", "group": "OE_ADMIN_OTHER", "is_income": false, "question": ""}]'
     )
 
@@ -886,10 +1160,6 @@ def build_account_details_snapshot(leaves, cls_df: pd.DataFrame, period_cols: li
 
 
 def build_demo_company_data() -> tuple[LoadedReportResult, list[dict]]:
-    """
-    12 mēnešu Demo uzņēmums ar apaļiem, viegli pārbaudāmiem skaitļiem:
-    S = 100 000–150 000 €, T% = 60%, OE = 58 000–62 000 €, PR = 1.03–1.45.
-    """
     months = [f"{m:02d}.2026." for m in range(1, 13)]
     s_rev =    [95000, 95000, 105000, 115000, 105000, 115000, 110000, 115000, 125000, 130000, 135000, 145000]
     s_oth =    [5000,  5000,  5000,   5000,   5000,   5000,   5000,   5000,   5000,   5000,   5000,   5000]
@@ -947,12 +1217,7 @@ def build_demo_company_data() -> tuple[LoadedReportResult, list[dict]]:
     kpi_df = pd.DataFrame({c: _calc_kpi_for_series(amounts[c]) for c in amounts.columns})
 
     res_demo = LoadedReportResult(
-        amounts=amounts,
-        main=main_df,
-        kpi=kpi_df,
-        row_kinds=row_kinds,
-        reconciliation=pd.DataFrame(),
-        by_group={},
+        amounts=amounts, main=main_df, kpi=kpi_df, row_kinds=row_kinds, reconciliation=pd.DataFrame(), by_group={},
     )
 
     demo_accounts = [
@@ -972,14 +1237,8 @@ def build_demo_company_data() -> tuple[LoadedReportResult, list[dict]]:
     for aid, rnum, albl, apath, agrp, avals in demo_accounts:
         acc_snap.append(
             {
-                "id": aid,
-                "row": rnum,
-                "label": albl,
-                "display_label": albl,
-                "path": apath,
-                "group": agrp,
-                "months": {months[i]: float(avals[i]) for i in range(12)},
-                "total": float(sum(avals)),
+                "id": aid, "row": rnum, "label": albl, "display_label": albl, "path": apath,
+                "group": agrp, "months": {months[i]: float(avals[i]) for i in range(12)}, "total": float(sum(avals)),
             }
         )
 
@@ -1012,12 +1271,8 @@ def submit_pza_for_admin_review(
         dummy_main = pd.DataFrame({"Pārbaude": [0.0], "%|Pārbaude": [0.0]}, index=["S"])
         dummy_kpi = pd.DataFrame({"Pārbaude": [0.0]}, index=["PR = T/OE"])
         dummy_res = LoadedReportResult(
-            amounts=dummy_am,
-            main=dummy_main,
-            kpi=dummy_kpi,
-            row_kinds={"S": "S"},
-            reconciliation=pd.DataFrame(),
-            by_group={},
+            amounts=dummy_am, main=dummy_main, kpi=dummy_kpi,
+            row_kinds={"S": "S"}, reconciliation=pd.DataFrame(), by_group={},
         )
         ok_s, _ = profile_store.save_report(
             report_name=f"[PZA PĀRBAUDEI] {filename}",
@@ -1034,11 +1289,7 @@ def submit_pza_for_admin_review(
 
 def render_legal_documents_tabs(compact: bool = False) -> None:
     t_disc, t_terms, t_priv = st.tabs(
-        [
-            "Atbildības ierobežojums",
-            "Lietošanas noteikumi",
-            "Privātuma politika (VDAR)",
-        ]
+        ["Atbildības ierobežojums", "Lietošanas noteikumi", "Privātuma politika (VDAR)"]
     )
     prov = LEGAL_PROVIDER_DETAILS
 
@@ -1152,12 +1403,14 @@ def parse_period_month_year(col_name: str) -> tuple[int | None, int | None]:
 
 
 def strip_excluded_rows(res):
+    """Izņem EXCLUDED un INVESTĪCIJU (INV) rindas no galvenās PZA/TOC tabulas (tās rādās atsevišķi Investīciju sadaļā)."""
     drop_rows = [
         r for r in res.amounts.index
-        if res.row_kinds.get(r) in ("EXCL", "EXCLUDED")
-        or r == EXCLUDED_LABEL
+        if res.row_kinds.get(r) in ("EXCL", "EXCLUDED", "INV", "INV_CHILD")
+        or r in (EXCLUDED_LABEL, INVESTMENT_LABEL)
         or str(r).lower().startswith("izslēgt")
         or str(r).lower().startswith("neiekļaut")
+        or str(r).lower().startswith("investīcijas (i")
     ]
     if drop_rows:
         res.amounts = res.amounts.drop(index=drop_rows, errors="ignore")
@@ -1333,6 +1586,12 @@ def rename_subgroup_everywhere(old_name: str, new_name: str, profile_store: Supa
     for mc_k, ord_list in st.session_state.get("custom_row_order", {}).items():
         st.session_state["custom_row_order"][mc_k] = [new_clean if x == old_clean else x for x in ord_list]
 
+    # Pārsaucam arī ventiļa atslēgu, ja šai OE apakšgrupai bija iestatīti limiti
+    ws_cfg = st.session_state.get("ws_cfg")
+    if isinstance(ws_cfg, dict) and old_clean in ws_cfg.get("valves", {}):
+        ws_cfg["valves"][new_clean] = ws_cfg["valves"].pop(old_clean)
+
+    append_audit_event(profile_store, "Kontu struktūra", "Apakšgrupas pārdēvēšana", old_clean, new_clean)
     st.session_state["has_unsaved_changes"] = True
     return True, f"Apakšgrupa **'{old_clean}'** pārdēvēta par **'{new_clean}'**."
 
@@ -1420,6 +1679,7 @@ def merge_subgroups_everywhere(source_sub_label: str, target_sub_label: str, pro
             if moved_cnt == 0:
                 moved_cnt = len(db_upd)
 
+    append_audit_event(profile_store, "Kontu struktūra", "Apakšgrupu apvienošana", src_lbl, tgt_lbl, f"{fmt_acc_count_lv(moved_cnt)}")
     S_loc["has_unsaved_changes"] = True
     return True, f"Apakšgrupa **'{src_lbl}'** ({fmt_acc_count_lv(moved_cnt)}) ir pievienota pie **'{tgt_lbl}'**."
 
@@ -1434,7 +1694,7 @@ def move_specific_accounts_to_subgroup(
     if not clean_target:
         return False, "Norādiet mērķa apakšgrupas nosaukumu."
     mc = str(main_code or "OE").upper()
-    if mc not in ("S", "TVC", "OE", "EXCL"):
+    if mc not in ("S", "TVC", "OE", "INV", "EXCL"):
         mc = "OE"
 
     if clean_target in LABEL_TO_KEY:
@@ -1445,6 +1705,7 @@ def move_specific_accounts_to_subgroup(
         register_custom_subgroup(target_g_key, clean_target, mc)
 
     if not account_names_or_ids:
+        append_audit_event(profile_store, "Kontu struktūra", "Jauna apakšgrupa", "—", f"[{mc}] {clean_target}")
         return True, f"Izveidota jauna apakšgrupa **'{clean_target}'**."
 
     S_loc = st.session_state
@@ -1507,18 +1768,33 @@ def move_specific_accounts_to_subgroup(
             if moved_cnt == 0:
                 moved_cnt = len(db_updates)
 
+    acc_preview = ", ".join(account_names_or_ids[:3]) + (" u.c." if len(account_names_or_ids) > 3 else "")
+    append_audit_event(profile_store, "Kontu struktūra", f"Kontu pārvietošana ({acc_preview})", "Iepriekšējā grupa", clean_target)
     S_loc["has_unsaved_changes"] = True
     return True, f"Pārvietoti **{fmt_acc_count_lv(moved_cnt)}** uz apakšgrupu **'{clean_target}'**."
 
 
 def compute_toc_with_dynamic_subgroups(leaves, mapping: dict[str, dict], period_cols: list[dict], reported=None):
-    res = compute_toc(leaves, mapping, period_cols, reported)
+    # Investīciju (INV) kontus padodam toc_engine kā EXCLUDED, lai tie nekad nenonāktu OE un neizkropļotu NP/PR!
+    engine_mapping = {}
+    for k_m, v_m in mapping.items():
+        gk = normalize_group_key(v_m.get("group", "OE_OTHER"))
+        if get_main_code(gk) == "INV":
+            engine_mapping[k_m] = {"group": "EXCLUDED", "is_income": False}
+        else:
+            engine_mapping[k_m] = {"group": gk, "is_income": bool(v_m.get("is_income", False))}
+
+    res = compute_toc(leaves, engine_mapping, period_cols, reported)
     res = strip_excluded_rows(res)
 
     month_labels = [p["label"] for p in period_cols if p.get("kind") == "month"]
     all_cols = list(res.amounts.columns)
 
-    used_groups = {m["group"] for m in mapping.values() if m.get("group") and m["group"] != "EXCLUDED"}
+    used_groups = {
+        m["group"]
+        for m in mapping.values()
+        if m.get("group") and get_main_code(m["group"]) not in ("EXCL", "INV")
+    }
     missing_groups = [g for g in used_groups if GROUPS.get(g, ("", ""))[0] not in res.amounts.index]
 
     if not missing_groups:
@@ -1529,7 +1805,7 @@ def compute_toc_with_dynamic_subgroups(leaves, mapping: dict[str, dict], period_
 
     for g_key in missing_groups:
         lbl, m_code = GROUPS.get(g_key, (g_key, "OE"))
-        if m_code == "EXCL":
+        if m_code in ("EXCL", "INV"):
             continue
         kind_tag = f"{m_code}_CHILD"
         g_leaves = [lf for lf in leaves if mapping.get(lf.id, {}).get("group") == g_key]
@@ -1737,6 +2013,47 @@ def _compute_linear_trend(y_vals: list[float]) -> list[float]:
 # === BEIDZAS 1/3 DAĻA (zem šīs rindas līmēsi 2/3 daļu) ===
 # === SĀKAS 2/3 DAĻA ===
 
+def inject_sync_table_scroll_js() -> None:
+    """
+    Sinhronizē horizontālo ritināšanu visām tabulām ar klasi `.toc-sync-scroll`,
+    lai vienādie mēneši vienmēr atrastos precīzi viens zem otra.
+    """
+    components.html(
+        """
+        <script>
+        (function() {
+            function bindSyncScroll() {
+                const doc = window.parent.document;
+                const wraps = Array.from(doc.querySelectorAll('.toc-table-wrap.toc-sync-scroll'));
+                if (wraps.length < 2) return;
+                let lock = false;
+                wraps.forEach(function(el) {
+                    if (el.dataset.tocSyncBound === '1') return;
+                    el.dataset.tocSyncBound = '1';
+                    el.addEventListener('scroll', function() {
+                        if (lock) return;
+                        lock = true;
+                        const x = el.scrollLeft;
+                        const liveWraps = doc.querySelectorAll('.toc-table-wrap.toc-sync-scroll');
+                        liveWraps.forEach(function(other) {
+                            if (other !== el && Math.abs(other.scrollLeft - x) > 0.5) {
+                                other.scrollLeft = x;
+                            }
+                        });
+                        window.parent.requestAnimationFrame(function() { lock = false; });
+                    }, { passive: true });
+                });
+            }
+            setTimeout(bindSyncScroll, 120);
+            setTimeout(bindSyncScroll, 450);
+            setTimeout(bindSyncScroll, 1000);
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
 def render_overview_charts(
     amounts_df: pd.DataFrame,
     kpi_df: pd.DataFrame,
@@ -1938,7 +2255,7 @@ def rebuild_report_from_account_snapshot(res, acc_details: list[dict]):
     used_groups = []
     for it in acc_details:
         gk = normalize_group_key(it.get("group", "OE_OTHER"))
-        if gk != "EXCLUDED" and gk not in used_groups:
+        if get_main_code(gk) not in ("EXCL", "INV") and gk not in used_groups:
             used_groups.append(gk)
     used_groups.sort(key=lambda g: GROUP_SORT_ORDER.get(g, 50))
 
@@ -2058,17 +2375,18 @@ def render_unified_toc_tables_html(
     freeze_sides: bool = False,
     highlight_section: str | None = None,
     sections: tuple[str, ...] = ("main", "kpi", "cum"),
+    sync_scroll: bool = True,
 ) -> str:
     """
-    Optimizēts 13,3" klēpjdatoram un lielam monitoram.
-    Atbalsta daļēju izsaukšanu caur `sections` ('main', 'kpi', 'cum'), lai apmācības kartīti ar pogām
-    varētu parādīt TIEŠI virs izceltās tabulas!
+    Optimizēts 13,3" klēpjdatoram un lielam monitoram ar sinhronizētu horizontālo ritināšanu
+    (.toc-sync-scroll), lai mēnešu kolonnas visās tabulās vienmēr stāvētu precīzi viena zem otras.
     """
     valid_rows = [
         r for r in amounts_df.index
-        if row_kinds.get(r) not in ("EXCL", "EXCLUDED")
+        if row_kinds.get(r) not in ("EXCL", "EXCLUDED", "INV", "INV_CHILD")
         and not str(r).lower().startswith("izslēgt")
         and not str(r).lower().startswith("neiekļaut")
+        and not str(r).lower().startswith("investīcijas (i")
     ]
     amounts_df = amounts_df.loc[valid_rows]
     main_df = main_df.loc[valid_rows]
@@ -2148,6 +2466,7 @@ def render_unified_toc_tables_html(
 
     main_colgroup, main_tbl_style = _build_two_subcol_colgroup(n_per, n_per)
     tbl_cls = "toc-unified toc-freeze" if use_freeze_left else "toc-unified"
+    wrap_cls = "toc-table-wrap toc-sync-scroll" if sync_scroll else "toc-table-wrap"
 
     def _sticky_left_style(bg: str) -> str:
         if not use_freeze_left:
@@ -2268,7 +2587,7 @@ def render_unified_toc_tables_html(
         html.append(_wrap_open("main"))
         if title_main:
             html.append(f'<div class="toc-sec-heading">{title_main}</div>')
-        html.append(f'<div class="toc-table-wrap"><table class="{tbl_cls}" style="{main_tbl_style}">{main_colgroup}<thead><tr>')
+        html.append(f'<div class="{wrap_cls}"><table class="{tbl_cls}" style="{main_tbl_style}">{main_colgroup}<thead><tr>')
         html.append(f'<th class="th-lbl" style="{_sticky_left_style("#E2E8F0")}">Rādītājs / Kontugrupa</th>')
         for p_idx, p in enumerate(periods):
             if p in grey_cols:
@@ -2372,7 +2691,7 @@ def render_unified_toc_tables_html(
 
         html.append(_wrap_open("kpi"))
         html.append(f'<div class="toc-sec-heading">{title_kpi}</div>')
-        html.append(f'<div class="toc-table-wrap"><table class="{tbl_cls}" style="{kpi_tbl_style}">{kpi_colgroup}<thead><tr>')
+        html.append(f'<div class="{wrap_cls}"><table class="{tbl_cls}" style="{kpi_tbl_style}">{kpi_colgroup}<thead><tr>')
         html.append(f'<th class="th-lbl" style="{_sticky_left_style("#E2E8F0")}">Produktivitātes rādītājs</th>')
         for p_idx, p in enumerate(kpi_periods):
             th_bg_c = "#CBD5E1" if p in grey_cols else "#E2E8F0"
@@ -2408,7 +2727,7 @@ def render_unified_toc_tables_html(
         cum_df, cum_periods, _ = compute_cumulative_toc_df(amounts_df, fy_start_month=fy_start_month)
         html.append(_wrap_open("cum"))
         html.append('<div class="toc-sec-heading">Uzkrājošie rādītāji</div>')
-        html.append(f'<div class="toc-table-wrap"><table class="{tbl_cls}" style="{main_tbl_style}">{main_colgroup}<thead><tr>')
+        html.append(f'<div class="{wrap_cls}"><table class="{tbl_cls}" style="{main_tbl_style}">{main_colgroup}<thead><tr>')
         html.append(f'<th class="th-lbl" style="{_sticky_left_style("#E2E8F0")}">Uzkrājošais rādītājs</th>')
         for p_idx, p in enumerate(periods):
             if p in cum_periods:
@@ -2536,9 +2855,10 @@ def render_about_and_help_page(is_public_view: bool = False) -> None:
 
             st.markdown(
                 """
-                No šiem trim lielumiem iegūst divus izšķirošos rezultātus:
+                No šiem trim lielumiem iegūst galvenos darbības rezultātus:
                 * **T = S − TVC** — **Caurlaidība (*Throughput*)**, ātrums, kādā uzņēmums ģenerē jaunu naudu.
-                * **NP = T − OE** — **TOC Neto peļņa (*Net Profit*)**, uzņēmuma kopējais darbības rezultāts bez netiešo izmaksu alokēšanas uz produktiem.
+                * **NP = T − OE** — **TOC Neto peļņa (*Net Profit*)**, kopējais darbības rezultāts bez netiešo izmaksu alokēšanas.
+                * **I (Investīcijas un Noliktava)** — ieslēdzot papildu moduļus, atdalāmi ieguldījumi (CAPEX) un krājumi, lai aprēķinātu **ROI = NP / I**.
                 """
             )
 
@@ -2551,7 +2871,7 @@ def render_about_and_help_page(is_public_view: bool = False) -> None:
                     THRUVIA nepieprasa mainīt grāmatvedības procesus — oficiālā grāmatvedība turpina kontēšanu, nodokļu un normatīvo atskaišu sagatavošanu.
 
                     * Sistēma ielasa uzņēmumā jau pieejamos PZA failus (Excel/CSV), palīdz saklasificēt kontus un sagatavo pārskatu ar dinamikas grafikiem.
-                    * Pirmreizējiem klientiem mēs pārbaudām un sakārtojam PZA struktūru, lai visi rādītāji būtu maksimāli precīzi.
+                    * Papildus ieslēdzami moduļi: **Ventiļu sistēma (OE limiti)**, **Investīcijas (I)** un **Noliktavas atlikumi (I)**.
                     """
                 )
         with col_a2:
@@ -2561,21 +2881,21 @@ def render_about_and_help_page(is_public_view: bool = False) -> None:
                     """
                     Vadības komanda — arī bez finanšu analītiķa pieredzes — īsā laikā var izspēlēt desmitiem attīstības scenāriju, nepārrēķinot produktu pašizmaksas.
 
-                    * Plānotās izmaiņas S, TVC vai OE posteņos ievada procentos, eiro, brīvā tekstā vai ar balsi, uzreiz redzot ietekmi uz T, NP un attiecību rādītājiem (RATIO).
+                    * Plānotās izmaiņas S, TVC vai OE posteņos ievada procentos, eiro, brīvā tekstā vai ar balsi, uzreiz redzot ietekmi uz T, NP un RATIO rādītājiem.
                     * Attīstības perspektīva: nākamajos posmos THRUVIA sasaistīs finanšu prognozes ar uzņēmuma jaudām un sistēmas ierobežojumiem (CCR).
                     """
                 )
 
     with tab_guide:
-        st.markdown("#### Darbs ar THRUVIA 5 soļos")
+        st.markdown("#### Darbs ar THRUVIA")
         with st.container(border=True):
             st.markdown(
                 """
-                **1. Reģistrācija un interaktīvā Demo apmācība** — īss ievads par TOC loģiku un 8 soļu prakse uz apaļu skaitļu parauga uzņēmuma.  
-                **2. Pirmā PZA faila pārbaude** — iesūtiet Excel/CSV failu pārbaudei (kamēr pārbaudām, varat izmantot Demo vai sākt uzreiz ar brīdinājumu).  
+                **1. Reģistrācija un Demo apmācība** — īss TOC ievads un 8 soļu prakse uz parauga uzņēmuma.  
+                **2. Pirmā PZA faila pārbaude** — iesūtiet Excel/CSV failu pārbaudei (kamēr pārbaudām, varat izmantot Demo vai sākt uzreiz).  
                 **3. Pārskats un dinamika** — galvenā TOC tabula, produktivitātes koeficienti (`PR = T/OE`), uzkrājošie rādītāji un grafiki.  
-                **4. Kontu struktūra** — pārskatiet katru PZA kontu, pārvietojiet, apvienojiet vai pārdēvējiet apakšgrupas.  
-                **5. Scenāriju simulācija un Asistents** — modelējiet nākotnes lēmumus, jaunus produktus un jautājiet Asistentam rakstiski vai ar balsi.
+                **4. Papildmoduļi (`Moduļi` augšējā rīkjoslā)** — ieslēdziet **Ventiļu sistēmu (OE limiti)**, **Investīcijas (I)** vai **Noliktavas atlikumus (I)**, kad tie nepieciešami.  
+                **5. Scenāriju simulācija, Kontu struktūra un Izmaiņu vēsture** — modelējiet lēmumus, kārtojiet kontus un izsekojiet izmaiņām sadaļā `Profils → Izmaiņu vēsture`.
                 """
             )
 
@@ -2586,17 +2906,19 @@ def render_about_and_help_page(is_public_view: bool = False) -> None:
                 "Pie **TVC** liek tikai tās izmaksas, kas rodas **1:1 par katru pārdoto vienību** (izejvielas, materiāli, tiešā piegāde). "
                 "Algas, telpas, elektrība un administrācija ir kapacitātes uzturēšanas izmaksas (**OE**)."
             )
-        with st.expander("2. Kādus kontus likt sadaļā 'Neiekļautie konti (ārpus TOC aprēķina)'?"):
+        with st.expander("2. Kāpēc Investīcijas un Noliktavas atlikumi ir atsevišķi no OE?"):
             st.markdown(
-                "Jebkurus kontus, kurus nevēlaties iekļaut operatīvajā TOC darbības rezultātā — piemēram, nolietojumu/amortizāciju, grāmatvedības uzkrājumus vai vienreizējus tehniskus posteņus."
+                "Pēc TOC Caurlaidības grāmatvedības gan kapitālieguldījumi (iekārtas, attīstības projekti), gan krājumi noliktavā pieder pie **I (Investīcijas)** — naudas, kas ir ieguldīta sistēmā. "
+                "To iekļaušana OE izkropļotu ikmēneša neto peļņu (NP) un produktivitāti (PR = T/OE)."
             )
-        with st.expander("3. Kā lasīt produktivitātes koeficientu PR = T / OE?"):
+        with st.expander("3. Kā strādā Ventiļu sistēma (OE limiti)?"):
+            st.markdown(
+                "Ieslēdzot moduli **Ventiļi** augšējā izvēlnē `Moduļi`, katrai OE pozīcijai varat iestatīt ikmēneša limitu (ar iespēju mainīt limitu atsevišķiem mēnešiem). "
+                "Pārskatā redzēsiet kopsavilkumu par atlikumu vai pārtēriņu, un visas limitu izmaiņas tiek reģistrētas sadaļā **Izmaiņu vēsture**."
+            )
+        with st.expander("4. Kā lasīt produktivitātes koeficientu PR = T / OE?"):
             st.markdown(
                 "**PR < 1.00** — zaudējumi; **1.00–1.15** — neliela rezerve; **PR ≥ 1.15** — veselīga, stabila caurlaidības atdeve."
-            )
-        with st.expander("4. Kāpēc pirmais PZA fails tiek nosūtīts pārbaudei?"):
-            st.markdown(
-                "Pārbaudot pirmo failu, pārliecināmies par 100% precīzu kontu sadalījumu — un jūsu 5 bezmaksas izmēģinājuma dienas sākas tikai pēc apstiprināšanas (ja izvēlaties gaidīt pārbaudi)."
             )
 
     with tab_legal:
@@ -2623,7 +2945,7 @@ for c_key, (c_lbl, c_mc) in S.get("custom_subgroups", {}).items():
     register_custom_subgroup(c_key, c_lbl, c_mc)
 
 
-# ------------------------------------------------------------------ MODERNS BIZNESA UI DIZAINS (DARK & LIGHT MODE SAFE)
+# ------------------------------------------------------------------ MODERNS BIZNESA UI DIZAINS (DARK & LIGHT SAFE + STATUS TRAY)
 is_expanded_asist = bool(S.get("assistant_expanded", False))
 pop_min_w = "600px" if is_expanded_asist else "390px"
 pop_max_w = "660px" if is_expanded_asist else "430px"
@@ -2647,7 +2969,6 @@ st.markdown(
     div[data-testid="InputInstructions"] {{
         display: none !important;
     }}
-    /* Profesionāls biznesa zilais akcents galvenajām pogām (nevis noklusējuma sarkans) */
     button[kind="primary"], [data-testid="baseButton-primary"] {{
         background-color: #2563EB !important;
         border-color: #2563EB !important;
@@ -2674,7 +2995,6 @@ st.markdown(
     div.element-container:has(div.sticky-nav-marker) {{
         display: none !important; margin: 0 !important; padding: 0 !important; height: 0 !important;
     }}
-    /* Augšējā rīkjosla — fiksēts tumši pelēkzils fons (#111827), vienmēr augsts kontrasts gan Light, gan Dark režīmā */
     div[data-testid="stVerticalBlock"] > div:has(div.sticky-nav-marker) {{
         position: sticky !important;
         top: 2.2rem !important;
@@ -2682,11 +3002,10 @@ st.markdown(
         background-color: #111827 !important;
         border: 1px solid #334155 !important;
         border-radius: 12px !important;
-        padding: 12px 18px !important;
+        padding: 11px 16px !important;
         box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22) !important;
         margin-bottom: 16px !important;
     }}
-    /* Pogas uz tumšās augšējās rīkjoslas */
     div[data-testid="stVerticalBlock"] > div:has(div.sticky-nav-marker) button[kind="secondary"],
     div[data-testid="stVerticalBlock"] > div:has(div.sticky-nav-marker) [data-testid="stPopover"] > button {{
         background-color: #1F2937 !important;
@@ -2699,17 +3018,15 @@ st.markdown(
         border-color: #4B5563 !important;
     }}
     .top-brand-bar {{
-        display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+        display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
     }}
     .top-brand-title {{
         font-size: 19px; font-weight: 800; letter-spacing: 0.4px; margin: 0; color: #FFFFFF !important;
     }}
     .top-brand-sub {{
-        font-size: 13px; color: #CBD5E1 !important;
+        font-size: 12.5px; color: #CBD5E1 !important;
     }}
-    .top-brand-sub b {{
-        color: #F8FAFC !important; font-weight: 600;
-    }}
+    .top-brand-sub b {{ color: #F8FAFC !important; font-weight: 600; }}
     .unsaved-pill {{
         background-color: #78350F; color: #FEF3C7; border: 1px solid #D97706;
         padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600;
@@ -2722,6 +3039,26 @@ st.markdown(
         background-color: #334155; color: #E2E8F0; border: 1px solid #64748B;
         padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.4px;
     }}
+    .status-tray {{
+        display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-left: 4px;
+    }}
+    .mod-chip {{
+        display: inline-flex; align-items: center; gap: 5px;
+        background-color: #1E293B; color: #E2E8F0 !important;
+        border: 1px solid #334155; border-radius: 999px;
+        padding: 2px 9px; font-size: 11px; font-weight: 600; line-height: 1.4;
+    }}
+    .mod-chip-alert {{
+        background-color: rgba(220, 38, 38, 0.22); color: #FECACA !important;
+        border: 1px solid #EF4444;
+    }}
+    .mod-dot {{
+        width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex-shrink: 0;
+    }}
+    .mod-dot-green {{ background-color: #22C55E; }}
+    .mod-dot-red {{ background-color: #EF4444; }}
+    .mod-dot-blue {{ background-color: #38BDF8; }}
+    .mod-dot-amber {{ background-color: #F59E0B; }}
     h1, h2, h3, h4 {{
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
         letter-spacing: -0.3px;
@@ -2743,33 +3080,19 @@ st.markdown(
         background-color: #F4B183; color: #0F172A !important; font-weight: 700;
         padding: 6px 12px; border-radius: 6px; margin-bottom: 6px; border-left: 5px solid #C2410C; font-size: 13px;
     }}
-    /* Inline apmācības kartīte — skaidra lasāmība gan Light, gan Dark režīmā */
     .tut-inline-card {{
-        background-color: #F8FAFC;
-        border: 1.5px solid #2563EB;
-        border-left: 5px solid #2563EB;
-        border-radius: 10px;
-        padding: 14px 18px;
-        margin: 8px 0 10px 0;
-        color: #0F172A !important;
+        background-color: #F8FAFC; border: 1.5px solid #2563EB; border-left: 5px solid #2563EB;
+        border-radius: 10px; padding: 14px 18px; margin: 8px 0 10px 0; color: #0F172A !important;
     }}
     .tut-inline-step {{
         display: inline-block; background-color: #2563EB; color: #FFFFFF !important;
         font-size: 11px; font-weight: 700; padding: 2px 9px; border-radius: 5px;
         letter-spacing: 0.3px; margin-bottom: 6px;
     }}
-    .tut-inline-title {{
-        font-size: 15.5px; font-weight: 700; color: #0F172A !important; margin: 2px 0 6px 0;
-    }}
-    .tut-inline-body {{
-        font-size: 13.5px; color: #1E293B !important; line-height: 1.55;
-    }}
-    .tut-inline-body ul {{
-        margin: 6px 0 2px 18px; padding: 0;
-    }}
-    .tut-inline-body li {{
-        margin-bottom: 3px; color: #1E293B !important;
-    }}
+    .tut-inline-title {{ font-size: 15.5px; font-weight: 700; color: #0F172A !important; margin: 2px 0 6px 0; }}
+    .tut-inline-body {{ font-size: 13.5px; color: #1E293B !important; line-height: 1.55; }}
+    .tut-inline-body ul {{ margin: 6px 0 2px 18px; padding: 0; }}
+    .tut-inline-body li {{ margin-bottom: 3px; color: #1E293B !important; }}
     .tut-section-tag {{
         display: inline-block; background-color: #2563EB; color: #FFFFFF !important;
         font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 5px; margin: 4px 0 6px 0;
@@ -2786,8 +3109,7 @@ st.markdown(
         display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 10px; margin: 10px 0 14px 0;
     }}
     .crm-meta-box {{
-        background-color: rgba(148, 163, 184, 0.10);
-        border: 1px solid rgba(148, 163, 184, 0.28);
+        background-color: rgba(148, 163, 184, 0.10); border: 1px solid rgba(148, 163, 184, 0.28);
         border-radius: 8px; padding: 9px 12px;
     }}
     .crm-meta-lbl {{ font-size: 11px; opacity: 0.72; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 2px; }}
@@ -2846,38 +3168,80 @@ def build_global_diagnostic_context(profile_store: SupabaseProfileStore) -> str:
         parts.append("\n--- AKTĪVĀ THRUVIA (TA) TABULA (EUR) ---\n" + res.amounts.round(0).to_markdown())
         parts.append("\n--- PRODUKTIVITĀTES UN ATDEVES RĀDĪTĀJI (RATIO / KPI) ---\n" + res.kpi.round(3).to_markdown())
 
+        ws_cfg = S.get("ws_cfg") or default_workspace_cfg()
+        mods = ws_cfg.get("modules", {})
+        all_m = [c for c in res.amounts.columns if not ("YTD" in c or "AVG" in c or "KOPĀ" in c or "TOTAL" in c)]
+        sel_m = [m for m in all_m if m in S.get("working_months_active", all_m)] or all_m
+        active_mod_names = [k for k, v in mods.items() if v]
+        parts.append(f"\nIeslēgtie papildmoduļi: {', '.join(active_mod_names) if active_mod_names else 'Nav ieslēgts neviens'}")
+
+        if mods.get("valves") and sel_m:
+            v_sum = compute_valves_summary(res.amounts, res.row_kinds, sel_m, ws_cfg.get("valves", {}))
+            v_lines = [
+                f"  • {r['OE pozīcija']}: Limits {fmt_num(r['Limits (€)'])} €, Fakts {fmt_num(r['Fakts (€)'])} €, Statuss: {r['Statuss']}"
+                for r in v_sum["rows"] if r["has_limit"]
+            ]
+            if v_lines:
+                parts.append(
+                    f"--- VENTIĻU SISTĒMA (OE LIMITI, {len(sel_m)} mēn.) ---\n"
+                    f"Kopējais limits: {fmt_num(v_sum['total_limit'])} €, Fakts: {fmt_num(v_sum['total_fact_limited'])} €, Pārsniegti: {v_sum['exceeded_count']}\n"
+                    + "\n".join(v_lines)
+                )
+
+        if mods.get("investments") and sel_m:
+            inv_pza_s, _ = compute_pza_investments_by_month(acc_snap, sel_m)
+            man_invs = ws_cfg.get("investments", {}).get("manual", [])
+            man_tot = sum(float(x.get("amount", 0) or 0) for x in man_invs if not x.get("month") or x.get("month") in sel_m)
+            parts.append(
+                f"--- INVESTĪCIJAS (I — ĀRPUS OE, {len(sel_m)} mēn.) ---\n"
+                f"No PZA atdalītās investīcijas: {fmt_num(inv_pza_s.sum())} €, Manuāli pievienotās: {fmt_num(man_tot)} €, Kopā: {fmt_num(inv_pza_s.sum() + man_tot)} €"
+            )
+
+        if mods.get("warehouse") and sel_m:
+            wh_s = compute_warehouse_summary(res.amounts, sel_m, ws_cfg.get("warehouse", {}))
+            if wh_s["active_cats"]:
+                inv_d_txt = f", Krājumu dienas: {wh_s['inv_days']:.0f}" if not pd.isna(wh_s["inv_days"]) else ""
+                parts.append(
+                    f"--- NOLIKTAVAS ATLIKUMI (I — TVC VĒRTĪBĀ) ---\n"
+                    f"Aktīvās kategorijas: {', '.join(lbl for _, lbl in wh_s['active_cats'])}\n"
+                    f"Pēdējā mēneša atlikums: {fmt_num(wh_s['last_val'])} € (izmaiņa: {wh_s['delta_last']:+,.0f} €), "
+                    f"Vidējais atlikums: {fmt_num(wh_s['avg_val'])} €{inv_d_txt}"
+                )
+
     return "\n\n".join(parts)
 
 
 TOC_CORE_EXPERT_KNOWLEDGE = """
 === THRUVIA / TOC CAURLAIDĪBAS GRĀMATVEDĪBAS (THROUGHPUT ACCOUNTING) ZINĀŠANU BĀZE ===
-1. Sistēmas loģika: THRUVIA balstās uz TOC Throughput Accounting (TA), vērtējot uzņēmumu kā vienotu sistēmu un atbildot: kā mūsu lēmums ietekmē kopējo NP?
+1. Sistēmas loģika: THRUVIA balstās uz TOC Throughput Accounting (TA), vērtējot uzņēmumu kā vienotu sistēmu un atbildot: kā mūsu lēmums ietekmē kopējo NP un ROI?
 2. Galvenie rādītāji:
    - S (Sales) — realizācijas ieņēmumi.
    - TVC (Totally Variable Costs) — pilnībā mainīgās izmaksas (1:1 ar pārdošanu: izejvielas, materiāli, tiešā piegāde). Algas, elektrība, noma un administrācija NEKAD nav TVC — tās ir OE.
    - OE (Operating Expenses) — darbības nodrošināšanas izmaksas. Zem algām ir TIKAI tiešās algas un algu nodokļi; reprezentācija un personāla pasākumi ir Pārējās administrācijas izmaksās.
+   - I (Investīcijas un Noliktavas krājumi TVC vērtībā) — nauda, kas iesaldēta sistēmā. Investīcijas NEIET pie OE, lai neizkropļotu NP un PR!
    - T = S - TVC — Caurlaidība (Throughput).
-   - NP = T - OE — TOC Neto peļņa.
+   - NP = T - OE — TOC Neto peļņa; ROI = NP / I.
 3. Attiecību rādītāji (RATIO): PR = T/OE (< 1.00 zaudējumi, 1.00–1.15 maza rezerve, >= 1.15 veselīga atdeve); T% = T/S; Eiro Sales / Eiro algas.
 4. Lēmumu prioritāte: T ↑ -> I ↓ -> OE ↓; operatīvā formula ΔT - ΔOE > 0.
 5. SVARĪGS AIZLIEGUMS: Nekad nespried par "mārketinga kampaņu efektivitāti" vai reklāmas atdevi (no PZA to nomērīt nevar). Sniedz informatīvu TOC analīzi, nevis licencētus finanšu/nodokļu padomus.
 
 === KUR KAS ATRODAS THRUVIA APLIKĀCIJĀ (GIDS LIETOTĀJIEM) ===
-- **Pārskats (`overview`)**: Galvenā TOC tabula (S, TVC, T, OE, NP), Produktivitātes rādītāji (`PR`, `T%`, Algu atdeve), Uzkrājošie rādītāji, 3 dinamikas grafiki, Excel lejupielāde, Aktīvā darba perioda izvēle, Versiju saglabāšana un poga *Pieprasīt eksperta ieteikumus*.
-- **Scenāriju simulācija (`simulation`)**: Izmaiņu ievadīšana tabulā (% vai +/- €), situācijas aprakstīšana brīvā tekstā vai ar mikrofonu, sadaļa *Jauns produkts / projekts* un simulāciju saglabāšana arhīvā.
-- **Kontu struktūra (`accounts_explorer`)**: Redzams, kuri PZA konti slēpjas zem katras apakšgrupas ar mēnešu summām; augšējā panelī 4 cilnes — pārvietot kontus, apvienot apakšgrupas, izveidot jaunu apakšgrupu, pārdēvēt apakšgrupu.
+- **Moduļi (augšējā labajā rīkjoslā)**: Ieslēdz vai izslēdz 3 papildfunkcijas — **Ventiļu sistēma (OE limiti)**, **Investīcijas (I — ārpus OE)** un **Noliktavas atlikumi (I)**. Aktīvie moduļi uzreiz parādās kā statusa ikonas augšējā joslā un apakšcilnes sadaļā *Pārskats*.
+- **Pārskats (`overview`)**: Galvenā TOC tabula (S, TVC, T, OE, NP), Produktivitātes rādītāji (`PR`, `T%`, Algu atdeve), Uzkrājošie rādītāji (visas tabulas horizontāli ritinās sinhroni!), 3 grafiki, Excel eksports un ieslēgto moduļu cilnes (Ventiļi, Investīcijas, Noliktava).
+- **Scenāriju simulācija (`simulation`)**: Izmaiņu ievadīšana tabulā (% vai +/- €), situācijas aprakstīšana brīvā tekstā vai ar mikrofonu, sadaļa *Jauns produkts / projekts* un simulāciju saglabāšana.
+- **Kontu struktūra (`accounts_explorer`)**: Kuri PZA konti slēpjas zem katras apakšgrupas ar mēnešu summām; kontu pārvietošana (ieskaitot uz *Investīcijas (I — ārpus OE)*), apvienošana, izveide, pārdēvēšana.
 - **Atskaites un Simulācijas (`archive`)**: Visas saglabātās finanšu atskaites, versijas un scenāriju simulācijas.
-- **+ Jauns PZA (`ingest`)**: Jauna Excel/CSV PZA faila ielāde, rindu kontrole un MI kontu klasifikācija.
-- **Par THRUVIA (`about`)**: Teorētiskais pamatojums, instrukcija pa soļiem, BUJ un juridiskie noteikumi / privātuma politika.
-- **Profils → Uzstādījumi un Abonements (`settings`)**: Abonementa statuss, Stripe maksājumu/atcelšanas saites, finanšu gada sākuma datums un paroles maiņa.
+- **+ Jauns PZA (`ingest`)**: Jauna Excel/CSV PZA faila ielāde, rindu kontrole un kontu klasifikācija.
+- **Profils → Izmaiņu vēsture (`audit_log`)**: Pilns žurnāls par to, kas, kad un ko mainīja (Ventiļu limiti, Noliktavas atlikumi, Investīcijas, Kontu struktūra, Moduļu slēdži).
+- **Profils → Uzstādījumi un Abonements (`settings`)**: Abonementa statuss, Stripe maksājumu/atcelšanas saites, finanšu gada sākums un paroles maiņa.
 
 === DARBĪBAS (ACTIONS), KO TU KĀ THRUVIA ASISTENTS VARI AUTOMĀTISKI IZPILDĪT ===
 Pievieno JSON bloku tagos `<ACTION>...</ACTION>` pašās atbildes beigās, kad lietotājs vēlas veikt darbību vai nokļūt kādā sadaļā:
 1) PĀRDĒVĒT APAKŠGRUPU: <ACTION>{"type": "rename_subgroup", "summary": "...", "old_name": "...", "new_name": "..."}</ACTION>
 2) APVIENOT APAKŠGRUPAS: <ACTION>{"type": "merge_subgroups", "summary": "...", "source_subgroup": "...", "target_subgroup": "..."}</ACTION>
 3) PĀRVIETOT KONTUS / IZVEIDOT APAKŠGRUPU: <ACTION>{"type": "split_or_move_accounts", "summary": "...", "main_code": "OE", "new_subgroup": "...", "accounts": ["..."]}</ACTION>
-4) SAKĀRTOT TABULAS RINDAS (algas vienmēr paliek OE augšpusē): <ACTION>{"type": "reorder_subgroups", "summary": "...", "main_code": "OE", "mode": "desc", "keep_other_last": true}</ACTION>
-5) NAVIGĒT ('overview', 'simulation', 'accounts_explorer', 'archive', 'ingest', 'about', 'settings'): <ACTION>{"type": "navigate", "summary": "...", "target_page": "accounts_explorer"}</ACTION>
+4) SAKĀRTOT TABULAS RINDAS: <ACTION>{"type": "reorder_subgroups", "summary": "...", "main_code": "OE", "mode": "desc", "keep_other_last": true}</ACTION>
+5) NAVIGĒT ('overview', 'simulation', 'accounts_explorer', 'archive', 'ingest', 'about', 'settings', 'audit_log'): <ACTION>{"type": "navigate", "summary": "...", "target_page": "audit_log"}</ACTION>
 """
 
 
@@ -2920,20 +3284,20 @@ def ask_global_assistant(user_question: str, profile_store: SupabaseProfileStore
     ctx = build_global_diagnostic_context(profile_store)
     know = f"\nPapildu lietotāja faila zināšanu bāze:\n{knowledge_file}\n" if knowledge_file else ""
     sys_prompt = (
-        "Tu esi ļoti atsaucīgs, cilvēcīgs un augsti profesionāls THRUVIA aplikācijas gids un TOC Caurlaidības grāmatvedības eksperts.\n\n"
+        "Tu esi atsaucīgs, cilvēcīgs un augsti profesionāls THRUVIA aplikācijas gids un TOC Caurlaidības grāmatvedības eksperts.\n\n"
         f"{TOC_CORE_EXPERT_KNOWLEDGE}\n"
         f"{know}\n"
         "SVARĪGI NOTEIKUMI:\n"
         "1. Raksti skaidrā, īsā ČATA FORMĀTĀ (1–2 teikumi rindkopā + aizzīmes).\n"
         "2. Ja lietotājs jautā, kur aplikācijā kaut kas atrodas vai kā kaut ko izdarīt — dod precīzu norādi un piedāvā `<ACTION>` pogu uzreiz atvērt to sadaļu (`navigate`).\n"
         "3. Tu MĀKI un VARI izpildīt: pārdēvēt apakšgrupu (`rename_subgroup`), apvienot apakšgrupas (`merge_subgroups`), pārvietot kontus vai izveidot apakšgrupu (`split_or_move_accounts`), sakārtot tabulu (`reorder_subgroups`), atvērt sadaļu (`navigate`).\n"
-        "4. Nekad nespried par mārketinga kampaņu efektivitāti — skaidro TOC rādītājus (T, T%, OE, PR = T/OE, Eiro Sales / Eiro algas)."
+        "4. Nekad nespried par mārketinga kampaņu efektivitāti — skaidro TOC rādītājus (T, T%, OE, PR = T/OE, Ventiļi, Investīcijas I un Noliktava I)."
     )
     history = S.get("global_chat", [])
     clean_history = [{"role": m["role"], "content": m["content"]} for m in history[-8:]]
     messages = [
         {"role": "user", "content": f"Sistēmas un uzņēmuma finanšu konteksts:\n{ctx}"},
-        {"role": "assistant", "content": "Sapratu! Esmu gatavs palīdzēt gan ar orientēšanos THRUVIA aplikācijā, gan ar TOC finanšu analīzi un kontu pārvaldību."},
+        {"role": "assistant", "content": "Sapratu! Esmu gatavs palīdzēt ar THRUVIA navigāciju, TOC analīzi, Ventiļu limitiem, Investīcijām, Noliktavu un kontu pārvaldību."},
     ] + clean_history + [{"role": "user", "content": user_question}]
 
     resp = get_client().messages.create(
@@ -3002,7 +3366,7 @@ if not S.get("authenticated", False):
             S.auto_loaded_latest = False
 
 
-# ------------------------------------------------------------------ 1. TĪRA PUBLISKĀ IEEJA (BEZ DUBULTĀS RĪKJOSLAS)
+# ------------------------------------------------------------------ 1. TĪRA PUBLISKĀ IEEJA
 billing_cfg = get_billing_config()
 
 if not S.get("authenticated", False):
@@ -3230,7 +3594,6 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
     k4.metric("Izmēģinājumā (5d)", n_trial)
     k5.metric("Prognozētais MRR", f"{mrr_eur:,.0f} €", delta=f"API: -{tot_api_eur:.2f} €", delta_color="off")
 
-    # PZA PĀRBAUDES RINDA
     if pending_review_clients:
         st.markdown("---")
         st.subheader(f"PZA pārbaudes rinda ({len(pending_review_clients)})")
@@ -3269,7 +3632,7 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
                         S.admin_reviewing_client = pc_name
                         S.nav_page = "ingest"
                         S.auto_loaded_latest = False
-                        for k_clr in ("result", "cls_df", "structure", "analysis", "fid", "clarifications_done", "loaded_report_meta"):
+                        for k_clr in ("result", "cls_df", "structure", "analysis", "fid", "clarifications_done", "loaded_report_meta", "ws_cfg_loaded_for"):
                             S.pop(k_clr, None)
                         if latest_payload and latest_payload.get("b64"):
                             S.preloaded_pza_name = latest_payload.get("filename", "klienta_PZA.xlsx")
@@ -3347,7 +3710,6 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
                 )
             st.dataframe(comp_df, use_container_width=True, hide_index=True)
 
-            # DETALIZĒTĀ KLIENTA PROFILA KARTĪTE
             st.markdown("---")
             c_names = [c["company_name"] for c in filtered_comps]
             sel_hdr1, sel_hdr2 = st.columns([1.4, 2.6], vertical_alignment="bottom")
@@ -3359,7 +3721,7 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
             sel_obj = next((c for c in enriched if c["company_name"] == target_client), {})
             client_store_view = SupabaseProfileStore(company_name=target_client)
             c_all_reps = client_store_view.list_reports()
-            c_fin_reps = [r for r in c_all_reps if not str(r.get("file_name", "")).startswith(("SIM::", "PENDING_PZA::"))]
+            c_fin_reps = [r for r in c_all_reps if not str(r.get("file_name", "")).startswith(("SIM::", "PENDING_PZA::", "META::"))]
             c_sim_reps = [r for r in c_all_reps if str(r.get("file_name", "")).startswith("SIM::")]
             c_pend_reps = [r for r in c_all_reps if str(r.get("file_name", "")).startswith("PENDING_PZA::")]
 
@@ -3374,7 +3736,6 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
                     st.markdown(f"**PZA statuss:** `{sel_obj.get('onboard_label')}`")
                     st.markdown(f"**Abonements:** `{sel_obj.get('plan_label')}`")
 
-                # Dzīvescikla un aktivitātes laika josla (CRM)
                 st.markdown(
                     f'<div class="crm-timeline-grid">'
                     f'<div class="crm-meta-box"><div class="crm-meta-lbl">Reģistrēts</div><div class="crm-meta-val">{fmt_iso_dt_lv(sel_obj.get("reg_at"))}</div></div>'
@@ -3397,7 +3758,6 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
                 if sel_obj.get("free_note"):
                     st.caption(f"Piezīmes: {sel_obj['free_note']}")
 
-                # Ātrās vadības pogas klienta kartītē
                 qa1, qa2, qa3, qa4, qa5 = st.columns([1.15, 1.3, 1.25, 1.15, 0.75])
                 with qa1:
                     if st.button("Atvērt vidi", type="primary", use_container_width=True, key="crm_open_ws"):
@@ -3406,9 +3766,8 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
                         S.nav_page = "overview"
                         S.pop("admin_reviewing_client", None)
                         S.auto_loaded_latest = False
-                        S.pop("result", None)
-                        S.pop("cls_df", None)
-                        S.pop("loaded_report_meta", None)
+                        for k_clr in ("result", "cls_df", "loaded_report_meta", "ws_cfg_loaded_for"):
+                            S.pop(k_clr, None)
                         st.rerun()
                 with qa2:
                     if st.button("Aktivizēt maksas abon.", use_container_width=True, key="crm_act_paid"):
@@ -3426,12 +3785,8 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
                             last_act=sel_obj.get("last_act", ""),
                         )
                         admin_store.create_or_update_company_admin(
-                            company_name=target_client,
-                            password="",
-                            monthly_limit=10000,
-                            is_active=True,
-                            notes=new_n,
-                            reset_usage=False,
+                            company_name=target_client, password="", monthly_limit=10000,
+                            is_active=True, notes=new_n, reset_usage=False,
                         )
                         st.toast(f"Klientam '{target_client}' aktivizēts maksas abonements.")
                         st.rerun()
@@ -3452,12 +3807,8 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
                             last_act=sel_obj.get("last_act", ""),
                         )
                         admin_store.create_or_update_company_admin(
-                            company_name=target_client,
-                            password="",
-                            monthly_limit=10000,
-                            is_active=True,
-                            notes=new_n,
-                            reset_usage=False,
+                            company_name=target_client, password="", monthly_limit=10000,
+                            is_active=True, notes=new_n, reset_usage=False,
                         )
                         st.toast(f"Klientam '{target_client}' piešķirtas +5 izmēģinājuma dienas.")
                         st.rerun()
@@ -3477,12 +3828,8 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
                             last_act=sel_obj.get("last_act", ""),
                         )
                         admin_store.create_or_update_company_admin(
-                            company_name=target_client,
-                            password="",
-                            monthly_limit=10000,
-                            is_active=False,
-                            notes=new_n,
-                            reset_usage=False,
+                            company_name=target_client, password="", monthly_limit=10000,
+                            is_active=False, notes=new_n, reset_usage=False,
                         )
                         st.toast(f"Klientam '{target_client}' piekļuve apturēta.")
                         st.rerun()
@@ -3503,7 +3850,6 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
                             S.pop("confirm_del_client", None)
                             st.rerun()
 
-                # Klienta atskaišu un simulāciju saraksts + rediģēšanas forma kartītē
                 crm_sub1, crm_sub2 = st.columns([1.2, 1.1])
                 with crm_sub1:
                     with st.expander(f"Klienta atskaites un simulācijas ({len(c_fin_reps) + len(c_sim_reps)})", expanded=False):
@@ -3561,12 +3907,9 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
                                     last_act=sel_obj.get("last_act", ""),
                                 )
                                 ok_e, msg_e = admin_store.create_or_update_company_admin(
-                                    company_name=target_client,
-                                    password=ef_pw,
-                                    monthly_limit=10000,
+                                    company_name=target_client, password=ef_pw, monthly_limit=10000,
                                     is_active=ef_active if sel_p_code != "CANCELLED" else False,
-                                    notes=packed_n,
-                                    reset_usage=ef_reset,
+                                    notes=packed_n, reset_usage=ef_reset,
                                 )
                                 if ok_e:
                                     st.success(msg_e)
@@ -3603,22 +3946,13 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
                         now_iso = now_riga().strftime("%Y-%m-%dT%H:%M")
                         sel_p = rev_plan_new[nc_plan]
                         packed_new = build_structured_notes(
-                            plan_code=sel_p,
-                            email=nc_email,
-                            trial_start_dt=now_iso,
-                            free_note=nc_notes,
-                            onboard_status=nc_onb,
-                            contact_name=nc_contact,
-                            reg_at=now_iso,
+                            plan_code=sel_p, email=nc_email, trial_start_dt=now_iso, free_note=nc_notes,
+                            onboard_status=nc_onb, contact_name=nc_contact, reg_at=now_iso,
                             pza_app_at=now_iso if nc_onb == "APPROVED" else "",
                         )
                         ok_a, msg_a = admin_store.create_or_update_company_admin(
-                            company_name=nc_name,
-                            password=nc_pw,
-                            monthly_limit=10000,
-                            is_active=True,
-                            notes=packed_new,
-                            reset_usage=True,
+                            company_name=nc_name, password=nc_pw, monthly_limit=10000,
+                            is_active=True, notes=packed_new, reset_usage=True,
                         )
                         if ok_a:
                             st.success(msg_a)
@@ -3628,7 +3962,7 @@ if S.get("is_admin", False) and S.get("view_mode") == "admin_panel":
     st.stop()
 
 
-# ------------------------------------------------------------------ 3. PROFILA IELĀDE, ONBOARDING UN DEMO REŽĪMS
+# ------------------------------------------------------------------ 3. PROFILA IELĀDE, MODUĻU KONFIGURĀCIJA UN DEMO REŽĪMS
 profile = SupabaseProfileStore(company_name=S.active_profile)
 
 if "fy_start_month" not in S:
@@ -3652,7 +3986,6 @@ S.subscription_info = sub_info
 S.company_email = extract_note_field(cur_company_row.get("notes"), "EMAIL")
 S.company_contact = extract_note_field(cur_company_row.get("notes"), "CONTACT")
 
-# Reģistrējam aktivitātes laiku reizi sesijā (ja klients atgriežas caur 'Atcerēties mani')
 if not S.get("is_admin", False) and not S.get("session_act_logged", False):
     S.session_act_logged = True
     update_company_onboarding_status(admin_store, S.active_profile, mark_activity=True)
@@ -3661,7 +3994,10 @@ is_demo_mode = (not S.get("is_admin", False)) and (onboard_status in ("INTRO", "
 S.is_demo_mode = is_demo_mode
 
 all_saved_items = profile.list_reports()
-fin_reports = [r for r in all_saved_items if not str(r.get("file_name", "")).startswith(("SIM::", "PENDING_PZA::"))]
+ws_cfg = load_workspace_cfg(profile, all_saved_items)
+active_modules = ws_cfg["modules"]
+
+fin_reports = [r for r in all_saved_items if not str(r.get("file_name", "")).startswith(("SIM::", "PENDING_PZA::", "META::"))]
 sim_reports = [r for r in all_saved_items if str(r.get("file_name", "")).startswith("SIM::")]
 saved_acc_count = profile.count_saved()
 
@@ -3733,7 +4069,7 @@ def ensure_shared_working_period(all_months: list[str], months_by_year: dict[int
     return preset_opts, S.working_months_active
 
 
-# ------------------------------------------------------------------ ASISTENTA IEKŠĒJAIS LOGS (THRUVIA EKSPERTS)
+# ------------------------------------------------------------------ ASISTENTA IEKŠĒJAIS LOGS
 def _render_assistant_popover_content(form_key: str) -> None:
     top_c1, top_c2 = st.columns([1.8, 1.2], vertical_alignment="center")
     with top_c1:
@@ -3864,7 +4200,7 @@ def _render_assistant_popover_content(form_key: str) -> None:
             st.caption("Vispirms nospiediet apturēšanas pogu (Stop) pie mikrofona, lai pabeigtu balss ierakstu.")
 
 
-# ------------------------------------------------------------------ 4. PELDOŠĀ AUGŠĒJĀ RĪKJOSLA (FIKSĒTS TUMŠI PELĒKZILS FONS)
+# ------------------------------------------------------------------ 4. PELDOŠĀ AUGŠĒJĀ RĪKJOSLA AR MACOS STATUSA JOSLU UN "MODUĻI" IZVĒLNI
 if is_demo_mode:
     PRIMARY_NAV = {
         "overview": "Pārskats (Demo)",
@@ -3900,10 +4236,111 @@ trial_badge_html = (
 )
 
 
+def _build_module_status_tray_html() -> str:
+    """Ģenerē macOS stila diskrētos statusa indikatorus tikai ieslēgtajiem moduļiem."""
+    chips = []
+    res_now = S.get("result")
+    all_m_now = (
+        [c for c in res_now.amounts.columns if not ("YTD" in c or "AVG" in c or "KOPĀ" in c or "TOTAL" in c)]
+        if res_now is not None
+        else []
+    )
+    sel_m_now = [m for m in all_m_now if m in S.get("working_months_active", all_m_now)] or all_m_now
+
+    if active_modules.get("valves"):
+        if res_now is not None and sel_m_now:
+            v_s = compute_valves_summary(res_now.amounts, res_now.row_kinds, sel_m_now, ws_cfg.get("valves", {}))
+            if v_s["exceeded_count"] > 0:
+                chips.append(
+                    f'<span class="mod-chip mod-chip-alert" title="Pārsniegti {v_s["exceeded_count"]} OE ventiļi aktīvajā periodā">'
+                    f'<span class="mod-dot mod-dot-red"></span>Ventiļi · {v_s["exceeded_count"]}</span>'
+                )
+            elif v_s["configured_count"] > 0:
+                chips.append(
+                    '<span class="mod-chip" title="Visi iestatītie OE ventiļi ir normas robežās">'
+                    '<span class="mod-dot mod-dot-green"></span>Ventiļi</span>'
+                )
+            else:
+                chips.append(
+                    '<span class="mod-chip" title="Ventiļu sistēma ieslēgta — iestatiet limitus Pārskatā">'
+                    '<span class="mod-dot mod-dot-amber"></span>Ventiļi</span>'
+                )
+        else:
+            chips.append('<span class="mod-chip"><span class="mod-dot mod-dot-green"></span>Ventiļi</span>')
+
+    if active_modules.get("investments"):
+        inv_txt = "Investīcijas"
+        if res_now is not None and sel_m_now:
+            acc_s = S.get("loaded_account_details") or []
+            pza_i, _ = compute_pza_investments_by_month(acc_s, sel_m_now)
+            man_i = sum(
+                float(x.get("amount", 0) or 0)
+                for x in ws_cfg.get("investments", {}).get("manual", [])
+                if not x.get("month") or x.get("month") in sel_m_now
+            )
+            tot_i = float(pza_i.sum()) + man_i
+            if tot_i > 0:
+                inv_txt = f"Investīcijas · {fmt_num(tot_i)} €"
+        chips.append(f'<span class="mod-chip" title="Investīcijas (I — ārpus OE)"><span class="mod-dot mod-dot-blue"></span>{inv_txt}</span>')
+
+    if active_modules.get("warehouse"):
+        wh_txt = "Noliktava"
+        if res_now is not None and sel_m_now:
+            wh_s = compute_warehouse_summary(res_now.amounts, sel_m_now, ws_cfg.get("warehouse", {}))
+            if wh_s["last_val"] > 0:
+                wh_txt = f"Noliktava · {fmt_num(wh_s['last_val'])} €"
+        chips.append(f'<span class="mod-chip" title="Noliktavas atlikumi (I — TVC vērtībā)"><span class="mod-dot mod-dot-amber"></span>{wh_txt}</span>')
+
+    if not chips:
+        return ""
+    return f'<span class="status-tray">{"".join(chips)}</span>'
+
+
+def _render_modules_popover_content(key_sfx: str) -> None:
+    st.markdown("**Papildmoduļi (TOC)**")
+    st.caption("Ieslēdziet tikai nepieciešamās funkcijas — tās automātiski parādīsies sadaļā Pārskats un statusa joslā.")
+
+    mod_meta = [
+        ("valves", "Ventiļu sistēma (OE limiti)", "Uzstādiet mēneša limitus OE izdevumiem un sekojiet atlikumam vai pārtēriņam."),
+        ("investments", "Investīcijas (I — ārpus OE)", "Atdaliet CAPEX / attīstības ieguldījumus no OE un skatiet TOC ROI."),
+        ("warehouse", "Noliktavas atlikumi (I)", "Sekojiet krājumu atlikumiem (Izejvielas, WIP, Gatavā produkcija) un krājumu dienām."),
+    ]
+    changed_mod = False
+    for m_key, m_lbl, m_help in mod_meta:
+        old_v = bool(active_modules.get(m_key, False))
+        new_v = st.toggle(m_lbl, value=old_v, help=m_help, key=f"mod_tog_{m_key}_{key_sfx}")
+        if new_v != old_v:
+            active_modules[m_key] = new_v
+            append_audit_event(
+                profile,
+                "Moduļi",
+                m_lbl,
+                "Ieslēgts" if old_v else "Izslēgts",
+                "Ieslēgts" if new_v else "Izslēgts",
+                persist=False,
+            )
+            changed_mod = True
+
+    if changed_mod:
+        save_workspace_cfg(profile, ws_cfg)
+        st.rerun()
+
+    st.markdown("---")
+    log_cnt = len(ws_cfg.get("audit_log", []))
+    if st.button(f"Izmaiņu vēsture ({log_cnt})", key=f"mod_to_audit_{key_sfx}", use_container_width=True):
+        S.nav_page = "audit_log"
+        st.query_params["p"] = "audit_log"
+        st.rerun()
+
+
 def _render_account_menu_popover(key_sfx: str) -> None:
     st.markdown(f"**{S.active_profile}**")
     st.caption(sub_info["label"])
     st.markdown("---")
+    if st.button("Izmaiņu vēsture", key=f"acc_menu_aud_{key_sfx}", use_container_width=True):
+        S.nav_page = "audit_log"
+        st.query_params["p"] = "audit_log"
+        st.rerun()
     if st.button("Uzstādījumi un Abonements", key=f"acc_menu_set_{key_sfx}", use_container_width=True):
         S.nav_page = "settings"
         st.query_params["p"] = "settings"
@@ -3920,9 +4357,12 @@ def _render_account_menu_popover(key_sfx: str) -> None:
         st.rerun()
 
 
-# Ja klients ir uz atsevišķās ievadlapas (INTRO), rādām minimālu augšējo joslu bez liekas navigācijas
 if not S.get("is_admin", False) and onboard_status == "INTRO" and S.nav_page not in ("about", "settings"):
     S.nav_page = "intro"
+
+status_tray_html = _build_module_status_tray_html()
+active_mod_cnt = sum(1 for v in active_modules.values() if v)
+mod_btn_lbl = f"Moduļi ({active_mod_cnt})" if active_mod_cnt > 0 else "Moduļi"
 
 with st.container():
     st.markdown('<div class="sticky-nav-marker"></div>', unsafe_allow_html=True)
@@ -3941,7 +4381,12 @@ with st.container():
             with st.popover("Profils", use_container_width=True):
                 _render_account_menu_popover("intro")
     elif S.hide_top_toolbar:
-        _, col_asist, col_prof, col_arr = st.columns([5.3, 1.0, 0.9, 0.35], vertical_alignment="center")
+        c_tray_min, col_mod_m, col_asist, col_prof, col_arr = st.columns([4.1, 0.9, 0.95, 0.85, 0.35], vertical_alignment="center")
+        with c_tray_min:
+            st.markdown(f'<div class="top-brand-bar"><span class="top-brand-title" style="font-size:16px;">THRUVIA</span>{status_tray_html}</div>', unsafe_allow_html=True)
+        with col_mod_m:
+            with st.popover(mod_btn_lbl, use_container_width=True):
+                _render_modules_popover_content("min")
         with col_asist:
             with st.popover("Asistents", use_container_width=True):
                 _render_assistant_popover_content("side_agent_form_min")
@@ -3953,15 +4398,19 @@ with st.container():
                 S.hide_top_toolbar = False
                 st.rerun()
     else:
-        hdr_left, hdr_asist, hdr_about, hdr_prof, hdr_arr = st.columns([4.3, 1.0, 0.95, 0.9, 0.35], vertical_alignment="center")
+        hdr_left, hdr_mod, hdr_asist, hdr_about, hdr_prof, hdr_arr = st.columns([3.85, 0.88, 0.92, 0.92, 0.85, 0.35], vertical_alignment="center")
         with hdr_left:
             st.markdown(
                 f'<div class="top-brand-bar">'
                 f'<span class="top-brand-title">THRUVIA</span>'
-                f'<span class="top-brand-sub"><b>{S.active_profile}</b> &nbsp;|&nbsp; Atskaite: <b>{active_rep_label}</b>{demo_badge_html}{unsaved_badge_html}{trial_badge_html}</span>'
+                f'<span class="top-brand-sub"><b>{S.active_profile}</b> &nbsp;|&nbsp; <b>{active_rep_label}</b>{demo_badge_html}{unsaved_badge_html}{trial_badge_html}</span>'
+                f'{status_tray_html}'
                 f'</div>',
                 unsafe_allow_html=True,
             )
+        with hdr_mod:
+            with st.popover(mod_btn_lbl, use_container_width=True):
+                _render_modules_popover_content("full")
         with hdr_asist:
             with st.popover("Asistents", use_container_width=True):
                 _render_assistant_popover_content("side_agent_form")
@@ -4076,7 +4525,7 @@ if (
             st.link_button("Pievienot maksājumu karti", billing_cfg["stripe_checkout_url"], use_container_width=True)
 
 
-# ------------------------------------------------------------------ 7. DETALIZĒTA 8 SOĻU INLINE DEMO APMĀCĪBA (POGAS TIEŠI PIE IZCELTĀS VIETAS!)
+# ------------------------------------------------------------------ 7. DETALIZĒTA 8 SOĻU INLINE DEMO APMĀCĪBA
 TUTORIAL_STEPS = [
     {
         "step": 1, "page": "overview", "focus": "period",
@@ -4163,11 +4612,11 @@ TUTORIAL_STEPS = [
     },
     {
         "step": 8, "page": "overview", "focus": "assistant",
-        "title": "Asistents un sava uzņēmuma PZA pievienošana",
+        "title": "Asistents, Moduļi un sava uzņēmuma PZA pievienošana",
         "html": (
-            "Augšējā labajā stūrī vienmēr ir pieejama poga <b>Asistents</b> — tas darbojas gan rakstiski, gan ar balsi:"
+            "Augšējā labajā stūrī atrodas <b>Moduļi</b> (Ventiļi, Investīcijas, Noliktava) un <b>Asistents</b> (darbojas rakstiski un ar balsi):"
             "<ul>"
-            "<li>Varat jautāt par jebkuru skaitli, noskaidrot, kur aplikācijā atrodas kāda funkcija, vai palūgt pārdēvēt/sakārtot tabulas rindas.</li>"
+            "<li>Asistentam varat jautāt par jebkuru skaitli, noskaidrot, kur atrodas kāda funkcija, vai palūgt pārdēvēt/sakārtot rindas.</li>"
             "<li><b>Apmācība pabeigta!</b> Spiediet pogu <i>Pabeigt un iesniegt savu PZA</i>, lai pievienotu sava uzņēmuma failu.</li>"
             "</ul>"
         ),
@@ -4177,12 +4626,11 @@ TUTORIAL_STEPS = [
 tut_active_focus: str | None = None
 tut_active_cfg: dict | None = None
 
-if not S.get("is_admin", False) and onboard_status == "TUTORIAL" and S.nav_page not in ("intro", "submit_pza", "about", "settings"):
+if not S.get("is_admin", False) and onboard_status == "TUTORIAL" and S.nav_page not in ("intro", "submit_pza", "about", "settings", "audit_log"):
     cur_t_step = max(1, min(len(TUTORIAL_STEPS), int(S.get("tutorial_step", 1))))
     tut_active_cfg = TUTORIAL_STEPS[cur_t_step - 1]
     tut_active_focus = tut_active_cfg["focus"]
 
-    # Ja lietotājs manuāli atvēris citu cilni nekā šī soļa lapa, rādām īsu 1 rindas norādi atgriezties pie soļa
     if S.nav_page != tut_active_cfg["page"]:
         rb1, rb2 = st.columns([3.5, 1.3], vertical_alignment="center")
         with rb1:
@@ -4194,7 +4642,6 @@ if not S.get("is_admin", False) and onboard_status == "TUTORIAL" and S.nav_page 
 
 
 def render_inline_tutorial_card(expected_focus: str) -> None:
-    """Parāda detalizētu soļa paskaidrojumu UN pogas (Iepriekšējais / Nākamais) tieši pie izceltās zonas."""
     if tut_active_cfg is None or tut_active_focus != expected_focus:
         return
     step_n = tut_active_cfg["step"]
@@ -4232,7 +4679,6 @@ def render_inline_tutorial_card(expected_focus: str) -> None:
             S.nav_page = "submit_pza"
             st.rerun()
 
-    # Pārtinam ekrānu precīzi uz šo kartīti (īpaši 3., 4., 5. solim, kas atrodas zemāk lapā)
     if step_n in (3, 4, 5):
         components.html(
             """
@@ -4247,8 +4693,7 @@ def render_inline_tutorial_card(expected_focus: str) -> None:
         )
 
 
-# Gaidīšanas vai Brīdinājuma josla (PENDING_WAIT / PENDING_IMMEDIATE)
-if not S.get("is_admin", False) and onboard_status == "PENDING_WAIT" and S.nav_page not in ("intro", "submit_pza", "about", "settings"):
+if not S.get("is_admin", False) and onboard_status == "PENDING_WAIT" and S.nav_page not in ("intro", "submit_pza", "about", "settings", "audit_log"):
     with st.container(border=True):
         pw_c1, pw_c2 = st.columns([2.6, 1.4], vertical_alignment="center")
         with pw_c1:
@@ -4264,7 +4709,7 @@ if not S.get("is_admin", False) and onboard_status == "PENDING_WAIT" and S.nav_p
                 S.nav_page = "submit_pza"
                 st.rerun()
 
-elif not S.get("is_admin", False) and onboard_status == "PENDING_IMMEDIATE" and S.nav_page not in ("about", "settings"):
+elif not S.get("is_admin", False) and onboard_status == "PENDING_IMMEDIATE" and S.nav_page not in ("about", "settings", "audit_log"):
     st.markdown(
         '<div class="disclaimer-urgent-box">'
         '<b>BRĪDINĀJUMS — PZA struktūra vēl nav pārbaudīta.</b><br>'
@@ -4274,7 +4719,7 @@ elif not S.get("is_admin", False) and onboard_status == "PENDING_IMMEDIATE" and 
         unsafe_allow_html=True,
     )
 
-if not S.get("is_admin", False) and onboard_status == "SUBMIT_PZA" and S.nav_page not in ("submit_pza", "about", "settings"):
+if not S.get("is_admin", False) and onboard_status == "SUBMIT_PZA" and S.nav_page not in ("submit_pza", "about", "settings", "audit_log"):
     S.nav_page = "submit_pza"
 
 if sub_info["expired"] and not S.get("is_admin", False) and S.nav_page not in ("settings", "about"):
@@ -4323,7 +4768,7 @@ if S.nav_page == "intro":
             st.markdown(
                 """
                 **Ierobežojumu teorija (*Theory of Constraints — TOC*)** raugās uz uzņēmumu kā vienotu sistēmu, kuras galvenais mērķis ir pelnīt naudu šodien un nākotnē.
-                Tās finanšu metode — **Caurlaidības grāmatvedība (*Throughput Accounting*)** — atsijātās grāmatvedības detaļas sakārto **5 skaidros rādītājos**:
+                Tās finanšu metode — **Caurlaidības grāmatvedība (*Throughput Accounting*)** — sakārto finanšu datus skaidros vadības rādītājos:
                 """
             )
 
@@ -4346,7 +4791,7 @@ if S.nav_page == "intro":
 
             st.markdown(
                 """
-                No šiem trim rādītājiem automātiski rodas divi galvenie vadības rezultāti:
+                No šiem trim rādītājiem automātiski rodas galvenie vadības rezultāti:
                 * **T = S − TVC (Caurlaidība / *Throughput*)** — jaunā nauda, ko uzņēmums patiesībā nopelna, lai segtu darbības izmaksas un gūtu peļņu.
                 * **NP = T − OE (TOC Neto peļņa)** — reālais uzņēmuma darbības rezultāts (bez virtuālām grāmatvedības pozīcijām, piemēram, nolietojuma).
                 * **PR = T / OE (Produktivitāte)** — cik eiro Caurlaidības rodas uz katru 1 € uzturēšanas izmaksu (mērķis: **virs 1.15**).
@@ -4540,7 +4985,7 @@ elif S.nav_page == "submit_pza":
 
 
 # ==============================================================================
-# POSMS 1: PĀRSKATS (OVERVIEW) — INLINE DEMO SOĻI PIE KATRĀS TABULAS UN GRAFIKA
+# POSMS 1: PĀRSKATS (OVERVIEW) — SINHRONIZĒTĀ RITINĀŠANA + PAPILDMODUĻU CILNES
 # ==============================================================================
 elif S.nav_page == "overview":
     if S.pop("pza_just_submitted", False):
@@ -4593,7 +5038,6 @@ elif S.nav_page == "overview":
         else:
             S.working_period_preset = "Manuāla mēnešu izlase"
 
-    # Inline apmācības kartītes 1. (periods) un 8. (asistents) solim tieši šeit augšā
     render_inline_tutorial_card("period")
     render_inline_tutorial_card("assistant")
 
@@ -4703,272 +5147,769 @@ elif S.nav_page == "overview":
                     use_container_width=True,
                 )
 
-    # --- 14/15 MĒNEŠU SLIEKSNIS ---
-    sel_by_year: dict[int, list[str]] = {}
-    for m_col in fin_selected_months:
-        _, yr = parse_period_month_year(m_col)
-        if yr:
-            sel_by_year.setdefault(yr, []).append(m_col)
-    sel_years_sorted = sorted(sel_by_year.keys())
+    # ---- PALĪGFUNKCIJA: GALVENĀ PĀRSKATA SATURS ----
+    def _render_main_overview_body() -> None:
+        sel_by_year: dict[int, list[str]] = {}
+        for m_col in fin_selected_months:
+            _, yr = parse_period_month_year(m_col)
+            if yr:
+                sel_by_year.setdefault(yr, []).append(m_col)
+        sel_years_sorted = sorted(sel_by_year.keys())
 
-    table_res_to_render = view_res
-    table_title_suffix = f"{len(fin_selected_months)} mēn."
-    show_cum_table = True
-    use_freeze_sides = False
+        table_res_to_render = view_res
+        table_title_suffix = f"{len(fin_selected_months)} mēn."
+        show_cum_table = True
+        use_freeze_sides = False
 
-    if len(fin_selected_months) >= 15:
-        has_multi_years = len(sel_years_sorted) > 1
-        view_opts = (
-            ["Pa gadiem (pāršķirams)", "Visi mēneši (ritināms ar fiksētām malām)", "Gadu salīdzinājums"]
-            if has_multi_years
-            else ["Pa periodiem (12 mēn. lapā)", "Visi mēneši (ritināms ar fiksētām malām)"]
-        )
+        if len(fin_selected_months) >= 15:
+            has_multi_years = len(sel_years_sorted) > 1
+            view_opts = (
+                ["Pa gadiem (pāršķirams)", "Visi mēneši (ritināms ar fiksētām malām)", "Gadu salīdzinājums"]
+                if has_multi_years
+                else ["Pa periodiem (12 mēn. lapā)", "Visi mēneši (ritināms ar fiksētām malām)"]
+            )
 
-        with st.container(border=True):
-            my_c1, my_c2 = st.columns([2.1, 2.2], vertical_alignment="center")
-            with my_c1:
-                multi_year_view = st.radio(
-                    f"Tabulas attēlošanas veids ({len(fin_selected_months)} mēneši)",
-                    options=view_opts,
-                    horizontal=True,
-                    key="ov_multi_year_view",
-                )
-            with my_c2:
-                if multi_year_view == "Pa gadiem (pāršķirams)" and has_multi_years:
-                    if "ov_page_year" not in S or S.ov_page_year not in sel_years_sorted:
-                        S.ov_page_year = sel_years_sorted[-1]
-                    cur_yr_idx = sel_years_sorted.index(S.ov_page_year)
-
-                    pg1, pg2, pg3, pg4 = st.columns([0.85, 1.1, 0.85, 1.5], vertical_alignment="center")
-                    with pg1:
-                        if st.button("◀ Iepriekšējais", disabled=(cur_yr_idx == 0), use_container_width=True, key="btn_yr_prev"):
-                            S.ov_page_year = sel_years_sorted[cur_yr_idx - 1]
-                            st.rerun()
-                    with pg2:
-                        chosen_yr = st.selectbox(
-                            "Gads",
-                            options=sel_years_sorted,
-                            index=cur_yr_idx,
-                            format_func=lambda y: f"{y}. gads ({len(sel_by_year[y])} mēn.)",
-                            label_visibility="collapsed",
-                            key="sel_ov_page_yr_box",
-                        )
-                        if chosen_yr != S.ov_page_year:
-                            S.ov_page_year = chosen_yr
-                            st.rerun()
-                    with pg3:
-                        if st.button("Nākamais ▶", disabled=(cur_yr_idx == len(sel_years_sorted) - 1), use_container_width=True, key="btn_yr_next"):
-                            S.ov_page_year = sel_years_sorted[cur_yr_idx + 1]
-                            st.rerun()
-                    with pg4:
-                        keep_all_totals = st.checkbox(
-                            f"KOPĀ / AVG par visu periodu ({len(fin_selected_months)}m)",
-                            value=True,
-                            key="ov_keep_all_totals_chk",
-                        )
-
-                    yr_months_show = sel_by_year[S.ov_page_year]
-                    if keep_all_totals:
-                        table_res_to_render = filter_result_by_months(
-                            res,
-                            yr_months_show,
-                            all_months,
-                            summary_source_months=fin_selected_months,
-                            summary_label_prefix=f"Visi ({len(fin_selected_months)}m)",
-                        )
-                    else:
-                        table_res_to_render = filter_result_by_months(
-                            res,
-                            yr_months_show,
-                            all_months,
-                            summary_source_months=yr_months_show,
-                            summary_label_prefix=str(S.ov_page_year),
-                        )
-                    table_title_suffix = f"{S.ov_page_year}. gads ({len(yr_months_show)} mēn.) no {len(fin_selected_months)} mēn."
-
-                elif multi_year_view == "Pa periodiem (12 mēn. lapā)":
-                    chunks = [fin_selected_months[i : i + 12] for i in range(0, len(fin_selected_months), 12)]
-                    if "ov_chunk_idx" not in S or S.ov_chunk_idx >= len(chunks):
-                        S.ov_chunk_idx = len(chunks) - 1
-                    c_idx = S.ov_chunk_idx
-
-                    pg1, pg2, pg3, pg4 = st.columns([0.85, 1.1, 0.85, 1.5], vertical_alignment="center")
-                    with pg1:
-                        if st.button("◀ Iepriekšējais", disabled=(c_idx == 0), use_container_width=True, key="btn_chk_prev"):
-                            S.ov_chunk_idx = c_idx - 1
-                            st.rerun()
-                    with pg2:
-                        st.markdown(f"<div style='text-align:center;font-weight:600;padding-top:6px;'>Lapa {c_idx + 1} / {len(chunks)}</div>", unsafe_allow_html=True)
-                    with pg3:
-                        if st.button("Nākamais ▶", disabled=(c_idx == len(chunks) - 1), use_container_width=True, key="btn_chk_next"):
-                            S.ov_chunk_idx = c_idx + 1
-                            st.rerun()
-                    with pg4:
-                        keep_all_totals = st.checkbox(
-                            f"KOPĀ / AVG par visu periodu ({len(fin_selected_months)}m)",
-                            value=True,
-                            key="ov_keep_all_chk2",
-                        )
-
-                    ch_months = chunks[c_idx]
-                    table_res_to_render = filter_result_by_months(
-                        res,
-                        ch_months,
-                        all_months,
-                        summary_source_months=fin_selected_months if keep_all_totals else ch_months,
-                        summary_label_prefix=f"Visi ({len(fin_selected_months)}m)" if keep_all_totals else f"Lapa {c_idx + 1}",
+            with st.container(border=True):
+                my_c1, my_c2 = st.columns([2.1, 2.2], vertical_alignment="center")
+                with my_c1:
+                    multi_year_view = st.radio(
+                        f"Tabulas attēlošanas veids ({len(fin_selected_months)} mēneši)",
+                        options=view_opts,
+                        horizontal=True,
+                        key="ov_multi_year_view",
                     )
-                    table_title_suffix = f"{ch_months[0]}–{ch_months[-1]} (no {len(fin_selected_months)} mēn.)"
+                with my_c2:
+                    if multi_year_view == "Pa gadiem (pāršķirams)" and has_multi_years:
+                        if "ov_page_year" not in S or S.ov_page_year not in sel_years_sorted:
+                            S.ov_page_year = sel_years_sorted[-1]
+                        cur_yr_idx = sel_years_sorted.index(S.ov_page_year)
 
-                elif multi_year_view == "Gadu salīdzinājums":
-                    st.caption("Katra kolonna parāda attiecīgā gada kopsummu — ērts pārskats par vairākiem gadiem bez ritināšanas.")
-                    table_res_to_render = aggregate_result_by_years(res, fin_selected_months)
-                    table_title_suffix = f"Gadu salīdzinājums ({sel_years_sorted[0]}–{sel_years_sorted[-1]})"
-                    show_cum_table = False
+                        pg1, pg2, pg3, pg4 = st.columns([0.85, 1.1, 0.85, 1.5], vertical_alignment="center")
+                        with pg1:
+                            if st.button("◀ Iepriekšējais", disabled=(cur_yr_idx == 0), use_container_width=True, key="btn_yr_prev"):
+                                S.ov_page_year = sel_years_sorted[cur_yr_idx - 1]
+                                st.rerun()
+                        with pg2:
+                            chosen_yr = st.selectbox(
+                                "Gads",
+                                options=sel_years_sorted,
+                                index=cur_yr_idx,
+                                format_func=lambda y: f"{y}. gads ({len(sel_by_year[y])} mēn.)",
+                                label_visibility="collapsed",
+                                key="sel_ov_page_yr_box",
+                            )
+                            if chosen_yr != S.ov_page_year:
+                                S.ov_page_year = chosen_yr
+                                st.rerun()
+                        with pg3:
+                            if st.button("Nākamais ▶", disabled=(cur_yr_idx == len(sel_years_sorted) - 1), use_container_width=True, key="btn_yr_next"):
+                                S.ov_page_year = sel_years_sorted[cur_yr_idx + 1]
+                                st.rerun()
+                        with pg4:
+                            keep_all_totals = st.checkbox(
+                                f"KOPĀ / AVG par visu periodu ({len(fin_selected_months)}m)",
+                                value=True,
+                                key="ov_keep_all_totals_chk",
+                            )
 
-                else:
-                    st.caption("Ritiniet mēnešus horizontāli — Rādītāju nosaukumi (pa kreisi) un Perioda KOPĀ / AVG (pa labi) paliek fiksēti.")
-                    use_freeze_sides = True
+                        yr_months_show = sel_by_year[S.ov_page_year]
+                        if keep_all_totals:
+                            table_res_to_render = filter_result_by_months(
+                                res, yr_months_show, all_months,
+                                summary_source_months=fin_selected_months,
+                                summary_label_prefix=f"Visi ({len(fin_selected_months)}m)",
+                            )
+                        else:
+                            table_res_to_render = filter_result_by_months(
+                                res, yr_months_show, all_months,
+                                summary_source_months=yr_months_show,
+                                summary_label_prefix=str(S.ov_page_year),
+                            )
+                        table_title_suffix = f"{S.ov_page_year}. gads ({len(yr_months_show)} mēn.) no {len(fin_selected_months)} mēn."
 
-    # 1. TABULA: Galvenā TOC tabula + 2. soļa inline apmācība tieši virs tās
-    render_inline_tutorial_card("main")
-    st.markdown(
-        render_unified_toc_tables_html(
-            table_res_to_render.amounts,
-            table_res_to_render.main,
-            table_res_to_render.kpi,
-            table_res_to_render.row_kinds,
-            title_main=f"Finanšu pārskata tabula — {active_rep_label} ({table_title_suffix})",
-            fy_start_month=S.get("fy_start_month", 1),
-            show_cumulative=False,
-            freeze_sides=use_freeze_sides,
-            highlight_section="main" if tut_active_focus == "main" else None,
-            sections=("main",),
-        ),
-        unsafe_allow_html=True,
-    )
+                    elif multi_year_view == "Pa periodiem (12 mēn. lapā)":
+                        chunks = [fin_selected_months[i : i + 12] for i in range(0, len(fin_selected_months), 12)]
+                        if "ov_chunk_idx" not in S or S.ov_chunk_idx >= len(chunks):
+                            S.ov_chunk_idx = len(chunks) - 1
+                        c_idx = S.ov_chunk_idx
 
-    # 2. TABULA: Produktivitātes rādītāji + 3. soļa inline apmācība tieši virs tās
-    render_inline_tutorial_card("kpi")
-    st.markdown(
-        render_unified_toc_tables_html(
-            table_res_to_render.amounts,
-            table_res_to_render.main,
-            table_res_to_render.kpi,
-            table_res_to_render.row_kinds,
-            title_kpi="Produktivitātes un atdeves rādītāji",
-            fy_start_month=S.get("fy_start_month", 1),
-            show_cumulative=False,
-            freeze_sides=use_freeze_sides,
-            highlight_section="kpi" if tut_active_focus == "kpi" else None,
-            sections=("kpi",),
-        ),
-        unsafe_allow_html=True,
-    )
+                        pg1, pg2, pg3, pg4 = st.columns([0.85, 1.1, 0.85, 1.5], vertical_alignment="center")
+                        with pg1:
+                            if st.button("◀ Iepriekšējais", disabled=(c_idx == 0), use_container_width=True, key="btn_chk_prev"):
+                                S.ov_chunk_idx = c_idx - 1
+                                st.rerun()
+                        with pg2:
+                            st.markdown(f"<div style='text-align:center;font-weight:600;padding-top:6px;'>Lapa {c_idx + 1} / {len(chunks)}</div>", unsafe_allow_html=True)
+                        with pg3:
+                            if st.button("Nākamais ▶", disabled=(c_idx == len(chunks) - 1), use_container_width=True, key="btn_chk_next"):
+                                S.ov_chunk_idx = c_idx + 1
+                                st.rerun()
+                        with pg4:
+                            keep_all_totals = st.checkbox(
+                                f"KOPĀ / AVG par visu periodu ({len(fin_selected_months)}m)",
+                                value=True,
+                                key="ov_keep_all_chk2",
+                            )
 
-    # 3. TABULA: Uzkrājošie rādītāji + 4. soļa inline apmācība tieši virs tās
-    if show_cum_table:
-        render_inline_tutorial_card("cum")
+                        ch_months = chunks[c_idx]
+                        table_res_to_render = filter_result_by_months(
+                            res, ch_months, all_months,
+                            summary_source_months=fin_selected_months if keep_all_totals else ch_months,
+                            summary_label_prefix=f"Visi ({len(fin_selected_months)}m)" if keep_all_totals else f"Lapa {c_idx + 1}",
+                        )
+                        table_title_suffix = f"{ch_months[0]}–{ch_months[-1]} (no {len(fin_selected_months)} mēn.)"
+
+                    elif multi_year_view == "Gadu salīdzinājums":
+                        st.caption("Katra kolonna parāda attiecīgā gada kopsummu — ērts pārskats par vairākiem gadiem bez ritināšanas.")
+                        table_res_to_render = aggregate_result_by_years(res, fin_selected_months)
+                        table_title_suffix = f"Gadu salīdzinājums ({sel_years_sorted[0]}–{sel_years_sorted[-1]})"
+                        show_cum_table = False
+
+                    else:
+                        st.caption("Ritiniet mēnešus horizontāli — Rādītāju nosaukumi (pa kreisi) un Perioda KOPĀ / AVG (pa labi) paliek fiksēti.")
+                        use_freeze_sides = True
+
+        # 1. Galvenā TOC tabula
+        render_inline_tutorial_card("main")
         st.markdown(
             render_unified_toc_tables_html(
                 table_res_to_render.amounts,
                 table_res_to_render.main,
                 table_res_to_render.kpi,
                 table_res_to_render.row_kinds,
+                title_main=f"Finanšu pārskata tabula — {active_rep_label} ({table_title_suffix})",
                 fy_start_month=S.get("fy_start_month", 1),
-                show_cumulative=True,
+                show_cumulative=False,
                 freeze_sides=use_freeze_sides,
-                highlight_section="cum" if tut_active_focus == "cum" else None,
-                sections=("cum",),
+                highlight_section="main" if tut_active_focus == "main" else None,
+                sections=("main",),
+                sync_scroll=True,
             ),
             unsafe_allow_html=True,
         )
 
-    # 4. GRAFIKI + 5. soļa inline apmācība tieši virs grafikiem
-    render_inline_tutorial_card("charts")
-    render_overview_charts(
-        view_res.amounts,
-        view_res.kpi,
-        fy_start_month=S.get("fy_start_month", 1),
-        highlight_charts=(tut_active_focus == "charts"),
-    )
+        # 2. Produktivitātes tabula
+        render_inline_tutorial_card("kpi")
+        st.markdown(
+            render_unified_toc_tables_html(
+                table_res_to_render.amounts,
+                table_res_to_render.main,
+                table_res_to_render.kpi,
+                table_res_to_render.row_kinds,
+                title_kpi="Produktivitātes un atdeves rādītāji",
+                fy_start_month=S.get("fy_start_month", 1),
+                show_cumulative=False,
+                freeze_sides=use_freeze_sides,
+                highlight_section="kpi" if tut_active_focus == "kpi" else None,
+                sections=("kpi",),
+                sync_scroll=True,
+            ),
+            unsafe_allow_html=True,
+        )
 
-    if getattr(res, "reconciliation", None) is not None and not res.reconciliation.empty:
-        with st.expander("Kontrole: Salīdzinājums ar PZA"):
-            st.dataframe(res.reconciliation.style.format(fmt_num), use_container_width=True)
+        # 3. Uzkrājošo rādītāju tabula
+        if show_cum_table:
+            render_inline_tutorial_card("cum")
+            st.markdown(
+                render_unified_toc_tables_html(
+                    table_res_to_render.amounts,
+                    table_res_to_render.main,
+                    table_res_to_render.kpi,
+                    table_res_to_render.row_kinds,
+                    fy_start_month=S.get("fy_start_month", 1),
+                    show_cumulative=True,
+                    freeze_sides=use_freeze_sides,
+                    highlight_section="cum" if tut_active_focus == "cum" else None,
+                    sections=("cum",),
+                    sync_scroll=True,
+                ),
+                unsafe_allow_html=True,
+            )
 
-    st.markdown("---")
-    rec_c1, rec_c2 = st.columns([3, 1], vertical_alignment="center")
-    with rec_c1:
-        st.subheader(f"TOC eksperta secinājumi un ieteikumi ({len(fin_selected_months)} mēn. periodam)")
-    with rec_c2:
-        regen_btn = st.button("Pieprasīt eksperta ieteikumus", type="primary", use_container_width=True)
+        # Pieslēdzam sinhronizēto horizontālo ritināšanu visām trim tabulām!
+        inject_sync_table_scroll_js()
 
-    cum_df_md, _, _ = compute_cumulative_toc_df(view_res.amounts, fy_start_month=S.get("fy_start_month", 1))
-    tables_md = (
-        f"Izvēlētais periods: {', '.join(fin_selected_months)}\n\n"
-        + view_res.amounts.round(0).to_markdown()
-        + "\n\n"
-        + view_res.kpi.round(3).to_markdown()
-        + "\n\nUzkrājošie rādītāji:\n"
-        + cum_df_md.round(0).to_markdown()
-    )
+        # 4. Grafiki
+        render_inline_tutorial_card("charts")
+        render_overview_charts(
+            view_res.amounts,
+            view_res.kpi,
+            fy_start_month=S.get("fy_start_month", 1),
+            highlight_charts=(tut_active_focus == "charts"),
+        )
 
-    knowledge_context = f"Papildu THRUVIA / TOC zināšanu bāze:\n{knowledge_file}\n\n" if knowledge_file else ""
-    COMMENT_SYSTEM = (
-        "Tu esi laipns, tiešs un pieredzējis THRUVIA (TOC Caurlaidības grāmatvedības / Throughput Accounting) finanšu eksperts.\n"
-        f"{TOC_CORE_EXPERT_KNOWLEDGE}\n"
-        f"{knowledge_context}"
-        "SVARĪGI NOTEIKUMI:\n"
-        "1) Nesauc tekstu par 'Vadības kopsavilkumu'. Raksti kā TOC eksperts, kurš vadības komandai vienkāršā, saprotamā valodā izstāsta, ko rāda šie skaitļi.\n"
-        "2) NEKAD neraksti par 'mārketinga efektivitāti' vai reklāmas atdevi, jo to no PZA nomērīt ir ļoti grūti un neobjektīvi.\n"
-        "3) Fokusējies uz trim lietām:\n"
-        "   • **Ko rāda Caurlaidības (T un T%), OE un NP skaitļi**: kā uzvedas T pret OE pa mēnešiem (un garākā periodā / rotējošajos 12 mēnešos), kurā brīdī uzkrājošais T pārsniedz OE (lūzuma punkts) un kāpēc atsevišķos mēnešos NP ir pozitīvs vai negatīvs.\n"
-        "   • **Ko nozīmē šādi attiecību un produktivitātes rādītāji (RATIO: `PR = T/OE`, `T% = T/S`, `Eiro Sales / Eiro algas`)**: kurās zonās tie atrodas, kāda ir tendence un ko tas nozīmē uzņēmuma kapacitātes atdevei.\n"
-        "   • **Kam pievērst uzmanību un ko modelēt tālāk**: kurus OE vai S/TVC lēmumus (pēc ΔT - ΔOE > 0 loģikas, bez pašizmaksas alokēšanas) vērts tūlīt pārbaudīt sadaļā Scenāriju simulācija."
-    )
+        if getattr(res, "reconciliation", None) is not None and not res.reconciliation.empty:
+            with st.expander("Kontrole: Salīdzinājums ar PZA"):
+                st.dataframe(res.reconciliation.style.format(fmt_num), use_container_width=True)
 
-    if regen_btn:
-        with st.spinner("THRUVIA eksperts analizē perioda rādītājus..."):
-            try:
-                r = get_client().messages.create(
-                    model=MODEL,
-                    max_tokens=2500,
-                    system=COMMENT_SYSTEM,
-                    messages=[{"role": "user", "content": f"Tabulas:\n\n{tables_md}\n\nUzraksti TOC eksperta secinājumus un ieteikumus šim periodam."}],
-                )
-                S.commentary = "".join(b.text for b in r.content if getattr(b, "type", "") == "text")
-                u_c = getattr(r, "usage", None)
-                tok_c = (getattr(u_c, "input_tokens", 800) + getattr(u_c, "output_tokens", 800)) if u_c else 1600
-                profile.log_api_usage(tok_c, tok_c * 0.000009)
-                if S.get("current_report_id") and not is_demo_mode:
-                    packed_c = pack_commentary_with_account_details(S.commentary, S.get("loaded_account_details"))
-                    profile.update_report_commentary(S.current_report_id, packed_c)
-                    st.toast("TOC eksperta ieteikumi saglabāti pie atskaites.")
+        st.markdown("---")
+        rec_c1, rec_c2 = st.columns([3, 1], vertical_alignment="center")
+        with rec_c1:
+            st.subheader(f"TOC eksperta secinājumi un ieteikumi ({len(fin_selected_months)} mēn. periodam)")
+        with rec_c2:
+            regen_btn = st.button("Pieprasīt eksperta ieteikumus", type="primary", use_container_width=True)
+
+        cum_df_md, _, _ = compute_cumulative_toc_df(view_res.amounts, fy_start_month=S.get("fy_start_month", 1))
+        tables_md = (
+            f"Izvēlētais periods: {', '.join(fin_selected_months)}\n\n"
+            + view_res.amounts.round(0).to_markdown()
+            + "\n\n"
+            + view_res.kpi.round(3).to_markdown()
+            + "\n\nUzkrājošie rādītāji:\n"
+            + cum_df_md.round(0).to_markdown()
+        )
+
+        knowledge_context = f"Papildu THRUVIA / TOC zināšanu bāze:\n{knowledge_file}\n\n" if knowledge_file else ""
+        COMMENT_SYSTEM = (
+            "Tu esi laipns, tiešs un pieredzējis THRUVIA (TOC Caurlaidības grāmatvedības / Throughput Accounting) finanšu eksperts.\n"
+            f"{TOC_CORE_EXPERT_KNOWLEDGE}\n"
+            f"{knowledge_context}"
+            "SVARĪGI NOTEIKUMI:\n"
+            "1) Nesauc tekstu par 'Vadības kopsavilkumu'. Raksti kā TOC eksperts, kurš vadības komandai vienkāršā, saprotamā valodā izstāsta, ko rāda šie skaitļi.\n"
+            "2) NEKAD neraksti par 'mārketinga efektivitāti' vai reklāmas atdevi, jo to no PZA nomērīt ir ļoti grūti un neobjektīvi.\n"
+            "3) Fokusējies uz trim lietām:\n"
+            "   • **Ko rāda Caurlaidības (T un T%), OE un NP skaitļi**: kā uzvedas T pret OE pa mēnešiem, kurā brīdī uzkrājošais T pārsniedz OE un kāpēc atsevišķos mēnešos NP ir pozitīvs vai negatīvs.\n"
+            "   • **Ko nozīmē attiecību un produktivitātes rādītāji (RATIO: `PR = T/OE`, `T% = T/S`, `Eiro Sales / Eiro algas`)**: kurās zonās tie atrodas un kāda ir tendence.\n"
+            "   • **Kam pievērst uzmanību un ko modelēt tālāk**: kurus OE vai S/TVC lēmumus (pēc ΔT - ΔOE > 0 loģikas) vērts pārbaudīt sadaļā Scenāriju simulācija."
+        )
+
+        if regen_btn:
+            with st.spinner("THRUVIA eksperts analizē perioda rādītājus..."):
+                try:
+                    r = get_client().messages.create(
+                        model=MODEL,
+                        max_tokens=2500,
+                        system=COMMENT_SYSTEM,
+                        messages=[{"role": "user", "content": f"Tabulas:\n\n{tables_md}\n\nUzraksti TOC eksperta secinājumus un ieteikumus šim periodam."}],
+                    )
+                    S.commentary = "".join(b.text for b in r.content if getattr(b, "type", "") == "text")
+                    u_c = getattr(r, "usage", None)
+                    tok_c = (getattr(u_c, "input_tokens", 800) + getattr(u_c, "output_tokens", 800)) if u_c else 1600
+                    profile.log_api_usage(tok_c, tok_c * 0.000009)
+                    if S.get("current_report_id") and not is_demo_mode:
+                        packed_c = pack_commentary_with_account_details(S.commentary, S.get("loaded_account_details"))
+                        profile.update_report_commentary(S.current_report_id, packed_c)
+                        st.toast("TOC eksperta ieteikumi saglabāti pie atskaites.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Neizdevās uzģenerēt ieteikumus: {e}")
+
+        if S.get("commentary"):
+            with st.container(border=True):
+                st.markdown(S.commentary)
+                st.caption(LEGAL_DISCLAIMER_SHORT)
+                if not is_demo_mode:
+                    with st.expander("Rediģēt vai papildināt TOC eksperta ieteikumus un saglabāt", expanded=False):
+                        edited_comm = st.text_area("Ieteikumu teksts", value=S.commentary, height=240)
+                        if st.button("Saglabāt ieteikumus atskaitē", type="primary"):
+                            S.commentary = edited_comm
+                            if S.get("current_report_id"):
+                                packed_c = pack_commentary_with_account_details(edited_comm, S.get("loaded_account_details"))
+                                profile.update_report_commentary(S.current_report_id, packed_c)
+                                if S.get("loaded_report_meta"):
+                                    S.loaded_report_meta["commentary"] = packed_c
+                                st.success("Ieteikumi saglabāti datubāzē.")
+                            else:
+                                st.toast("Ieteikumi atjaunināti sesijā.")
+                            st.rerun()
+        else:
+            st.caption("Nospiediet pogu **Pieprasīt eksperta ieteikumus**, lai saņemtu TOC diagnostiku par izvēlēto periodu.")
+
+    # ---- PALĪGFUNKCIJA: MODULIS 1 — VENTIĻU SISTĒMA (OE LIMITI) ----
+    def _render_valves_tab() -> None:
+        vh1, vh2 = st.columns([3.4, 1.1], vertical_alignment="center")
+        with vh1:
+            st.subheader(f"Ventiļu sistēma — OE tēriņu limiti ({len(fin_selected_months)} mēn.)")
+            st.caption("Nosakiet limitus (ventiļus) katrai OE izdevumu kategorijai. Katram mēnesim varat uzstādīt arī atšķirīgu limitu — visas izmaiņas saglabājas Izmaiņu vēsturē.")
+        with vh2:
+            if st.button("Skatīt izmaiņu vēsturi →", key="valves_to_audit", use_container_width=True):
+                S.nav_page = "audit_log"
                 st.rerun()
-            except Exception as e:
-                st.error(f"Neizdevās uzģenerēt ieteikumus: {e}")
 
-    if S.get("commentary"):
-        with st.container(border=True):
-            st.markdown(S.commentary)
-            st.caption(LEGAL_DISCLAIMER_SHORT)
-            if not is_demo_mode:
-                with st.expander("Rediģēt vai papildināt TOC eksperta ieteikumus un saglabāt", expanded=False):
-                    edited_comm = st.text_area("Ieteikumu teksts", value=S.commentary, height=240)
-                    if st.button("Saglabāt ieteikumus atskaitē", type="primary"):
-                        S.commentary = edited_comm
-                        if S.get("current_report_id"):
-                            packed_c = pack_commentary_with_account_details(edited_comm, S.get("loaded_account_details"))
-                            profile.update_report_commentary(S.current_report_id, packed_c)
-                            if S.get("loaded_report_meta"):
-                                S.loaded_report_meta["commentary"] = packed_c
-                            st.success("Ieteikumi saglabāti datubāzē.")
-                        else:
-                            st.toast("Ieteikumi atjaunināti sesijā.")
+        valves_cfg = ws_cfg.setdefault("valves", {})
+        v_sum = compute_valves_summary(res.amounts, res.row_kinds, fin_selected_months, valves_cfg)
+        oe_rows_list = [r for r in res.amounts.index if res.row_kinds.get(r) == "OE_CHILD"]
+
+        vk1, vk2, vk3, vk4 = st.columns(4)
+        vk1.metric("Kopējais OE limits", f"{fmt_num(v_sum['total_limit'])} €" if v_sum["configured_count"] > 0 else "Nav iestatīts")
+        vk2.metric("Faktiskie tēriņi (ar limitu)", f"{fmt_num(v_sum['total_fact_limited'])} €")
+        rem_tot = v_sum["total_remaining"]
+        vk3.metric(
+            "Atlikums / Pārtēriņš",
+            f"{rem_tot:+,.0f} €".replace(",", " ") if v_sum["configured_count"] > 0 else "—",
+            delta="Normā" if rem_tot >= 0 else "Pārtēriņš",
+            delta_color="normal" if rem_tot >= 0 else "inverse",
+        )
+        vk4.metric("Pārsniegtie ventiļi", f"{v_sum['exceeded_count']} / {v_sum['configured_count']}")
+
+        if v_sum["rows"]:
+            # Tīra kopsavilkuma HTML tabula ar skaidru statusa krāsojumu
+            v_html = [
+                '<div class="toc-table-wrap"><table class="toc-unified" style="width:100%; table-layout:auto;"><thead><tr>'
+                '<th class="th-lbl">OE izdevumu pozīcija</th>'
+                '<th class="th-kpi">Limits periodā (€)</th>'
+                '<th class="th-kpi">Fakts (€)</th>'
+                '<th class="th-kpi">Atlikums / Pārtēriņš (€)</th>'
+                '<th class="th-kpi">Izpilde (%)</th>'
+                '<th class="th-kpi">Statuss</th>'
+                '</tr></thead><tbody>'
+            ]
+            for vr in v_sum["rows"]:
+                st_txt = vr["Statuss"]
+                if st_txt == "Pārsniegts":
+                    row_st_bg = "#FADBD8"
+                elif st_txt == "Tuvojas limitam":
+                    row_st_bg = "#FCF3CF"
+                elif st_txt == "Normā":
+                    row_st_bg = "#D4EFDF"
+                else:
+                    row_st_bg = "#F8FAFC"
+
+                lim_s = fmt_num(vr["Limits (€)"]) if vr["has_limit"] else "—"
+                fact_s = fmt_num(vr["Fakts (€)"])
+                rem_s = (f"{vr['Atlikums / Pārtēriņš (€)']:+,.0f}".replace(",", " ")) if vr["has_limit"] else "—"
+                pct_s = f"{vr['Izpilde (%)']:.0f}%" if vr["has_limit"] else "—"
+
+                v_html.append(
+                    f'<tr style="background-color:#FFFFFF;">'
+                    f'<td class="lbl-main" style="background-color:#F8FAFC; font-weight:600;">{vr["OE pozīcija"]}</td>'
+                    f'<td class="kpi-col" style="background-color:#FFFFFF;">{lim_s}</td>'
+                    f'<td class="kpi-col" style="background-color:#FFFFFF; font-weight:600;">{fact_s}</td>'
+                    f'<td class="kpi-col" style="background-color:{row_st_bg}; font-weight:600;">{rem_s}</td>'
+                    f'<td class="kpi-col" style="background-color:{row_st_bg};">{pct_s}</td>'
+                    f'<td class="kpi-col" style="background-color:{row_st_bg}; text-align:center; font-weight:600;">{st_txt}</td>'
+                    f'</tr>'
+                )
+            v_html.append("</tbody></table></div>")
+            st.markdown("".join(v_html), unsafe_allow_html=True)
+
+        st.markdown("---")
+        with st.expander("Iestatīt vai mainīt OE limitus (pa mēnešiem vai bāzes limitu)", expanded=(v_sum["configured_count"] == 0)):
+            # 1. Ātrā bāzes limita uzlikšana visiem mēnešiem
+            st.markdown("**Ātrā iestatīšana — uzlikt vienādu mēneša limitu izvēlētajam OE postenim**")
+            qb1, qb2, qb3, qb4 = st.columns([2.0, 1.1, 1.3, 1.1], vertical_alignment="bottom")
+            with qb1:
+                q_oe_sel = st.selectbox("OE pozīcija", options=oe_rows_list, key="valve_quick_oe")
+            with qb2:
+                cur_def_v = float(valves_cfg.get(q_oe_sel, {}).get("__default__", 0.0) or 0.0)
+                q_lim_val = st.number_input("Mēneša limits (€)", min_value=0.0, value=cur_def_v, step=500.0, format="%.0f", key="valve_quick_eur")
+            with qb3:
+                q_scope = st.selectbox("Piemērot", options=["Visiem atskaites mēnešiem", "Tikai izvēlētajam periodam"], key="valve_quick_scope")
+            with qb4:
+                if st.button("Piemērot limitu", type="primary", use_container_width=True, key="valve_quick_apply"):
+                    target_ms = all_months if q_scope.startswith("Visiem") else fin_selected_months
+                    r_map = valves_cfg.setdefault(q_oe_sel, {})
+                    old_def = float(r_map.get("__default__", 0.0) or 0.0)
+                    r_map["__default__"] = float(q_lim_val)
+                    for m_k in target_ms:
+                        r_map[m_k] = float(q_lim_val)
+                    append_audit_event(
+                        profile,
+                        "Ventiļi",
+                        f"{q_oe_sel} ({q_scope})",
+                        f"{fmt_num(old_def)} €/mēn.",
+                        f"{fmt_num(q_lim_val)} €/mēn.",
+                        f"Piemērots {len(target_ms)} mēnešiem",
+                    )
+                    S["valve_ed_ver"] = S.get("valve_ed_ver", 0) + 1
+                    st.toast(f"Limits '{q_oe_sel}' atjaunināts uz {fmt_num(q_lim_val)} €/mēn.")
+                    st.rerun()
+
+            st.markdown("---")
+            st.markdown("**Precīzie limiti pa atsevišķiem mēnešiem (€)**")
+            st.caption("Katram mēnesim varat ievadīt atšķirīgu limitu (0 = nav limita). Pēc rediģēšanas spiediet Saglabāt mēneša limitus.")
+
+            mat_rows = []
+            for r_lbl in oe_rows_list:
+                r_map = valves_cfg.get(r_lbl, {})
+                def_v = float(r_map.get("__default__", 0.0) or 0.0)
+                row_d = {"OE pozīcija": r_lbl}
+                for m_c in fin_selected_months:
+                    row_d[m_c] = float(r_map.get(m_c, def_v) or 0.0)
+                mat_rows.append(row_d)
+
+            mat_df = pd.DataFrame(mat_rows)
+            col_cfg_v = {"OE pozīcija": st.column_config.TextColumn("OE pozīcija", width="medium")}
+            for m_c in fin_selected_months:
+                col_cfg_v[m_c] = st.column_config.NumberColumn(m_c, min_value=0.0, step=500.0, format="%.0f €", width="small")
+
+            ed_valves = st.data_editor(
+                mat_df,
+                hide_index=True,
+                use_container_width=True,
+                disabled=["OE pozīcija"],
+                column_config=col_cfg_v,
+                key=f"valves_matrix_ed_{S.get('valve_ed_ver', 0)}_{len(fin_selected_months)}",
+            )
+
+            vc_n1, vc_n2 = st.columns([2.4, 1.1], vertical_alignment="bottom")
+            with vc_n1:
+                valve_change_note = st.text_input("Izmaiņas iemesls / piezīme vēsturei (neobligāti)", placeholder="piem., Papildu budžets sezonas kampaņai", key="valve_chg_note")
+            with vc_n2:
+                if st.button("Saglabāt mēneša limitus", type="primary", use_container_width=True, key="save_valves_matrix_btn"):
+                    changes_cnt = 0
+                    for _, ed_r in ed_valves.iterrows():
+                        r_lbl = ed_r["OE pozīcija"]
+                        r_map = valves_cfg.setdefault(r_lbl, {})
+                        def_v = float(r_map.get("__default__", 0.0) or 0.0)
+                        for m_c in fin_selected_months:
+                            old_v = float(r_map.get(m_c, def_v) or 0.0)
+                            new_v = 0.0 if pd.isna(ed_r[m_c]) else float(ed_r[m_c])
+                            if abs(new_v - old_v) > 0.01:
+                                r_map[m_c] = new_v
+                                append_audit_event(
+                                    profile,
+                                    "Ventiļi",
+                                    f"{r_lbl} ({m_c})",
+                                    f"{fmt_num(old_v)} €",
+                                    f"{fmt_num(new_v)} €",
+                                    valve_change_note.strip(),
+                                    persist=False,
+                                )
+                                changes_cnt += 1
+                    if changes_cnt > 0:
+                        save_workspace_cfg(profile, ws_cfg)
+                        S["valve_ed_ver"] = S.get("valve_ed_ver", 0) + 1
+                        st.toast(f"Saglabātas {changes_cnt} limitu izmaiņas (ierakstītas vēsturē).")
                         st.rerun()
+                    else:
+                        st.info("Izmaiņas limitos netika konstatētas.")
+
+    # ---- PALĪGFUNKCIJA: MODULIS 2 — INVESTĪCIJAS (I — ĀRPUS OE) ----
+    def _render_investments_tab() -> None:
+        ih1, ih2 = st.columns([3.4, 1.1], vertical_alignment="center")
+        with ih1:
+            st.subheader(f"Investīcijas — TOC I ({len(fin_selected_months)} mēn.)")
+            st.caption(
+                "Pēc TOC Caurlaidības grāmatvedības investīcijas (iekārtas, attīstības projekti, CAPEX) tiek nodalītas atsevišķi no OE, "
+                "lai neizkropļotu ikmēneša peļņu (NP) un produktivitāti (PR = T/OE)."
+            )
+        with ih2:
+            if st.button("Skatīt izmaiņu vēsturi →", key="inv_to_audit", use_container_width=True):
+                S.nav_page = "audit_log"
+                st.rerun()
+
+        acc_snap_inv = S.get("loaded_account_details") or []
+        pza_inv_series, pza_inv_accounts = compute_pza_investments_by_month(acc_snap_inv, fin_selected_months)
+        manual_invs: list[dict] = ws_cfg.setdefault("investments", {}).setdefault("manual", [])
+
+        man_inv_series = pd.Series(0.0, index=fin_selected_months, dtype=float)
+        man_in_period = []
+        for mi in manual_invs:
+            m_m = str(mi.get("month") or "")
+            if not m_m or m_m in fin_selected_months:
+                man_in_period.append(mi)
+                if m_m in man_inv_series.index:
+                    man_inv_series[m_m] += float(mi.get("amount", 0.0) or 0.0)
+
+        pza_inv_tot = float(pza_inv_series.sum())
+        man_inv_tot = sum(float(x.get("amount", 0.0) or 0.0) for x in man_in_period)
+        tot_capex = pza_inv_tot + man_inv_tot
+
+        # Kopējais TOC I = Investīcijas + vidējā Noliktava (ja ieslēgta)
+        wh_avg_for_roi = 0.0
+        if active_modules.get("warehouse"):
+            wh_avg_for_roi = compute_warehouse_summary(res.amounts, fin_selected_months, ws_cfg.get("warehouse", {}))["avg_val"]
+        total_i_val = tot_capex + wh_avg_for_roi
+        period_np = float(res.amounts.loc["NP", fin_selected_months].astype(float).sum()) if "NP" in res.amounts.index else 0.0
+        toc_roi_pct = (period_np / total_i_val * 100.0) if total_i_val > 0 else np.nan
+
+        ik1, ik2, ik3, ik4 = st.columns(4)
+        ik1.metric("No PZA nodalītās investīcijas", f"{fmt_num(pza_inv_tot)} €")
+        ik2.metric("Manuālie ieguldījumi (CAPEX)", f"{fmt_num(man_inv_tot)} €")
+        ik3.metric("Kopējās investīcijas periodā", f"{fmt_num(tot_capex)} €")
+        roi_lbl = "TOC ROI = NP / (Inv. + Nolikt.)" if wh_avg_for_roi > 0 else "TOC ROI = NP / Investīcijas"
+        ik4.metric(roi_lbl, f"{toc_roi_pct:.1f}%" if not pd.isna(toc_roi_pct) else "—")
+
+        inv_c1, inv_c2 = st.columns([1.2, 1.3], vertical_alignment="top")
+
+        with inv_c1:
+            with st.container(border=True):
+                st.markdown("#### 1. No PZA atdalītie investīciju konti")
+                st.caption(
+                    "Ja jūsu PZA failā starp izmaksām ir attīstības vai iekārtu iegādes konti, pārvietojiet tos sadaļā "
+                    "**Kontu struktūra** uz grupu **Investīcijas (I — ārpus OE)**."
+                )
+                if not pza_inv_accounts:
+                    st.info("Pašlaik neviens PZA konts nav pārcelts uz Investīcijām.")
+                else:
+                    pza_inv_rows = [
+                        {
+                            "PZA konts": it["label"],
+                            "Kopā periodā (€)": round(sum(abs(float(it.get("months", {}).get(m, 0.0) or 0.0)) for m in fin_selected_months), 0),
+                        }
+                        for it in pza_inv_accounts
+                    ]
+                    st.dataframe(pd.DataFrame(pza_inv_rows), use_container_width=True, hide_index=True)
+
+                if st.button("Atvērt Kontu struktūru →", key="inv_open_acc_exp", use_container_width=True):
+                    S.nav_page = "accounts_explorer"
+                    st.rerun()
+
+        with inv_c2:
+            with st.container(border=True):
+                st.markdown("#### 2. Manuāli pievienotās investīcijas (ārpus PZA)")
+                st.caption("Pievienojiet pamatlīdzekļu, iekārtu vai projektu ieguldījumus, kas neparādās PZA.")
+                with st.form("add_manual_inv_form", clear_on_submit=True):
+                    mi_c1, mi_c2 = st.columns([1.5, 1.0])
+                    with mi_c1:
+                        mi_name = st.text_input("Investīcijas nosaukums *", placeholder="piem., Jauna ražošanas iekārta")
+                    with mi_c2:
+                        mi_month = st.selectbox("Periods / Mēnesis", options=fin_selected_months + ["Vispārējs (bez mēneša)"])
+                    mi_c3, mi_c4 = st.columns([1.0, 1.5])
+                    with mi_c3:
+                        mi_eur = st.number_input("Summa (€) *", min_value=0.0, step=1000.0, format="%.0f")
+                    with mi_c4:
+                        mi_note = st.text_input("Piezīme (neobligāti)", placeholder="piem., Līzinga pirmā iemaksa / CAPEX")
+                    if st.form_submit_button("Pievienot investīciju", type="primary", use_container_width=True):
+                        if not mi_name.strip() or mi_eur <= 0:
+                            st.error("Ievadiet nosaukumu un summu lielāku par 0 €.")
+                        else:
+                            m_save = "" if mi_month.startswith("Vispārējs") else mi_month
+                            new_item = {
+                                "id": f"inv_{int(now_riga().timestamp() * 1000)}",
+                                "name": mi_name.strip(),
+                                "month": m_save,
+                                "amount": float(mi_eur),
+                                "note": mi_note.strip(),
+                                "added_at": now_riga().strftime("%d.%m.%Y. %H:%M"),
+                            }
+                            manual_invs.insert(0, new_item)
+                            append_audit_event(
+                                profile,
+                                "Investīcijas",
+                                mi_name.strip(),
+                                "—",
+                                f"{fmt_num(mi_eur)} € ({m_save or 'vispārējs'})",
+                                mi_note.strip(),
+                                persist=False,
+                            )
+                            save_workspace_cfg(profile, ws_cfg)
+                            st.toast(f"Investīcija '{mi_name.strip()}' pievienota.")
+                            st.rerun()
+
+                if man_in_period:
+                    st.markdown("**Pievienotie ieraksti:**")
+                    for mi in man_in_period:
+                        mr1, mr2 = st.columns([3.2, 0.8], vertical_alignment="center")
+                        with mr1:
+                            m_tag = mi.get("month") or "Vispārējs"
+                            note_t = f" — {mi['note']}" if mi.get("note") else ""
+                            st.markdown(f"**{mi['name']}** · `{m_tag}` · **{fmt_num(mi['amount'])} €**{note_t}")
+                        with mr2:
+                            if st.button("Dzēst", key=f"del_inv_{mi['id']}", use_container_width=True):
+                                ws_cfg["investments"]["manual"] = [x for x in manual_invs if x.get("id") != mi["id"]]
+                                append_audit_event(
+                                    profile,
+                                    "Investīcijas",
+                                    mi["name"],
+                                    f"{fmt_num(mi['amount'])} €",
+                                    "Dzēsts",
+                                    persist=False,
+                                )
+                                save_workspace_cfg(profile, ws_cfg)
+                                st.rerun()
+
+        # Mēnešu dinamikas grafiks, ja ir investīcijas pa mēnešiem
+        tot_inv_series = pza_inv_series + man_inv_series
+        if float(tot_inv_series.sum()) > 0:
+            st.markdown("---")
+            st.markdown("#### Investīciju sadalījums pa mēnešiem (€)")
+            inv_chart_df = pd.DataFrame(
+                {
+                    "Periods": fin_selected_months,
+                    "No PZA (€)": [round(float(pza_inv_series[m]), 0) for m in fin_selected_months],
+                    "Manuālās (€)": [round(float(man_inv_series[m]), 0) for m in fin_selected_months],
+                }
+            ).melt(id_vars=["Periods"], var_name="Avots", value_name="Summa (€)")
+            ch_inv = alt.Chart(inv_chart_df).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
+                x=alt.X("Periods:N", sort=fin_selected_months, title=None),
+                y=alt.Y("Summa (€):Q", title="Summa (€)"),
+                color=alt.Color("Avots:N", scale=alt.Scale(domain=["No PZA (€)", "Manuālās (€)"], range=["#3B82F6", "#0F172A"])),
+                tooltip=["Periods:N", "Avots:N", alt.Tooltip("Summa (€):Q", format=",.0f")],
+            ).properties(height=280)
+            st.altair_chart(ch_inv, use_container_width=True)
+
+    # ---- PALĪGFUNKCIJA: MODULIS 3 — NOLIKTAVAS ATLIKUMI (I — AR ATĶEKSĒJAMĀM KATEGORIJĀM) ----
+    def _render_warehouse_tab() -> None:
+        wh1, wh2 = st.columns([3.4, 1.1], vertical_alignment="center")
+        with wh1:
+            st.subheader(f"Noliktavas atlikumi — TOC I ({len(fin_selected_months)} mēn.)")
+            st.caption("Sekojiet krājumu atlikumiem (TVC / iepirkuma vērtībā) pa mēnešiem. Atzīmējiet tikai tās kategorijas, kuras vēlaties aizpildīt.")
+        with wh2:
+            if st.button("Skatīt izmaiņu vēsturi →", key="wh_to_audit", use_container_width=True):
+                S.nav_page = "audit_log"
+                st.rerun()
+
+        wh_cfg = ws_cfg.setdefault("warehouse", {"categories": {"raw": True, "wip": False, "finished": True}, "values": {}})
+        cats_map = wh_cfg.setdefault("categories", {"raw": True, "wip": False, "finished": True})
+        vals_map = wh_cfg.setdefault("values", {})
+
+        # Kategoriju izvēle ar ķeksīšiem + ātrās pogas "Atzīmēt visus" / "Noņemt visus"
+        with st.container(border=True):
+            st.markdown("**Izvēlieties noliktavas kategorijas, kurām sekot līdzi:**")
+            chk_cols = st.columns([1.2, 1.3, 1.3, 0.85, 0.85], vertical_alignment="center")
+            cat_changed = False
+            for idx_c, (ck, clbl) in enumerate(WAREHOUSE_CATEGORIES):
+                old_c = bool(cats_map.get(ck, False))
+                new_c = chk_cols[idx_c].checkbox(clbl, value=old_c, key=f"wh_cat_chk_{ck}")
+                if new_c != old_c:
+                    cats_map[ck] = new_c
+                    append_audit_event(
+                        profile,
+                        "Noliktava",
+                        f"Kategorija: {clbl}",
+                        "Ieslēgta" if old_c else "Izslēgta",
+                        "Ieslēgta" if new_c else "Izslēgta",
+                        persist=False,
+                    )
+                    cat_changed = True
+
+            with chk_cols[3]:
+                if st.button("Atzīmēt visus", use_container_width=True, key="wh_sel_all"):
+                    for ck, _ in WAREHOUSE_CATEGORIES:
+                        cats_map[ck] = True
+                    append_audit_event(profile, "Noliktava", "Kategoriju izvēle", "Daļēja", "Visas kategorijas", persist=False)
+                    save_workspace_cfg(profile, ws_cfg)
+                    st.rerun()
+            with chk_cols[4]:
+                if st.button("Noņemt visus", use_container_width=True, key="wh_clr_all"):
+                    for ck, _ in WAREHOUSE_CATEGORIES:
+                        cats_map[ck] = False
+                    append_audit_event(profile, "Noliktava", "Kategoriju izvēle", "Aktīvas", "Neviena nav atzīmēta", persist=False)
+                    save_workspace_cfg(profile, ws_cfg)
+                    st.rerun()
+
+            if cat_changed:
+                save_workspace_cfg(profile, ws_cfg)
+                st.rerun()
+
+        wh_sum = compute_warehouse_summary(res.amounts, fin_selected_months, wh_cfg)
+        active_cats = wh_sum["active_cats"]
+
+        # Ja nav atzīmēta neviena kategorija -> nekas nerādās!
+        if not active_cats:
+            st.info("Nav atzīmēta neviena noliktavas kategorija. Atzīmējiet vismaz vienu kategoriju augstāk, lai parādītos ievades tabula.")
+            return
+
+        wk1, wk2, wk3, wk4 = st.columns(4)
+        wk1.metric(
+            f"Atlikums ({fin_selected_months[-1]})",
+            f"{fmt_num(wh_sum['last_val'])} €",
+            delta=f"{wh_sum['delta_last']:+,.0f} €".replace(",", " "),
+            delta_color="inverse",
+        )
+        wk2.metric("Vidējais atlikums periodā", f"{fmt_num(wh_sum['avg_val'])} €")
+        wk3.metric("Krājumu dienas (pret TVC)", f"{wh_sum['inv_days']:.0f} d." if not pd.isna(wh_sum["inv_days"]) else "—")
+        wk4.metric("Aktīvās kategorijas", f"{len(active_cats)} / {len(WAREHOUSE_CATEGORIES)}")
+
+        # Ievades tabula TIKAI atzīmētajām kategorijām
+        st.markdown("#### Noliktavas atlikumu ievade pa mēnešiem (€, TVC vērtībā)")
+        wh_rows = []
+        for ck, clbl in active_cats:
+            c_vals = vals_map.get(ck, {}) or {}
+            row_d = {"Kategorija": clbl, "_key": ck}
+            for m_c in fin_selected_months:
+                row_d[m_c] = float(c_vals.get(m_c, 0.0) or 0.0)
+            wh_rows.append(row_d)
+
+        wh_df_in = pd.DataFrame(wh_rows)
+        col_cfg_w = {
+            "_key": None,
+            "Kategorija": st.column_config.TextColumn("Noliktavas kategorija", width="medium"),
+        }
+        for m_c in fin_selected_months:
+            col_cfg_w[m_c] = st.column_config.NumberColumn(m_c, min_value=0.0, step=500.0, format="%.0f €", width="small")
+
+        ed_wh = st.data_editor(
+            wh_df_in,
+            hide_index=True,
+            use_container_width=True,
+            disabled=["Kategorija", "_key"],
+            column_config=col_cfg_w,
+            key=f"wh_matrix_ed_{S.get('wh_ed_ver', 0)}_{len(active_cats)}_{len(fin_selected_months)}",
+        )
+
+        wn1, wn2 = st.columns([2.4, 1.1], vertical_alignment="bottom")
+        with wn1:
+            wh_note = st.text_input("Piezīme vēsturei (neobligāti)", placeholder="piem., Inventarizācijas dati", key="wh_chg_note")
+        with wn2:
+            if st.button("Saglabāt noliktavas atlikumus", type="primary", use_container_width=True, key="save_wh_btn"):
+                wh_changes = 0
+                for _, ed_r in ed_wh.iterrows():
+                    ck = ed_r["_key"]
+                    clbl = ed_r["Kategorija"]
+                    c_map = vals_map.setdefault(ck, {})
+                    for m_c in fin_selected_months:
+                        old_v = float(c_map.get(m_c, 0.0) or 0.0)
+                        new_v = 0.0 if pd.isna(ed_r[m_c]) else float(ed_r[m_c])
+                        if abs(new_v - old_v) > 0.01:
+                            c_map[m_c] = new_v
+                            append_audit_event(
+                                profile,
+                                "Noliktava",
+                                f"{clbl} ({m_c})",
+                                f"{fmt_num(old_v)} €",
+                                f"{fmt_num(new_v)} €",
+                                wh_note.strip(),
+                                persist=False,
+                            )
+                            wh_changes += 1
+                if wh_changes > 0:
+                    save_workspace_cfg(profile, ws_cfg)
+                    S["wh_ed_ver"] = S.get("wh_ed_ver", 0) + 1
+                    st.toast(f"Saglabātas {wh_changes} noliktavas atlikumu izmaiņas.")
+                    st.rerun()
+                else:
+                    st.info("Izmaiņas atlikumos netika konstatētas.")
+
+        # Kopsummas rinda un dinamikas grafiks
+        if float(wh_sum["totals"].sum()) > 0:
+            tot_row_disp = {m_c: fmt_num(wh_sum["totals"][m_c]) for m_c in fin_selected_months}
+            tot_row_disp["Vidēji (€)"] = fmt_num(wh_sum["avg_val"])
+            st.caption("Kopējais noliktavas atlikums pa mēnešiem (€):")
+            st.dataframe(pd.DataFrame([tot_row_disp]), use_container_width=True, hide_index=True)
+
+            chart_records = []
+            for m_c in fin_selected_months:
+                chart_records.append({"Periods": m_c, "Kategorija": "KOPĀ", "Summa (€)": round(float(wh_sum["totals"][m_c]), 0)})
+                if len(active_cats) > 1:
+                    for ck, clbl in active_cats:
+                        chart_records.append({"Periods": m_c, "Kategorija": clbl, "Summa (€)": round(float(wh_sum["cat_series"][ck][m_c]), 0)})
+            wh_ch_df = pd.DataFrame(chart_records)
+            ch_wh = alt.Chart(wh_ch_df).mark_line(strokeWidth=2.8, point=True).encode(
+                x=alt.X("Periods:N", sort=fin_selected_months, title=None),
+                y=alt.Y("Summa (€):Q", title="Atlikums (€)"),
+                color=alt.Color("Kategorija:N", legend=alt.Legend(title=None, orient="bottom")),
+                tooltip=["Periods:N", "Kategorija:N", alt.Tooltip("Summa (€):Q", format=",.0f")],
+            ).properties(height=300)
+            st.altair_chart(ch_wh, use_container_width=True)
+
+    # Ja ieslēgts vismaz viens papildmodulis, rādām skaidras apakšcilnes Pārskatā
+    enabled_tabs = [("main", "Galvenais pārskats")]
+    if active_modules.get("valves"):
+        v_check = compute_valves_summary(res.amounts, res.row_kinds, fin_selected_months, ws_cfg.get("valves", {}))
+        v_tab_lbl = f"Ventiļi (OE limiti · {v_check['exceeded_count']} pārsn.)" if v_check["exceeded_count"] > 0 else "Ventiļi (OE limiti)"
+        enabled_tabs.append(("valves", v_tab_lbl))
+    if active_modules.get("investments"):
+        enabled_tabs.append(("investments", "Investīcijas (I)"))
+    if active_modules.get("warehouse"):
+        enabled_tabs.append(("warehouse", "Noliktavas atlikumi (I)"))
+
+    if len(enabled_tabs) == 1:
+        _render_main_overview_body()
     else:
-        st.caption("Nospiediet pogu **Pieprasīt eksperta ieteikumus**, lai saņemtu TOC diagnostiku par izvēlēto periodu.")
+        tab_objs = st.tabs([lbl for _, lbl in enabled_tabs])
+        for tab_obj, (t_code, _) in zip(tab_objs, enabled_tabs):
+            with tab_obj:
+                if t_code == "main":
+                    _render_main_overview_body()
+                elif t_code == "valves":
+                    _render_valves_tab()
+                elif t_code == "investments":
+                    _render_investments_tab()
+                elif t_code == "warehouse":
+                    _render_warehouse_tab()
 
 
 # ==============================================================================
@@ -5441,6 +6382,7 @@ elif S.nav_page == "simulation":
             show_cumulative=False,
             lbl_width_px=360,
             sections=("main", "kpi"),
+            sync_scroll=False,
         ),
         unsafe_allow_html=True,
     )
@@ -5489,7 +6431,7 @@ elif S.nav_page == "simulation":
 
 
 # ==============================================================================
-# POSMS 3: KONTU STRUKTŪRA
+# POSMS 3: KONTU STRUKTŪRA (AR INVESTĪCIJU ATDALĪŠANU ĀRPUS OE)
 # ==============================================================================
 elif S.nav_page == "accounts_explorer":
     render_inline_tutorial_card("accounts")
@@ -5552,8 +6494,12 @@ elif S.nav_page == "accounts_explorer":
             for m in saved_maps
         ]
 
-    existing_sub_labels = [lbl for k, lbl in SUBGROUP_LABELS.items() if k != "EXCLUDED"]
-    mc_badge_lbl = {"S": "[S]", "TVC": "[TVC]", "OE": "[OE]", "EXCL": "[Neiekļ.]"}
+    has_any_inv_acc = any(get_main_code(it.get("group", "")) == "INV" for it in all_acc_items)
+    show_inv_group = bool(active_modules.get("investments", False) or has_any_inv_acc)
+
+    existing_sub_labels = [lbl for k, lbl in SUBGROUP_LABELS.items() if k not in ("EXCLUDED", "INV_CAPEX")]
+    dest_sub_options = list(existing_sub_labels) + ([INVESTMENT_LABEL] if show_inv_group else []) + [EXCLUDED_LABEL]
+    mc_badge_lbl = {"S": "[S]", "TVC": "[TVC]", "OE": "[OE]", "INV": "[I]", "EXCL": "[Neiekļ.]"}
 
     def _format_account_option_clean(it: dict) -> str:
         gk = normalize_group_key(it.get("group", "OE_OTHER"))
@@ -5605,7 +6551,7 @@ elif S.nav_page == "accounts_explorer":
             with mv_f3:
                 dest_sub_sel = st.selectbox(
                     "3. Uz kuru apakšgrupu pārlikt",
-                    options=existing_sub_labels + [EXCLUDED_LABEL],
+                    options=dest_sub_options,
                     key="mgr_mv_dest",
                 )
             with mv_f4:
@@ -5690,8 +6636,10 @@ elif S.nav_page == "accounts_explorer":
         ("S", "S — Ieņēmumi (Sales)", "#FFF200", "#0F172A"),
         ("TVC", "TVC — Patiesi mainīgās izmaksas", "#C55A11", "#FFFFFF"),
         ("OE", "Uzturēšanas izmaksas (OE)", "#F4B183", "#0F172A"),
-        ("EXCL", EXCLUDED_LABEL, "#E2E8F0", "#0F172A"),
     ]
+    if show_inv_group:
+        main_sections.append(("INV", INVESTMENT_LABEL, "#DBEAFE", "#1E3A8A"))
+    main_sections.append(("EXCL", EXCLUDED_LABEL, "#E2E8F0", "#0F172A"))
 
     for m_code, m_title, bg_hex, fg_hex in main_sections:
         grp_keys_for_main = [k for k, (_, mc) in GROUPS.items() if mc == m_code]
@@ -5749,7 +6697,7 @@ elif S.nav_page == "accounts_explorer":
                                 f"**Pašreizējā apakšgrupa:** **{sub_lbl}**"
                             )
                         with inf_c2:
-                            all_sub_opts = existing_sub_labels + [EXCLUDED_LABEL]
+                            all_sub_opts = list(dest_sub_options)
                             if sub_lbl not in all_sub_opts:
                                 all_sub_opts.append(sub_lbl)
 
@@ -6106,6 +7054,9 @@ elif S.nav_page == "ingest":
     if "Displeja_konts" not in cls_df.columns:
         cls_df["Displeja_konts"] = cls_df["id"].map(lambda x: display_labels.get(x, ""))
 
+    include_inv_cls = bool(active_modules.get("investments", False) or (cls_df["Grupa"] == "INV_CAPEX").any())
+    active_main_opts = get_active_main_group_options(include_inv_cls)
+
     ambiguous_rows = cls_df[cls_df["Jautājums"].astype(str).str.strip() != ""]
 
     if len(ambiguous_rows) > 0 and not S.get("clarifications_done", False):
@@ -6149,6 +7100,8 @@ elif S.nav_page == "ingest":
                         "S": MAIN_GROUP_OPTIONS[0],
                         "EXCL": MAIN_GROUP_OPTIONS[3],
                     }
+                    if include_inv_cls:
+                        main_opts_map["INV"] = INVESTMENT_MAIN_OPTION
                     rev_main_map = {v: k for k, v in main_opts_map.items()}
                     m_list = list(main_opts_map.values())
                     sel_m_lbl = st.selectbox(
@@ -6202,18 +7155,28 @@ elif S.nav_page == "ingest":
                     st.toast(f"Apakšgrupa '{clean_lbl}' pievienota.")
                     st.rerun()
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("S (Ieņēmumi)", fmt_acc_count_lv(int(cls_df["Grupa"].str.startswith("S_").sum())))
-    c2.metric("TVC (Mainīgās)", fmt_acc_count_lv(int(cls_df["Grupa"].str.startswith("TVC").sum())))
-    c3.metric("Uzturēšanas izmaksas", fmt_acc_count_lv(int(cls_df["Grupa"].str.startswith("OE_").sum())))
-    c4.metric("Neiekļautie", fmt_acc_count_lv(int((cls_df["Grupa"] == "EXCLUDED").sum())))
+    if include_inv_cls:
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("S (Ieņēmumi)", fmt_acc_count_lv(int(cls_df["Grupa"].str.startswith("S_").sum())))
+        c2.metric("TVC (Mainīgās)", fmt_acc_count_lv(int(cls_df["Grupa"].str.startswith("TVC").sum())))
+        c3.metric("Uzturēšanas izmaksas", fmt_acc_count_lv(int(cls_df["Grupa"].str.startswith("OE_").sum())))
+        c4.metric("Investīcijas (I)", fmt_acc_count_lv(int((cls_df["Grupa"] == "INV_CAPEX").sum())))
+        c5.metric("Neiekļautie", fmt_acc_count_lv(int((cls_df["Grupa"] == "EXCLUDED").sum())))
+    else:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("S (Ieņēmumi)", fmt_acc_count_lv(int(cls_df["Grupa"].str.startswith("S_").sum())))
+        c2.metric("TVC (Mainīgās)", fmt_acc_count_lv(int(cls_df["Grupa"].str.startswith("TVC").sum())))
+        c3.metric("Uzturēšanas izmaksas", fmt_acc_count_lv(int(cls_df["Grupa"].str.startswith("OE_").sum())))
+        c4.metric("Neiekļautie", fmt_acc_count_lv(int((cls_df["Grupa"] == "EXCLUDED").sum())))
 
     cat_sections = [
         ("S", "S (Ieņēmumi)", MAIN_GROUP_OPTIONS[0]),
         ("TVC", "TVC (Mainīgās izmaksas)", MAIN_GROUP_OPTIONS[1]),
         ("OE", "Uzturēšanas izmaksas (OE)", MAIN_GROUP_OPTIONS[2]),
-        ("EXCL", EXCLUDED_LABEL, MAIN_GROUP_OPTIONS[3]),
     ]
+    if include_inv_cls:
+        cat_sections.append(("INV", INVESTMENT_LABEL, INVESTMENT_MAIN_OPTION))
+    cat_sections.append(("EXCL", EXCLUDED_LABEL, MAIN_GROUP_OPTIONS[3]))
 
     changed_any = False
     new_groups_map: dict[str, str] = {}
@@ -6251,7 +7214,7 @@ elif S.nav_page == "ingest":
             column_config={
                 "id": None,
                 "Konts": st.column_config.TextColumn("Konta nosaukums", width="large"),
-                "Lielā grupa": st.column_config.SelectboxColumn("Lielā grupa", options=MAIN_GROUP_OPTIONS, required=True, width="medium"),
+                "Lielā grupa": st.column_config.SelectboxColumn("Lielā grupa", options=active_main_opts, required=True, width="medium"),
                 "Apakšgrupa": st.column_config.SelectboxColumn(
                     f"Apakšgrupa ({sec_title})",
                     options=allowed_subs_sec,
@@ -6270,11 +7233,16 @@ elif S.nav_page == "ingest":
             new_sub_s = ed_sec.iloc[idx_s]["Apakšgrupa"]
 
             if new_m_s != m_cat_str:
-                target_mc = (
-                    "S" if new_m_s.startswith("S")
-                    else ("TVC" if new_m_s.startswith("TVC")
-                          else ("EXCL" if (new_m_s.startswith("Izslēgt") or new_m_s.startswith("Neiekļaut")) else "OE"))
-                )
+                if new_m_s.startswith("S"):
+                    target_mc = "S"
+                elif new_m_s.startswith("TVC"):
+                    target_mc = "TVC"
+                elif new_m_s.startswith("Investīcijas"):
+                    target_mc = "INV"
+                elif new_m_s.startswith("Izslēgt") or new_m_s.startswith("Neiekļaut"):
+                    target_mc = "EXCL"
+                else:
+                    target_mc = "OE"
                 new_groups_map[rid_s] = MAIN_GROUP_TO_DEFAULT_SUB.get(target_mc, "OE_OTHER")
                 changed_any = True
             elif new_sub_s != old_sub_s and new_sub_s in LABEL_TO_KEY:
@@ -6348,6 +7316,13 @@ elif S.nav_page == "ingest":
                 commentary=packed_init_comm,
             )
             profile.log_api_usage(0, 0.0)
+            append_audit_event(
+                profile,
+                "PZA atskaite",
+                report_custom_name.strip() or default_rep_name,
+                "—",
+                f"Ielasīts ({len(an.leaves)} konti, {len(an.ex.period_cols)} periodi)",
+            )
             if not S.get("is_admin", False):
                 update_company_onboarding_status(admin_store, S.active_profile, mark_activity=True)
             S.current_report_id = rep_id
@@ -6480,6 +7455,70 @@ elif S.nav_page == "settings":
 
     with st.expander("Juridiskie noteikumi, Privātuma politika (VDAR) un Atbildības ierobežojums"):
         render_legal_documents_tabs()
+
+
+# ==============================================================================
+# POSMS 8: IZMAIŅU VĒSTURE (ATSEVIŠĶA LAPA — KAS, KAD UN KO MAINĪJA)
+# ==============================================================================
+elif S.nav_page == "audit_log":
+    ah1, ah2 = st.columns([3.8, 1.0], vertical_alignment="center")
+    with ah1:
+        st.subheader(f"Izmaiņu vēsture ({S.active_profile})")
+        st.caption("Pārskatāms žurnāls par visām veiktajām izmaiņām Ventiļu limitos, Noliktavas atlikumos, Investīcijās, Kontu struktūrā un Moduļu iestatījumos.")
+    with ah2:
+        if st.button("← Atpakaļ uz Pārskatu", use_container_width=True, key="audit_back_ov"):
+            S.nav_page = "overview"
+            st.rerun()
+
+    audit_entries: list[dict] = ws_cfg.get("audit_log", []) or []
+
+    if not audit_entries:
+        st.info("Izmaiņu vēsture pašlaik ir tukša. Visas izmaiņas Ventiļu limitos, Noliktavas atlikumos, Investīcijās vai Kontu struktūrā tiks automātiski fiksētas šeit.")
+    else:
+        all_secs = sorted({str(e.get("section") or "Cits") for e in audit_entries})
+        af1, af2, af3 = st.columns([1.3, 1.8, 0.9], vertical_alignment="bottom")
+        with af1:
+            sel_sec_f = st.selectbox("Filtrs pēc sadaļas", options=["Visas sadaļas"] + all_secs, key="aud_sec_filter")
+        with af2:
+            aud_search = st.text_input("Meklēt vēsturē", placeholder="Pozīcija, lietotājs, mēnesis vai piezīme...", key="aud_search_in")
+
+        filtered_aud = []
+        for e in audit_entries:
+            if sel_sec_f != "Visas sadaļas" and str(e.get("section") or "") != sel_sec_f:
+                continue
+            if aud_search.strip():
+                q_l = aud_search.strip().lower()
+                hay = f"{e.get('ts','')} {e.get('actor','')} {e.get('section','')} {e.get('item','')} {e.get('old','')} {e.get('new','')} {e.get('note','')}".lower()
+                if q_l not in hay:
+                    continue
+            filtered_aud.append(e)
+
+        if not filtered_aud:
+            st.info("Nav ierakstu, kas atbilst izvēlētajam filtram.")
+        else:
+            aud_df = pd.DataFrame(
+                [
+                    {
+                        "Datums un laiks": e.get("ts", "—"),
+                        "Kas mainīja": e.get("actor", "—"),
+                        "Sadaļa": e.get("section", "—"),
+                        "Pozīcija / Objekts": e.get("item", "—"),
+                        "Iepriekšējā vērtība": e.get("old", "—"),
+                        "Jaunā vērtība": e.get("new", "—"),
+                        "Piezīme": e.get("note", ""),
+                    }
+                    for e in filtered_aud
+                ]
+            )
+            with af3:
+                st.download_button(
+                    "CSV eksports",
+                    aud_df.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"THRUVIA_izmainu_vesture_{date.today().isoformat()}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+            st.dataframe(aud_df, use_container_width=True, hide_index=True)
 
 
 # ------------------------------------------------------------------ JURIDISKĀ KĀJENE VISĀS LAPĀS
